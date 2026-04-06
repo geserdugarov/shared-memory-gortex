@@ -34,7 +34,7 @@ func Generate(engine *query.Engine, _ int) string {
 				langParts = append(langParts, l)
 			}
 		}
-		b.WriteString(fmt.Sprintf("- **Languages:** %s\n", strings.Join(langParts, ", ")))
+		fmt.Fprintf(&b, "- **Languages:** %s\n", strings.Join(langParts, ", "))
 	}
 
 	// Entry points (main functions).
@@ -44,7 +44,7 @@ func Generate(engine *query.Engine, _ int) string {
 		for _, ep := range entryPoints {
 			paths = append(paths, fmt.Sprintf("`%s`", ep.FilePath))
 		}
-		b.WriteString(fmt.Sprintf("- **Entry points:** %s\n", strings.Join(paths, ", ")))
+		fmt.Fprintf(&b, "- **Entry points:** %s\n", strings.Join(paths, ", "))
 	}
 
 	// Key symbols (most referenced).
@@ -54,10 +54,10 @@ func Generate(engine *query.Engine, _ int) string {
 		for _, s := range topSymbols {
 			parts = append(parts, fmt.Sprintf("`%s` (%d usages)", s.name, s.count))
 		}
-		b.WriteString(fmt.Sprintf("- **Most-referenced symbols:** %s\n", strings.Join(parts, ", ")))
+		fmt.Fprintf(&b, "- **Most-referenced symbols:** %s\n", strings.Join(parts, ", "))
 	}
 
-	b.WriteString(fmt.Sprintf("- **Graph size:** %d nodes, %d edges\n", stats.TotalNodes, stats.TotalEdges))
+	fmt.Fprintf(&b, "- **Graph size:** %d nodes, %d edges\n", stats.TotalNodes, stats.TotalEdges)
 
 	// Kind breakdown.
 	if len(stats.ByKind) > 0 {
@@ -65,7 +65,7 @@ func Generate(engine *query.Engine, _ int) string {
 		for _, k := range sortedKeys(stats.ByKind) {
 			parts = append(parts, fmt.Sprintf("%d %ss", stats.ByKind[k], k))
 		}
-		b.WriteString(fmt.Sprintf("- **Breakdown:** %s\n", strings.Join(parts, ", ")))
+		fmt.Fprintf(&b, "- **Breakdown:** %s\n", strings.Join(parts, ", "))
 	}
 
 	b.WriteString("\n## Working with this codebase (Gortex tools available)\n\n")

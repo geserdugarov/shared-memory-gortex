@@ -28,7 +28,7 @@ var queryCmd = &cobra.Command{
 func init() {
 	queryCmd.PersistentFlags().StringVar(&queryIndex, "index", ".", "repository path to index")
 	queryCmd.PersistentFlags().IntVar(&queryDepth, "depth", 3, "traversal depth")
-	queryCmd.PersistentFlags().StringVar(&queryFormat, "format", "text", "output format: text|json")
+	queryCmd.PersistentFlags().StringVar(&queryFormat, "format", "text", "output format: text|json|dot")
 	queryCmd.PersistentFlags().IntVar(&queryLimit, "limit", 50, "max nodes in result")
 
 	queryCmd.AddCommand(querySymbolCmd)
@@ -68,6 +68,13 @@ func printResult(cmd *cobra.Command, v any) error {
 		enc := json.NewEncoder(cmd.OutOrStdout())
 		enc.SetIndent("", "  ")
 		return enc.Encode(v)
+	}
+	if queryFormat == "dot" {
+		if sg, ok := v.(*query.SubGraph); ok {
+			fmt.Fprint(cmd.OutOrStdout(), sg.ToDot())
+			return nil
+		}
+		return fmt.Errorf("--format dot is only supported for graph traversal queries (deps, dependents, callers, calls, usages, cluster)")
 	}
 	// Text format.
 	switch val := v.(type) {

@@ -254,7 +254,10 @@ func (s *Server) handleFindImplementations(_ context.Context, req mcp.CallToolRe
 	for _, n := range impls {
 		results = append(results, n.Brief())
 	}
-	return mcp.NewToolResultJSON(results)
+	return mcp.NewToolResultJSON(map[string]any{
+		"implementations": results,
+		"total":           len(results),
+	})
 }
 
 func (s *Server) handleFindUsages(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {

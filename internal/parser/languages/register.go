@@ -16,4 +16,5 @@ func RegisterAll(reg *parser.Registry) {
 	reg.Register(NewCppExtractor())
 	reg.Register(NewHTMLExtractor())
 	reg.Register(NewCSSExtractor())
+	reg.Register(NewSQLExtractor())
 }

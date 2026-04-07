@@ -1,11 +1,12 @@
 {
   "mcpServers": {
     "gortex": {
-      "command": "gortex",
+      "command": "./gortex",
       "args": [
         "serve",
         "--index", ".",
-        "--watch"
+        "--watch",
+        "--web"
       ],
       "env": {
         "GORTEX_INDEX_WORKERS": "${GORTEX_WORKERS:-8}"

@@ -11,8 +11,9 @@ Built for AI coding agents (Claude Code, Cursor, Codex) — one `smart_context` 
 
 - **Knowledge graph** — every file, symbol, import, call chain, and type relationship in one queryable structure
 - **25 languages** — Go, TypeScript, JavaScript, Python, Rust, Java, C#, Kotlin, Swift, Scala, PHP, Ruby, Elixir, C, C++, Bash, SQL, Protobuf, Markdown, HTML, CSS, YAML, TOML, HCL, Dockerfile
-- **28 MCP tools** — symbol lookup, call chains, blast radius, community detection, process discovery, and 6 agent-optimized tools
+- **40 MCP tools** — symbol lookup, call chains, blast radius, community detection, process discovery, contract verification, cycle detection, dead code analysis, scaffolding, and 6 agent-optimized tools
 - **6 MCP resources** — lightweight graph context without tool calls
+- **Guard rules** — project-specific constraints (co-change, boundary) enforced via `check_guards`
 - **Watch mode** — surgical graph updates on file change, live sync with agents
 - **Web UI** — Sigma.js force-directed visualization with node size proportional to importance
 - **IMPLEMENTS inference** — structural interface satisfaction for Go, TypeScript, Java, Rust, C#, Scala, Swift, Protobuf
@@ -52,7 +53,7 @@ After running `gortex init`, Claude Code automatically starts Gortex via `.mcp.j
 
 `gortex init` also sets up Kiro IDE integration automatically:
 
-- **MCP server:** `.kiro/settings/mcp.json` — all 28 tools auto-approved for zero-friction use
+- **MCP server:** `.kiro/settings/mcp.json` — all 40 tools auto-approved for zero-friction use
 - **Steering files:** `.kiro/steering/gortex-workflow.md` (always active) teaches Kiro to prefer graph queries over file reads. Additional manual steering files for explore, debug, impact, and refactor workflows are available via `#` in chat.
 - **Agent hooks:**
   - `gortex-smart-context` — on each prompt, assembles task-relevant context from the graph in one call
@@ -87,7 +88,7 @@ gortex query stats                      Show graph statistics
 
 All query commands support `--format text|json|dot` (DOT output for Graphviz visualization).
 
-## MCP Tools (28)
+## MCP Tools (40)
 
 ### Core Navigation
 | Tool | Description |
@@ -136,6 +137,30 @@ All query commands support `--format text|json|dot` (DOT output for Graphviz vis
 | `get_process` | Step-by-step trace of an execution flow |
 | `detect_changes` | Git diff mapped to affected symbols |
 | `index_repository` | Index or re-index a repository path |
+
+### Proactive Safety
+| Tool | Description |
+|------|-------------|
+| `verify_change` | Check proposed signature changes against all callers and interface implementors |
+| `check_guards` | Evaluate project guard rules (`.gortex.yaml`) against changed symbols |
+| `would_create_cycle` | Check if adding a dependency would create a circular dependency |
+
+### Code Quality
+| Tool | Description |
+|------|-------------|
+| `find_dead_code` | Symbols with zero incoming edges (excludes entry points, tests, exports) |
+| `find_hotspots` | Symbols ranked by fan-in, fan-out, and community boundary crossings |
+| `find_cycles` | Circular dependency detection via Tarjan's SCC, classified by severity |
+| `index_health` | Health score, parse failures, stale files, language coverage |
+| `get_symbol_history` | Symbols modified this session with counts; flags churning (3+ edits) |
+
+### Code Generation
+| Tool | Description |
+|------|-------------|
+| `scaffold` | Generate code, registration wiring, and test stubs from an example symbol |
+| `batch_edit` | Apply multiple edits in dependency order, re-index between steps |
+| `diff_context` | Git diff enriched with callers, callees, community, processes, per-file risk |
+| `prefetch_context` | Predict needed symbols from task description and recent activity |
 
 ## MCP Resources (6)
 

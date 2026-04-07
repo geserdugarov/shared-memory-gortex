@@ -95,6 +95,15 @@ func (s *Server) registerCodingTools() {
 	)
 
 	s.mcpServer.AddTool(
+		mcp.NewTool("rename_symbol",
+			mcp.WithDescription("Generates coordinated multi-file edit instructions for renaming a symbol. Returns {file, line, old_text, new_text, confidence} for every reference. Use dry_run to preview, then apply edits with the Edit tool."),
+			mcp.WithString("id", mcp.Required(), mcp.Description("Symbol ID to rename (e.g. auth/token.go::validateToken)")),
+			mcp.WithString("new_name", mcp.Required(), mcp.Description("New name for the symbol")),
+		),
+		s.handleRenameSymbol,
+	)
+
+	s.mcpServer.AddTool(
 		mcp.NewTool("smart_context",
 			mcp.WithDescription("Assembles the minimal context needed for a task in one call. Searches for relevant symbols, gets their source and relationships, finds patterns to follow, and builds an edit plan. Replaces an entire exploration phase of 5-10 tool calls."),
 			mcp.WithString("task", mcp.Required(), mcp.Description("Natural language description of what you want to do (e.g. 'add a new MCP tool called list_files')")),
@@ -1147,6 +1156,189 @@ func extractKeywords(task string) []string {
 		keywords = append(keywords, w) // keep original case for search
 	}
 	return keywords
+}
+
+func (s *Server) handleRenameSymbol(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	id, err := req.RequireString("id")
+	if err != nil {
+		return mcp.NewToolResultError("id is required"), nil
+	}
+	newName, err := req.RequireString("new_name")
+	if err != nil {
+		return mcp.NewToolResultError("new_name is required"), nil
+	}
+
+	node := s.engine.GetSymbol(id)
+	if node == nil {
+		return mcp.NewToolResultError("symbol not found: " + id), nil
+	}
+
+	oldName := node.Name
+
+	if oldName == newName {
+		return mcp.NewToolResultError("new_name is the same as the current name"), nil
+	}
+
+	// Resolve root path for file reading.
+	rootPath := ""
+	if s.indexer != nil {
+		rootPath = s.indexer.RootPath()
+	}
+
+	type renameEdit struct {
+		File       string `json:"file"`
+		Line       int    `json:"line"`
+		OldText    string `json:"old_text"`
+		NewText    string `json:"new_text"`
+		Confidence string `json:"confidence"`
+		Reason     string `json:"reason"`
+	}
+
+	var edits []renameEdit
+	editSeen := make(map[string]bool) // file:line dedup
+
+	// 1. The definition itself.
+	defLine := readSingleLine(rootPath, node.FilePath, node.StartLine)
+	if defLine != "" && strings.Contains(defLine, oldName) {
+		key := fmt.Sprintf("%s:%d", node.FilePath, node.StartLine)
+		if !editSeen[key] {
+			editSeen[key] = true
+			edits = append(edits, renameEdit{
+				File:       node.FilePath,
+				Line:       node.StartLine,
+				OldText:    defLine,
+				NewText:    strings.Replace(defLine, oldName, newName, 1),
+				Confidence: "high",
+				Reason:     "definition",
+			})
+		}
+	}
+
+	// 2. All graph usages (calls, references, instantiates).
+	usages := s.engine.FindUsages(id)
+	for _, edge := range usages.Edges {
+		if edge.Line == 0 {
+			continue
+		}
+		// Read the source line at the reference.
+		srcLine := readSingleLine(rootPath, edge.FilePath, edge.Line)
+		if srcLine == "" || !strings.Contains(srcLine, oldName) {
+			continue
+		}
+		key := fmt.Sprintf("%s:%d", edge.FilePath, edge.Line)
+		if editSeen[key] {
+			continue
+		}
+		editSeen[key] = true
+		edits = append(edits, renameEdit{
+			File:       edge.FilePath,
+			Line:       edge.Line,
+			OldText:    srcLine,
+			NewText:    strings.Replace(srcLine, oldName, newName, 1),
+			Confidence: "high",
+			Reason:     string(edge.Kind),
+		})
+	}
+
+	// 3. MemberOf edges — if renaming a type, its methods' receiver annotations may reference it.
+	if node.Kind == graph.KindType || node.Kind == graph.KindInterface {
+		inEdges := s.engine.GetInEdges(id)
+		for _, edge := range inEdges {
+			if edge.Kind != graph.EdgeMemberOf {
+				continue
+			}
+			memberNode := s.engine.GetSymbol(edge.From)
+			if memberNode == nil {
+				continue
+			}
+			// Check if the member's ID contains the old type name (e.g. "file.go::TypeName.MethodName").
+			if strings.Contains(memberNode.ID, oldName+".") {
+				// The receiver line may mention the type name.
+				srcLine := readSingleLine(rootPath, memberNode.FilePath, memberNode.StartLine)
+				if srcLine != "" && strings.Contains(srcLine, oldName) {
+					key := fmt.Sprintf("%s:%d", memberNode.FilePath, memberNode.StartLine)
+					if !editSeen[key] {
+						editSeen[key] = true
+						edits = append(edits, renameEdit{
+							File:       memberNode.FilePath,
+							Line:       memberNode.StartLine,
+							OldText:    srcLine,
+							NewText:    strings.Replace(srcLine, oldName, newName, 1),
+							Confidence: "high",
+							Reason:     "member receiver",
+						})
+					}
+				}
+			}
+		}
+	}
+
+	// 4. Test files that reference the old name (text search fallback).
+	for _, edge := range usages.Edges {
+		if !isTestFile(edge.FilePath) {
+			continue
+		}
+		// Already covered by graph edges above, but check for test function names
+		// like "TestValidateToken" that contain the old name.
+		for _, n := range usages.Nodes {
+			if n.FilePath == edge.FilePath && strings.Contains(n.Name, oldName) {
+				srcLine := readSingleLine(rootPath, n.FilePath, n.StartLine)
+				if srcLine == "" {
+					continue
+				}
+				key := fmt.Sprintf("%s:%d", n.FilePath, n.StartLine)
+				if editSeen[key] {
+					continue
+				}
+				editSeen[key] = true
+				edits = append(edits, renameEdit{
+					File:       n.FilePath,
+					Line:       n.StartLine,
+					OldText:    srcLine,
+					NewText:    strings.Replace(srcLine, oldName, newName, 1),
+					Confidence: "medium",
+					Reason:     "test function name",
+				})
+			}
+		}
+	}
+
+	// Collect affected files.
+	fileSet := make(map[string]bool)
+	for _, e := range edits {
+		fileSet[e.File] = true
+	}
+
+	return mcp.NewToolResultJSON(map[string]any{
+		"old_name":       oldName,
+		"new_name":       newName,
+		"edits":          edits,
+		"total_edits":    len(edits),
+		"files_affected": len(fileSet),
+	})
+}
+
+// readSingleLine reads a single line from a file. Returns "" on error.
+func readSingleLine(rootPath, filePath string, lineNum int) string {
+	absPath := filePath
+	if rootPath != "" {
+		absPath = filepath.Join(rootPath, filePath)
+	}
+	f, err := os.Open(absPath)
+	if err != nil {
+		return ""
+	}
+	defer func() { _ = f.Close() }()
+
+	scanner := bufio.NewScanner(f)
+	current := 0
+	for scanner.Scan() {
+		current++
+		if current == lineNum {
+			return scanner.Text()
+		}
+	}
+	return ""
 }
 
 // extractPrefix returns the common prefix of a camelCase/PascalCase name.

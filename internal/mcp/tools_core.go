@@ -186,6 +186,7 @@ func (s *Server) handleGetSymbol(_ context.Context, req mcp.CallToolRequest) (*m
 	if node == nil {
 		return mcp.NewToolResultError("symbol not found: " + id), nil
 	}
+	s.session.recordSymbol(id)
 
 	detail := req.GetString("detail", "brief")
 	if detail == "brief" {
@@ -209,6 +210,7 @@ func (s *Server) handleSearchSymbols(_ context.Context, req mcp.CallToolRequest)
 	}
 	limit := req.GetInt("limit", 20)
 
+	s.session.recordSearch(q)
 	nodes := s.engine.SearchSymbols(q, limit+10)
 
 	if isCompact(req) {

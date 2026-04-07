@@ -4,11 +4,23 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/mark3labs/mcp-go/mcp"
 )
 
 func (s *Server) registerResources() {
+	// Session state: survives context compaction.
+	s.mcpServer.AddResource(
+		mcp.NewResource(
+			"gortex://session",
+			"Session State",
+			mcp.WithResourceDescription("Recently viewed symbols, modified files, and search queries. Read after context compaction to restore working memory without re-calling tools."),
+			mcp.WithMIMEType("text/plain"),
+		),
+		s.handleResourceSession,
+	)
+
 	// Static resource: graph stats (session start orientation).
 	s.mcpServer.AddResource(
 		mcp.NewResource(
@@ -84,6 +96,57 @@ func (s *Server) handleResourceStats(_ context.Context, req mcp.ReadResourceRequ
 			URI:      req.Params.URI,
 			MIMEType: "application/json",
 			Text:     string(data),
+		},
+	}, nil
+}
+
+func (s *Server) handleResourceSession(_ context.Context, req mcp.ReadResourceRequest) ([]mcp.ResourceContents, error) {
+	snap := s.session.snapshot()
+
+	var b strings.Builder
+	b.WriteString("# Gortex Session State\n\n")
+
+	if files, ok := snap["modified_files"].([]string); ok && len(files) > 0 {
+		b.WriteString("## Modified Files\n")
+		for _, f := range files {
+			fmt.Fprintf(&b, "- %s\n", f)
+		}
+		b.WriteString("\n")
+	}
+
+	if symbols, ok := snap["viewed_symbols"].([]string); ok && len(symbols) > 0 {
+		b.WriteString("## Recently Viewed Symbols\n")
+		for _, s := range symbols {
+			fmt.Fprintf(&b, "- %s\n", s)
+		}
+		b.WriteString("\n")
+	}
+
+	if files, ok := snap["viewed_files"].([]string); ok && len(files) > 0 {
+		b.WriteString("## Recently Viewed Files\n")
+		for _, f := range files {
+			fmt.Fprintf(&b, "- %s\n", f)
+		}
+		b.WriteString("\n")
+	}
+
+	if queries, ok := snap["recent_searches"].([]string); ok && len(queries) > 0 {
+		b.WriteString("## Recent Searches\n")
+		for _, q := range queries {
+			fmt.Fprintf(&b, "- \"%s\"\n", q)
+		}
+		b.WriteString("\n")
+	}
+
+	if b.Len() <= len("# Gortex Session State\n\n") {
+		b.WriteString("No activity recorded yet.\n")
+	}
+
+	return []mcp.ResourceContents{
+		mcp.TextResourceContents{
+			URI:      req.Params.URI,
+			MIMEType: "text/plain",
+			Text:     b.String(),
 		},
 	}, nil
 }

@@ -28,6 +28,73 @@ type Server struct {
 	communities *analysis.CommunityResult
 	processes   *analysis.ProcessResult
 	analysisMu  sync.RWMutex
+	session     *sessionState
+}
+
+// sessionState tracks recent agent activity for context recovery after compaction.
+type sessionState struct {
+	mu             sync.Mutex
+	viewedSymbols  []string // recently viewed symbol IDs (most recent first)
+	viewedFiles    []string // recently viewed file paths
+	modifiedFiles  []string // files modified via edit_symbol
+	recentSearches []string // recent search queries
+}
+
+const maxSessionItems = 20
+
+func newSessionState() *sessionState {
+	return &sessionState{}
+}
+
+func (ss *sessionState) recordSymbol(id string) {
+	ss.mu.Lock()
+	defer ss.mu.Unlock()
+	ss.viewedSymbols = prependUnique(ss.viewedSymbols, id, maxSessionItems)
+}
+
+func (ss *sessionState) recordFile(path string) {
+	ss.mu.Lock()
+	defer ss.mu.Unlock()
+	ss.viewedFiles = prependUnique(ss.viewedFiles, path, maxSessionItems)
+}
+
+func (ss *sessionState) recordModified(path string) {
+	ss.mu.Lock()
+	defer ss.mu.Unlock()
+	ss.modifiedFiles = prependUnique(ss.modifiedFiles, path, maxSessionItems)
+}
+
+func (ss *sessionState) recordSearch(query string) {
+	ss.mu.Lock()
+	defer ss.mu.Unlock()
+	ss.recentSearches = prependUnique(ss.recentSearches, query, 10)
+}
+
+func (ss *sessionState) snapshot() map[string]any {
+	ss.mu.Lock()
+	defer ss.mu.Unlock()
+	return map[string]any{
+		"viewed_symbols":  ss.viewedSymbols,
+		"viewed_files":    ss.viewedFiles,
+		"modified_files":  ss.modifiedFiles,
+		"recent_searches": ss.recentSearches,
+	}
+}
+
+func prependUnique(slice []string, item string, maxLen int) []string {
+	// Remove existing occurrence.
+	for i, s := range slice {
+		if s == item {
+			slice = append(slice[:i], slice[i+1:]...)
+			break
+		}
+	}
+	// Prepend.
+	slice = append([]string{item}, slice...)
+	if len(slice) > maxLen {
+		slice = slice[:maxLen]
+	}
+	return slice
 }
 
 // NewServer creates an MCP server with all Gortex tools registered.
@@ -42,6 +109,7 @@ func NewServer(engine *query.Engine, g *graph.Graph, idx *indexer.Indexer, watch
 		indexer: idx,
 		watcher: watcher,
 		logger:  logger,
+		session: newSessionState(),
 	}
 	s.registerCoreTools()
 	s.registerCodingTools()

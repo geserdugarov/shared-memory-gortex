@@ -146,6 +146,7 @@ func (s *Server) handleGetEditingContext(_ context.Context, req mcp.CallToolRequ
 		return mcp.NewToolResultError("file_path is required"), nil
 	}
 
+	s.session.recordFile(fp)
 	sg := s.engine.GetFileSymbols(fp)
 	if len(sg.Nodes) == 0 {
 		return mcp.NewToolResultError("no symbols found for file: " + fp), nil
@@ -355,6 +356,8 @@ func (s *Server) handleGetSymbolSource(_ context.Context, req mcp.CallToolReques
 	if node == nil {
 		return mcp.NewToolResultError("symbol not found: " + id), nil
 	}
+	s.session.recordSymbol(id)
+	s.session.recordFile(node.FilePath)
 
 	if node.StartLine == 0 || node.EndLine == 0 {
 		return mcp.NewToolResultError("symbol has no line range: " + id), nil
@@ -1418,6 +1421,8 @@ func (s *Server) handleEditSymbol(_ context.Context, req mcp.CallToolRequest) (*
 	if err := os.WriteFile(absPath, []byte(newContent), 0o644); err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("could not write file: %v", err)), nil
 	}
+	s.session.recordModified(node.FilePath)
+	s.session.recordSymbol(id)
 
 	// Count lines changed.
 	oldLines := strings.Count(oldSource, "\n") + 1

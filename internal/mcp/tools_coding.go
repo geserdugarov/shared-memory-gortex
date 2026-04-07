@@ -1,7 +1,10 @@
 package mcp
 
 import (
+	"bufio"
 	"context"
+	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -44,6 +47,15 @@ func (s *Server) registerCodingTools() {
 			mcp.WithString("symbol_ids", mcp.Required(), mcp.Description("Comma-separated list of symbol IDs to modify")),
 		),
 		s.handleEnhancedChangeImpact,
+	)
+
+	s.mcpServer.AddTool(
+		mcp.NewTool("get_symbol_source",
+			mcp.WithDescription("Returns the source code of a specific symbol (function, method, type) without reading the entire file. Use instead of Read when you know which symbol you need — saves 70-80% of tokens compared to reading the whole file."),
+			mcp.WithString("id", mcp.Required(), mcp.Description("Symbol node ID (e.g. pkg/server.go::HandleRequest)")),
+			mcp.WithNumber("context_lines", mcp.Description("Extra lines above/below the symbol (default: 3)")),
+		),
+		s.handleGetSymbolSource,
 	)
 
 	s.mcpServer.AddTool(
@@ -266,4 +278,84 @@ func (s *Server) handleGetRecentChanges(_ context.Context, req mcp.CallToolReque
 		"changes":             changes,
 		"graph_current_as_of": time.Now().Format(time.RFC3339),
 	})
+}
+
+func (s *Server) handleGetSymbolSource(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	id, err := req.RequireString("id")
+	if err != nil {
+		return mcp.NewToolResultError("id is required"), nil
+	}
+
+	node := s.engine.GetSymbol(id)
+	if node == nil {
+		return mcp.NewToolResultError("symbol not found: " + id), nil
+	}
+
+	if node.StartLine == 0 || node.EndLine == 0 {
+		return mcp.NewToolResultError("symbol has no line range: " + id), nil
+	}
+
+	contextLines := req.GetInt("context_lines", 3)
+
+	// Resolve the file path against the indexer's root.
+	absPath := node.FilePath
+	if s.indexer != nil {
+		if root := s.indexer.RootPath(); root != "" {
+			absPath = filepath.Join(root, node.FilePath)
+		}
+	}
+
+	source, startLine, err := readLines(absPath, node.StartLine, node.EndLine, contextLines)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("could not read source: %v", err)), nil
+	}
+
+	result := map[string]any{
+		"id":         node.ID,
+		"kind":       node.Kind,
+		"name":       node.Name,
+		"file_path":  node.FilePath,
+		"start_line": node.StartLine,
+		"end_line":   node.EndLine,
+		"source":     source,
+		"from_line":  startLine,
+	}
+	if sig, ok := node.Meta["signature"]; ok {
+		result["signature"] = sig
+	}
+	return mcp.NewToolResultJSON(result)
+}
+
+// readLines reads lines from a file, with optional context lines above/below.
+func readLines(path string, startLine, endLine, contextLines int) (string, int, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", 0, err
+	}
+	defer func() { _ = f.Close() }()
+
+	from := startLine - contextLines
+	if from < 1 {
+		from = 1
+	}
+	to := endLine + contextLines
+
+	var lines []string
+	scanner := bufio.NewScanner(f)
+	lineNum := 0
+	for scanner.Scan() {
+		lineNum++
+		if lineNum < from {
+			continue
+		}
+		if lineNum > to {
+			break
+		}
+		lines = append(lines, scanner.Text())
+	}
+	if err := scanner.Err(); err != nil {
+		return "", 0, err
+	}
+
+	return strings.Join(lines, "\n"), from, nil
 }

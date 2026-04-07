@@ -3,6 +3,7 @@ package indexer
 import (
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -126,4 +127,77 @@ func Changed() {}
 	history := w.History()
 	require.Len(t, history, 1)
 	assert.Equal(t, ChangeModified, history[0].Kind)
+}
+
+func TestWatcher_SymbolChangeCallback_Modify(t *testing.T) {
+	dir, _, w := setupWatcher(t)
+
+	type callbackData struct {
+		filePath   string
+		oldSymbols []*graph.Node
+		newSymbols []*graph.Node
+	}
+
+	var mu sync.Mutex
+	var calls []callbackData
+
+	w.OnSymbolChange(func(filePath string, oldSymbols, newSymbols []*graph.Node) {
+		mu.Lock()
+		defer mu.Unlock()
+		calls = append(calls, callbackData{filePath, oldSymbols, newSymbols})
+	})
+
+	// Modify the file — changes function name.
+	writeTestFile(t, filepath.Join(dir, "main.go"), `package main
+
+func Modified() {}
+`)
+	_ = waitForEvent(t, w, 2*time.Second)
+
+	mu.Lock()
+	defer mu.Unlock()
+	require.Len(t, calls, 1)
+
+	// Old symbols should contain "Original", new should contain "Modified".
+	var oldNames, newNames []string
+	for _, n := range calls[0].oldSymbols {
+		oldNames = append(oldNames, n.Name)
+	}
+	for _, n := range calls[0].newSymbols {
+		if n.Kind != graph.KindFile && n.Kind != graph.KindImport {
+			newNames = append(newNames, n.Name)
+		}
+	}
+	assert.Contains(t, oldNames, "Original")
+	assert.Contains(t, newNames, "Modified")
+}
+
+func TestWatcher_SymbolChangeCallback_Delete(t *testing.T) {
+	dir, _, w := setupWatcher(t)
+
+	type callbackData struct {
+		filePath   string
+		oldSymbols []*graph.Node
+		newSymbols []*graph.Node
+	}
+
+	var mu sync.Mutex
+	var calls []callbackData
+
+	w.OnSymbolChange(func(filePath string, oldSymbols, newSymbols []*graph.Node) {
+		mu.Lock()
+		defer mu.Unlock()
+		calls = append(calls, callbackData{filePath, oldSymbols, newSymbols})
+	})
+
+	require.NoError(t, os.Remove(filepath.Join(dir, "main.go")))
+	_ = waitForEvent(t, w, 2*time.Second)
+
+	mu.Lock()
+	defer mu.Unlock()
+	require.Len(t, calls, 1)
+
+	// Old symbols should have entries, new should be nil (deleted).
+	assert.NotEmpty(t, calls[0].oldSymbols)
+	assert.Nil(t, calls[0].newSymbols)
 }

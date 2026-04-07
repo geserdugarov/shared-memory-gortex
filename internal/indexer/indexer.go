@@ -40,17 +40,25 @@ type Indexer struct {
 	config   config.IndexConfig
 	rootPath string
 	logger   *zap.Logger
+
+	// Mtime tracking and parse error retention for index health diagnostics.
+	parseErrors   []IndexError
+	fileMtimes    map[string]int64
+	lastIndexTime time.Time
+	totalDetected int
+	mtimeMu       sync.RWMutex
 }
 
 // New creates an Indexer.
 func New(g *graph.Graph, reg *parser.Registry, cfg config.IndexConfig, logger *zap.Logger) *Indexer {
 	return &Indexer{
-		graph:    g,
-		registry: reg,
-		resolver: resolver.New(g),
-		search:   search.NewAuto(),
-		config:   cfg,
-		logger:   logger,
+		graph:      g,
+		registry:   reg,
+		resolver:   resolver.New(g),
+		search:     search.NewAuto(),
+		config:     cfg,
+		logger:     logger,
+		fileMtimes: make(map[string]int64),
 	}
 }
 
@@ -172,6 +180,22 @@ func (idx *Indexer) Index(root string) (*IndexResult, error) {
 		}
 	}
 
+	// Populate fileMtimes for all detected files.
+	idx.mtimeMu.Lock()
+	idx.fileMtimes = make(map[string]int64, len(files))
+	for _, f := range files {
+		if info, err := os.Stat(f); err == nil {
+			relPath, _ := filepath.Rel(absRoot, f)
+			idx.fileMtimes[filepath.ToSlash(relPath)] = info.ModTime().UnixNano()
+		}
+	}
+	idx.mtimeMu.Unlock()
+
+	// Retain parse errors and record index metadata.
+	idx.parseErrors = errors
+	idx.totalDetected = len(files)
+	idx.lastIndexTime = time.Now()
+
 	// Resolve cross-file references.
 	idx.resolver.ResolveAll()
 
@@ -263,6 +287,14 @@ func (idx *Indexer) IndexFile(filePath string) error {
 	}
 
 	idx.resolver.ResolveFile(relPath)
+
+	// Update mtime for this file.
+	if info, err := os.Stat(absPath); err == nil {
+		idx.mtimeMu.Lock()
+		idx.fileMtimes[filepath.ToSlash(relPath)] = info.ModTime().UnixNano()
+		idx.mtimeMu.Unlock()
+	}
+
 	return nil
 }
 
@@ -311,4 +343,53 @@ func (idx *Indexer) shouldExclude(path, root string) bool {
 		}
 	}
 	return false
+}
+
+// ParseErrors returns the parse errors from the last full index.
+func (idx *Indexer) ParseErrors() []IndexError {
+	return idx.parseErrors
+}
+
+// FileMtimes returns a copy of the file modification time map.
+func (idx *Indexer) FileMtimes() map[string]int64 {
+	idx.mtimeMu.RLock()
+	defer idx.mtimeMu.RUnlock()
+	out := make(map[string]int64, len(idx.fileMtimes))
+	for k, v := range idx.fileMtimes {
+		out[k] = v
+	}
+	return out
+}
+
+// LastIndexTime returns the timestamp of the last full index.
+func (idx *Indexer) LastIndexTime() time.Time {
+	return idx.lastIndexTime
+}
+
+// TotalDetected returns the total number of files detected during the last full index.
+func (idx *Indexer) TotalDetected() int {
+	return idx.totalDetected
+}
+
+// IsStale returns true if the file at relPath has been modified on disk since
+// it was last indexed, based on comparing stored mtime against current disk mtime.
+func (idx *Indexer) IsStale(relPath string) bool {
+	relPath = filepath.ToSlash(relPath)
+
+	idx.mtimeMu.RLock()
+	storedMtime, ok := idx.fileMtimes[relPath]
+	idx.mtimeMu.RUnlock()
+	if !ok {
+		// Unknown file — treat as stale.
+		return true
+	}
+
+	absPath := filepath.Join(idx.rootPath, filepath.FromSlash(relPath))
+	info, err := os.Stat(absPath)
+	if err != nil {
+		// Can't stat — treat as stale.
+		return true
+	}
+
+	return info.ModTime().UnixNano() != storedMtime
 }

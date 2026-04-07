@@ -146,6 +146,9 @@ func (s *Server) handleGetEditingContext(_ context.Context, req mcp.CallToolRequ
 		return mcp.NewToolResultError("file_path is required"), nil
 	}
 
+	// Auto re-index stale file before querying.
+	s.ensureFresh([]string{fp})
+
 	s.session.recordFile(fp)
 	sg := s.engine.GetFileSymbols(fp)
 	if len(sg.Nodes) == 0 {
@@ -236,6 +239,12 @@ func (s *Server) handleGetSymbolSignature(_ context.Context, req mcp.CallToolReq
 	if err != nil {
 		return mcp.NewToolResultError("id is required"), nil
 	}
+
+	// Auto re-index stale file before querying.
+	if parts := strings.SplitN(id, "::", 2); len(parts) == 2 {
+		s.ensureFresh([]string{parts[0]})
+	}
+
 	node := s.engine.GetSymbol(id)
 	if node == nil {
 		return mcp.NewToolResultError("symbol not found: " + id), nil
@@ -350,6 +359,11 @@ func (s *Server) handleGetSymbolSource(_ context.Context, req mcp.CallToolReques
 	id, err := req.RequireString("id")
 	if err != nil {
 		return mcp.NewToolResultError("id is required"), nil
+	}
+
+	// Auto re-index stale file before querying.
+	if parts := strings.SplitN(id, "::", 2); len(parts) == 2 {
+		s.ensureFresh([]string{parts[0]})
 	}
 
 	node := s.engine.GetSymbol(id)
@@ -1416,9 +1430,7 @@ func (s *Server) handleEditSymbol(_ context.Context, req mcp.CallToolRequest) (*
 	// Find old_source within the symbol's line range only (not the whole file).
 	// Use the expanded start if doc comments were included.
 	effectiveStart := node.StartLine
-	if strings.Contains(strings.Join(lines[node.StartLine-1:node.EndLine], "\n"), oldSource) {
-		effectiveStart = node.StartLine
-	} else {
+	if !strings.Contains(strings.Join(lines[node.StartLine-1:node.EndLine], "\n"), oldSource) {
 		// Recalculate expanded start for offset computation.
 		expandedStart := node.StartLine - 1
 		for expandedStart > 0 {

@@ -3,12 +3,14 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"sort"
 	"testing"
 
 	mcplib "github.com/mark3labs/mcp-go/mcp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
+	"pgregory.net/rapid"
 
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/indexer"
@@ -49,7 +51,7 @@ func helper() {}
 	require.NoError(t, err)
 
 	eng := query.NewEngine(g)
-	srv := NewServer(eng, g, idx, nil, zap.NewNop())
+	srv := NewServer(eng, g, idx, nil, zap.NewNop(), nil)
 	srv.RunAnalysis()
 	return srv, dir
 }
@@ -146,4 +148,167 @@ func TestGetRecentChanges_NoWatcher(t *testing.T) {
 	srv, _ := setupTestServer(t)
 	result := callTool(t, srv, "get_recent_changes", nil)
 	assert.True(t, result.IsError) // watch mode not active
+}
+
+// --- Symbol History Property Test Generators ---
+
+// recordAction represents a single Record() call to symbolHistory.
+type recordAction struct {
+	SymbolID         string
+	SignatureChanged bool
+}
+
+// genSymbolID generates a random symbol ID like "pkg/file.go::FuncName".
+func genSymbolID() *rapid.Generator[string] {
+	return rapid.Custom[string](func(rt *rapid.T) string {
+		pkg := rapid.StringMatching(`[a-z]{2,6}`).Draw(rt, "pkg")
+		file := rapid.StringMatching(`[a-z]{2,6}`).Draw(rt, "file")
+		name := rapid.StringMatching(`[A-Z][a-zA-Z]{1,8}`).Draw(rt, "name")
+		return pkg + "/" + file + ".go::" + name
+	})
+}
+
+// genRecordActions generates a non-empty sequence of Record() calls using
+// a fixed pool of symbol IDs so that some symbols get recorded multiple times.
+func genRecordActions() *rapid.Generator[[]recordAction] {
+	return rapid.Custom[[]recordAction](func(rt *rapid.T) []recordAction {
+		// Generate a pool of 1-5 distinct symbol IDs
+		poolSize := rapid.IntRange(1, 5).Draw(rt, "poolSize")
+		pool := make([]string, poolSize)
+		seen := make(map[string]bool)
+		for i := 0; i < poolSize; i++ {
+			for {
+				id := genSymbolID().Draw(rt, "symbolID")
+				if !seen[id] {
+					pool[i] = id
+					seen[id] = true
+					break
+				}
+			}
+		}
+
+		// Generate 1-20 record actions drawing from the pool
+		numActions := rapid.IntRange(1, 20).Draw(rt, "numActions")
+		actions := make([]recordAction, numActions)
+		for i := 0; i < numActions; i++ {
+			idx := rapid.IntRange(0, poolSize-1).Draw(rt, "poolIdx")
+			actions[i] = recordAction{
+				SymbolID:         pool[idx],
+				SignatureChanged: rapid.Bool().Draw(rt, "sigChanged"),
+			}
+		}
+		return actions
+	})
+}
+
+// --- Property Tests for Symbol History ---
+
+// Feature: gortex-enhancements, Property 13: Symbol history round-trip
+//
+// For any sequence of Record() calls, Get() SHALL return entries with correct
+// modification count, and the churning flag SHALL be true iff count >= 3.
+func TestPropertySymbolHistoryRoundTrip(t *testing.T) {
+	rapid.Check(t, func(rt *rapid.T) {
+		actions := genRecordActions().Draw(rt, "actions")
+
+		sh := &symbolHistory{
+			entries: make(map[string][]SymbolModification),
+		}
+
+		// Build expected counts per symbol
+		expectedCounts := make(map[string]int)
+		for _, a := range actions {
+			sh.Record(a.SymbolID, a.SignatureChanged)
+			expectedCounts[a.SymbolID]++
+		}
+
+		// Verify Get() returns correct count for each symbol
+		for symbolID, expectedCount := range expectedCounts {
+			mods := sh.Get(symbolID)
+			if len(mods) != expectedCount {
+				rt.Errorf("Get(%q) returned %d entries, want %d", symbolID, len(mods), expectedCount)
+			}
+
+			// Verify churning flag: count >= 3 means churning
+			churning := len(mods) >= 3
+			if expectedCount >= 3 && !churning {
+				rt.Errorf("symbol %q has %d modifications but churning is false", symbolID, expectedCount)
+			}
+			if expectedCount < 3 && churning {
+				rt.Errorf("symbol %q has %d modifications but churning is true", symbolID, expectedCount)
+			}
+		}
+
+		// Verify Get() for a symbol that was never recorded returns empty
+		unknownMods := sh.Get("nonexistent/file.go::Unknown")
+		if len(unknownMods) != 0 {
+			rt.Errorf("Get() for unrecorded symbol returned %d entries, want 0", len(unknownMods))
+		}
+
+		// Verify All() returns all recorded symbols
+		all := sh.All()
+		if len(all) != len(expectedCounts) {
+			rt.Errorf("All() returned %d symbols, want %d", len(all), len(expectedCounts))
+		}
+		for symbolID, expectedCount := range expectedCounts {
+			mods, ok := all[symbolID]
+			if !ok {
+				rt.Errorf("All() missing symbol %q", symbolID)
+				continue
+			}
+			if len(mods) != expectedCount {
+				rt.Errorf("All()[%q] has %d entries, want %d", symbolID, len(mods), expectedCount)
+			}
+		}
+	})
+}
+
+// Feature: gortex-enhancements, Property 14: Symbol history sort order
+//
+// When All() is called, the results can be sorted by modification count descending.
+func TestPropertySymbolHistorySortOrder(t *testing.T) {
+	rapid.Check(t, func(rt *rapid.T) {
+		actions := genRecordActions().Draw(rt, "actions")
+
+		sh := &symbolHistory{
+			entries: make(map[string][]SymbolModification),
+		}
+
+		for _, a := range actions {
+			sh.Record(a.SymbolID, a.SignatureChanged)
+		}
+
+		all := sh.All()
+
+		// Build a sortable slice of (symbolID, count) pairs
+		type symbolCount struct {
+			ID    string
+			Count int
+		}
+		counts := make([]symbolCount, 0, len(all))
+		for id, mods := range all {
+			counts = append(counts, symbolCount{ID: id, Count: len(mods)})
+		}
+
+		// Sort by modification count descending
+		sort.Slice(counts, func(i, j int) bool {
+			return counts[i].Count > counts[j].Count
+		})
+
+		// Verify the sorted order is monotonically non-increasing
+		for i := 1; i < len(counts); i++ {
+			if counts[i].Count > counts[i-1].Count {
+				rt.Errorf("sort order violated at index %d: count[%d]=%d > count[%d]=%d",
+					i, i, counts[i].Count, i-1, counts[i-1].Count)
+			}
+		}
+
+		// Verify each count matches what Get() returns
+		for _, sc := range counts {
+			mods := sh.Get(sc.ID)
+			if len(mods) != sc.Count {
+				rt.Errorf("Get(%q) returned %d entries but All() had %d", sc.ID, len(mods), sc.Count)
+			}
+		}
+	})
 }

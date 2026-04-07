@@ -8,6 +8,7 @@ import (
 
 	"github.com/mark3labs/mcp-go/server"
 	"github.com/zzet/gortex/internal/analysis"
+	"github.com/zzet/gortex/internal/config"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/indexer"
 	"github.com/zzet/gortex/internal/query"
@@ -16,6 +17,51 @@ import (
 
 // Version is set at build time.
 var Version = "dev"
+
+// SymbolModification records a single modification event for a symbol.
+type SymbolModification struct {
+	Timestamp        time.Time `json:"timestamp"`
+	SignatureChanged bool      `json:"signature_changed"`
+}
+
+// symbolHistory tracks symbol modifications during the current session.
+type symbolHistory struct {
+	mu      sync.Mutex
+	entries map[string][]SymbolModification // symbolID → modifications
+}
+
+// Record adds a modification entry for the given symbol.
+func (sh *symbolHistory) Record(symbolID string, signatureChanged bool) {
+	sh.mu.Lock()
+	defer sh.mu.Unlock()
+	sh.entries[symbolID] = append(sh.entries[symbolID], SymbolModification{
+		Timestamp:        time.Now(),
+		SignatureChanged: signatureChanged,
+	})
+}
+
+// Get returns the modification history for a specific symbol.
+func (sh *symbolHistory) Get(symbolID string) []SymbolModification {
+	sh.mu.Lock()
+	defer sh.mu.Unlock()
+	mods := sh.entries[symbolID]
+	out := make([]SymbolModification, len(mods))
+	copy(out, mods)
+	return out
+}
+
+// All returns a copy of the entire modification history.
+func (sh *symbolHistory) All() map[string][]SymbolModification {
+	sh.mu.Lock()
+	defer sh.mu.Unlock()
+	out := make(map[string][]SymbolModification, len(sh.entries))
+	for k, v := range sh.entries {
+		cp := make([]SymbolModification, len(v))
+		copy(cp, v)
+		out[k] = cp
+	}
+	return out
+}
 
 // Server wraps the MCP server with Gortex-specific tools.
 type Server struct {
@@ -29,6 +75,8 @@ type Server struct {
 	processes   *analysis.ProcessResult
 	analysisMu  sync.RWMutex
 	session     *sessionState
+	symHistory  *symbolHistory
+	guardRules  []config.GuardRule
 }
 
 // sessionState tracks recent agent activity for context recovery after compaction.
@@ -98,7 +146,7 @@ func prependUnique(slice []string, item string, maxLen int) []string {
 }
 
 // NewServer creates an MCP server with all Gortex tools registered.
-func NewServer(engine *query.Engine, g *graph.Graph, idx *indexer.Indexer, watcher *indexer.Watcher, logger *zap.Logger) *Server {
+func NewServer(engine *query.Engine, g *graph.Graph, idx *indexer.Indexer, watcher *indexer.Watcher, logger *zap.Logger, guardRules []config.GuardRule) *Server {
 	s := &Server{
 		mcpServer: server.NewMCPServer("gortex", Version,
 			server.WithToolCapabilities(false),
@@ -110,10 +158,15 @@ func NewServer(engine *query.Engine, g *graph.Graph, idx *indexer.Indexer, watch
 		watcher: watcher,
 		logger:  logger,
 		session: newSessionState(),
+		symHistory: &symbolHistory{
+			entries: make(map[string][]SymbolModification),
+		},
+		guardRules: guardRules,
 	}
 	s.registerCoreTools()
 	s.registerCodingTools()
 	s.registerAnalysisTools()
+	s.registerEnhancementTools()
 	s.registerResources()
 	s.registerPrompts()
 	return s
@@ -170,7 +223,48 @@ func (s *Server) ServeStdio() error {
 	return server.ServeStdio(s.mcpServer)
 }
 
-// SetWatcher sets the watcher after background initialization.
+// SetWatcher sets the watcher after background initialization and registers
+// a symbol change callback to record modifications in symbolHistory.
 func (s *Server) SetWatcher(w *indexer.Watcher) {
 	s.watcher = w
+
+	// Register callback to track symbol modifications for get_symbol_history.
+	w.OnSymbolChange(func(filePath string, oldSymbols, newSymbols []*graph.Node) {
+		oldMap := make(map[string]string, len(oldSymbols)) // ID → signature
+		for _, n := range oldSymbols {
+			sig, _ := n.Meta["signature"].(string)
+			oldMap[n.ID] = sig
+		}
+
+		newMap := make(map[string]string, len(newSymbols)) // ID → signature
+		for _, n := range newSymbols {
+			if n.Kind == graph.KindFile || n.Kind == graph.KindImport {
+				continue
+			}
+			sig, _ := n.Meta["signature"].(string)
+			newMap[n.ID] = sig
+		}
+
+		// Detect modified symbols (present in both old and new with changed signature).
+		for id, oldSig := range oldMap {
+			if newSig, exists := newMap[id]; exists {
+				sigChanged := oldSig != newSig
+				s.symHistory.Record(id, sigChanged)
+			}
+		}
+
+		// Detect removed symbols (in old but not in new).
+		for id := range oldMap {
+			if _, exists := newMap[id]; !exists {
+				s.symHistory.Record(id, true)
+			}
+		}
+
+		// Detect added symbols (in new but not in old).
+		for id := range newMap {
+			if _, exists := oldMap[id]; !exists {
+				s.symHistory.Record(id, false)
+			}
+		}
+	})
 }

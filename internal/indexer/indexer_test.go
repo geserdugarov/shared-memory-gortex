@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -149,6 +150,111 @@ func Replaced() {}
 
 	assert.Empty(t, g.FindNodesByName("Original"))
 	assert.Len(t, g.FindNodesByName("Replaced"), 1)
+}
+
+func TestMtimeTracking(t *testing.T) {
+	dir := t.TempDir()
+	goFile := filepath.Join(dir, "main.go")
+	writeFile(t, goFile, `package main
+
+func Hello() {}
+`)
+
+	g := graph.New()
+	idx := newTestIndexer(g)
+	result, err := idx.Index(dir)
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.FileCount)
+
+	// FileMtimes should be populated with the indexed file.
+	mtimes := idx.FileMtimes()
+	assert.NotEmpty(t, mtimes, "fileMtimes should be populated after Index()")
+	assert.Contains(t, mtimes, "main.go", "fileMtimes should contain the indexed file")
+	assert.Greater(t, mtimes["main.go"], int64(0), "mtime should be a positive unix nano value")
+}
+
+func TestMtimeIsStale_FreshFile(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "main.go"), `package main
+
+func Hello() {}
+`)
+
+	g := graph.New()
+	idx := newTestIndexer(g)
+	_, err := idx.Index(dir)
+	require.NoError(t, err)
+
+	// A just-indexed file should not be stale.
+	assert.False(t, idx.IsStale("main.go"), "file should not be stale immediately after indexing")
+}
+
+func TestMtimeIsStale_ModifiedFile(t *testing.T) {
+	dir := t.TempDir()
+	goFile := filepath.Join(dir, "main.go")
+	writeFile(t, goFile, `package main
+
+func Hello() {}
+`)
+
+	g := graph.New()
+	idx := newTestIndexer(g)
+	_, err := idx.Index(dir)
+	require.NoError(t, err)
+
+	// Modify the file after indexing — ensure mtime actually changes.
+	// Some filesystems have coarse mtime resolution, so we sleep briefly.
+	time.Sleep(50 * time.Millisecond)
+	writeFile(t, goFile, `package main
+
+func HelloModified() {}
+`)
+
+	assert.True(t, idx.IsStale("main.go"), "file should be stale after modification")
+}
+
+func TestMtimeIsStale_UnknownFile(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "main.go"), `package main
+
+func Hello() {}
+`)
+
+	g := graph.New()
+	idx := newTestIndexer(g)
+	_, err := idx.Index(dir)
+	require.NoError(t, err)
+
+	// A file not in the index should be treated as stale.
+	assert.True(t, idx.IsStale("unknown.go"), "unknown file should be treated as stale")
+}
+
+func TestMtimeUpdatedAfterIndexFile(t *testing.T) {
+	dir := t.TempDir()
+	goFile := filepath.Join(dir, "main.go")
+	writeFile(t, goFile, `package main
+
+func Original() {}
+`)
+
+	g := graph.New()
+	idx := newTestIndexer(g)
+	_, err := idx.Index(dir)
+	require.NoError(t, err)
+
+	originalMtime := idx.FileMtimes()["main.go"]
+
+	// Modify and re-index the single file.
+	time.Sleep(50 * time.Millisecond)
+	writeFile(t, goFile, `package main
+
+func Replaced() {}
+`)
+	require.NoError(t, idx.IndexFile(goFile))
+
+	updatedMtime := idx.FileMtimes()["main.go"]
+	assert.Greater(t, updatedMtime, originalMtime, "mtime should be updated after IndexFile")
+	assert.False(t, idx.IsStale("main.go"), "file should not be stale after re-indexing")
 }
 
 func TestEvictFile(t *testing.T) {

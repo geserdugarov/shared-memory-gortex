@@ -10,6 +10,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/zzet/gortex/internal/config"
+	"github.com/zzet/gortex/internal/graph"
 )
 
 // ChangeKind describes the type of filesystem change.
@@ -34,19 +35,25 @@ type GraphChangeEvent struct {
 	DurationMs   int64      `json:"duration_ms"`
 }
 
+// SymbolChangeCallback is called when symbols change during file re-indexing.
+// It receives the file path, old symbols (before eviction), and new symbols (after re-index).
+type SymbolChangeCallback func(filePath string, oldSymbols, newSymbols []*graph.Node)
+
 // Watcher keeps the knowledge graph in live sync with the filesystem.
 type Watcher struct {
-	indexer   *Indexer
-	fsw       *fsnotify.Watcher
-	config    config.WatchConfig
-	events    chan GraphChangeEvent
-	history   []GraphChangeEvent
-	historyMu sync.Mutex
-	pending   map[string]*time.Timer
-	mu        sync.Mutex
-	logger    *zap.Logger
-	done      chan struct{}
-	stopped   chan struct{}
+	indexer          *Indexer
+	fsw              *fsnotify.Watcher
+	config           config.WatchConfig
+	events           chan GraphChangeEvent
+	history          []GraphChangeEvent
+	historyMu        sync.Mutex
+	pending          map[string]*time.Timer
+	mu               sync.Mutex
+	logger           *zap.Logger
+	done             chan struct{}
+	stopped          chan struct{}
+	symbolChangeCb   SymbolChangeCallback
+	symbolChangeCbMu sync.RWMutex
 }
 
 const maxHistory = 1000
@@ -125,6 +132,15 @@ func (w *Watcher) HistorySince(since time.Time) []GraphChangeEvent {
 		}
 	}
 	return out
+}
+
+// OnSymbolChange registers a callback that is invoked when symbols change
+// during file re-indexing. The callback receives old symbols (before eviction)
+// and new symbols (after re-index).
+func (w *Watcher) OnSymbolChange(cb SymbolChangeCallback) {
+	w.symbolChangeCbMu.Lock()
+	defer w.symbolChangeCbMu.Unlock()
+	w.symbolChangeCb = cb
 }
 
 func (w *Watcher) loop() {
@@ -214,6 +230,14 @@ func (w *Watcher) patchGraph(path string, kind ChangeKind) {
 	nodesBefore := w.indexer.graph.NodeCount()
 	edgesBefore := w.indexer.graph.EdgeCount()
 
+	// Compute the relative path for snapshotting old symbols.
+	relPath := path
+	if w.indexer.rootPath != "" {
+		if rp, err := filepath.Rel(w.indexer.rootPath, path); err == nil {
+			relPath = rp
+		}
+	}
+
 	switch kind {
 	case ChangeCreated:
 		if err := w.indexer.IndexFile(path); err != nil {
@@ -223,7 +247,19 @@ func (w *Watcher) patchGraph(path string, kind ChangeKind) {
 		nodesAdded = w.indexer.graph.NodeCount() - nodesBefore
 		edgesAdded = w.indexer.graph.EdgeCount() - edgesBefore
 
+		// Notify callback: no old symbols, only new symbols.
+		w.symbolChangeCbMu.RLock()
+		cb := w.symbolChangeCb
+		w.symbolChangeCbMu.RUnlock()
+		if cb != nil {
+			newSymbols := w.indexer.graph.GetFileNodes(relPath)
+			cb(relPath, nil, newSymbols)
+		}
+
 	case ChangeModified:
+		// Snapshot old symbols before eviction.
+		oldSymbols := w.snapshotSymbols(relPath)
+
 		nr, er := w.indexer.EvictFile(path)
 		nodesRemoved = nr
 		edgesRemoved = er
@@ -234,10 +270,30 @@ func (w *Watcher) patchGraph(path string, kind ChangeKind) {
 		nodesAdded = w.indexer.graph.NodeCount() - (nodesBefore - nr)
 		edgesAdded = w.indexer.graph.EdgeCount() - (edgesBefore - er)
 
+		// Notify callback with old and new symbols.
+		w.symbolChangeCbMu.RLock()
+		cb := w.symbolChangeCb
+		w.symbolChangeCbMu.RUnlock()
+		if cb != nil {
+			newSymbols := w.indexer.graph.GetFileNodes(relPath)
+			cb(relPath, oldSymbols, newSymbols)
+		}
+
 	case ChangeDeleted, ChangeRenamed:
+		// Snapshot old symbols before eviction.
+		oldSymbols := w.snapshotSymbols(relPath)
+
 		nr, er := w.indexer.EvictFile(path)
 		nodesRemoved = nr
 		edgesRemoved = er
+
+		// Notify callback: old symbols removed, no new symbols.
+		w.symbolChangeCbMu.RLock()
+		cb := w.symbolChangeCb
+		w.symbolChangeCbMu.RUnlock()
+		if cb != nil {
+			cb(relPath, oldSymbols, nil)
+		}
 	}
 
 	ev := GraphChangeEvent{
@@ -273,6 +329,31 @@ func (w *Watcher) patchGraph(path string, kind ChangeKind) {
 		zap.Int("edges-", edgesRemoved),
 		zap.Int64("ms", ev.DurationMs),
 	)
+}
+
+// snapshotSymbols returns a deep copy of the symbols for a file, preserving
+// their signatures in Meta so they can be compared after re-indexing.
+func (w *Watcher) snapshotSymbols(relPath string) []*graph.Node {
+	nodes := w.indexer.graph.GetFileNodes(relPath)
+	snapshot := make([]*graph.Node, 0, len(nodes))
+	for _, n := range nodes {
+		// Skip file and import nodes — we only track code symbols.
+		if n.Kind == graph.KindFile || n.Kind == graph.KindImport {
+			continue
+		}
+		cp := &graph.Node{
+			ID:       n.ID,
+			Kind:     n.Kind,
+			Name:     n.Name,
+			QualName: n.QualName,
+			FilePath: n.FilePath,
+		}
+		if sig, ok := n.Meta["signature"]; ok {
+			cp.Meta = map[string]any{"signature": sig}
+		}
+		snapshot = append(snapshot, cp)
+	}
+	return snapshot
 }
 
 // alwaysExcludeDirs are directories that should never be watched,

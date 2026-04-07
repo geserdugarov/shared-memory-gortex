@@ -7,11 +7,24 @@ import (
 	"github.com/spf13/viper"
 )
 
+type GuardRule struct {
+	Name    string `mapstructure:"name"`
+	Kind    string `mapstructure:"kind"`    // "co-change" | "boundary"
+	Source  string `mapstructure:"source"`  // package/path prefix
+	Target  string `mapstructure:"target"`  // package/path prefix
+	Message string `mapstructure:"message"` // human-readable explanation
+}
+
+type GuardsConfig struct {
+	Rules []GuardRule `mapstructure:"rules"`
+}
+
 type Config struct {
-	Index IndexConfig `mapstructure:"index"`
-	Watch WatchConfig `mapstructure:"watch"`
-	Query QueryConfig `mapstructure:"query"`
-	MCP   MCPConfig   `mapstructure:"mcp"`
+	Index  IndexConfig  `mapstructure:"index"`
+	Watch  WatchConfig  `mapstructure:"watch"`
+	Query  QueryConfig  `mapstructure:"query"`
+	MCP    MCPConfig    `mapstructure:"mcp"`
+	Guards GuardsConfig `mapstructure:"guards"`
 }
 
 type IndexConfig struct {

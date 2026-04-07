@@ -336,6 +336,8 @@ const claudeMdBlock = `## MANDATORY: Use Gortex MCP tools instead of Read/Grep
 
 Gortex is running as an MCP server. You MUST use graph queries instead of file reads whenever possible. This saves thousands of tokens per task.
 
+### Navigation and Reading
+
 | Instead of...                         | You MUST use...                          |
 |---------------------------------------|------------------------------------------|
 | ` + "`Read`" + ` a whole file for one function  | ` + "`get_symbol_source`" + ` (80% fewer tokens)   |
@@ -346,12 +348,39 @@ Gortex is running as an MCP server. You MUST use graph queries instead of file r
 | ` + "`Read`" + ` to understand a file           | ` + "`get_file_summary`" + ` or ` + "`get_editing_context`" + ` |
 | ` + "`Read`" + ` multiple files to trace calls  | ` + "`get_call_chain`" + ` / ` + "`get_callers`" + `         |
 | Guessing an import path               | ` + "`find_import_path`" + `                       |
-| Reading files to assess change scope  | ` + "`explain_change_impact`" + `                  |
 | ` + "`Read`" + ` to check a function signature  | ` + "`get_symbol_signature`" + `                   |
+| 5-10 calls to explore for a task      | ` + "`smart_context`" + ` (one call)               |
+
+### Impact Analysis and Safety
+
+| Instead of...                         | You MUST use...                          |
+|---------------------------------------|------------------------------------------|
+| Reading files to assess change scope  | ` + "`explain_change_impact`" + ` (includes cross-community warnings) |
 | Guessing which tests to run           | ` + "`get_test_targets`" + `                       |
 | Manual dependency ordering            | ` + "`get_edit_plan`" + `                          |
+| Hoping signature changes are safe     | ` + "`verify_change`" + ` — checks callers and interface implementors |
+| Manually checking team conventions    | ` + "`check_guards`" + ` — evaluates guard rules from .gortex.yaml |
+| Wondering if a new dep creates a cycle| ` + "`would_create_cycle`" + ` — checks before you add it |
+
+### Code Quality and Analysis
+
+| Instead of...                         | You MUST use...                          |
+|---------------------------------------|------------------------------------------|
+| Manually hunting unused code          | ` + "`find_dead_code`" + ` — zero incoming edges (excludes entry points, tests, exports) |
+| Guessing which symbols are over-coupled| ` + "`find_hotspots`" + ` — ranks by fan-in, fan-out, community crossings |
+| Manually scanning for circular deps   | ` + "`find_cycles`" + ` — Tarjan's SCC with severity classification |
+| Checking if the index is stale        | ` + "`index_health`" + ` — health score, parse failures, stale files |
+| Wondering what changed this session   | ` + "`get_symbol_history`" + ` — modification counts, flags churning (3+ edits) |
+
+### Code Generation and Editing
+
+| Instead of...                         | You MUST use...                          |
+|---------------------------------------|------------------------------------------|
 | Reading files to learn a pattern      | ` + "`suggest_pattern`" + `                        |
-| 5-10 calls to explore for a task      | ` + "`smart_context`" + ` (one call)               |
+| Manually scaffolding from a pattern   | ` + "`scaffold`" + ` — generates code, wiring, and test stubs from an example |
+| Sequencing multi-file edits yourself  | ` + "`batch_edit`" + ` — applies edits in dependency order, re-indexes between steps |
+| Reading a diff without graph context  | ` + "`diff_context`" + ` — enriches git diff with callers, callees, community, risk |
+| Guessing what context you need next   | ` + "`prefetch_context`" + ` — predicts needed symbols from task + recent activity |
 
 ## Session start (Gortex)
 
@@ -359,10 +388,10 @@ Gortex is running as an MCP server. You MUST use graph queries instead of file r
 2. If ` + "`total_nodes`" + ` is 0, call ` + "`index_repository`" + ` with path ` + "`\".\"`" + `.
 3. For a new task, call ` + "`smart_context`" + ` with the task description.
 4. For every file you are about to edit, call ` + "`get_editing_context`" + ` first.
-5. To see just one function's code, call ` + "`get_symbol_source`" + ` instead of Read.
-6. Before any refactor, call ` + "`get_edit_plan`" + ` for dependency-ordered file list.
-7. Before committing, call ` + "`detect_changes`" + ` to verify scope.
-8. After editing, call ` + "`get_test_targets`" + ` to know which tests to run.
+5. Before changing a function signature, call ` + "`verify_change`" + ` to catch contract violations.
+6. Before any refactor, call ` + "`get_edit_plan`" + ` for dependency-ordered file list. Use ` + "`batch_edit`" + ` to apply atomically.
+7. After editing, call ` + "`check_guards`" + ` to verify team conventions, then ` + "`get_test_targets`" + ` for tests to run.
+8. Before committing, call ` + "`detect_changes`" + ` to verify scope. Use ` + "`diff_context`" + ` for graph-enriched review.
 
 ## Gortex slash commands
 
@@ -447,6 +476,30 @@ Quick reference for all Gortex MCP tools and the knowledge graph schema.
 | get_processes | Discovered execution flows (entry points -> call chains) |
 | get_process | Full step-by-step trace of one execution flow |
 | detect_changes | Git diff -> affected symbols -> blast radius |
+
+### Proactive Safety
+| Tool | What it gives you |
+|------|-------------------|
+| verify_change | Checks proposed signature changes against all callers and interface implementors |
+| check_guards | Evaluates project guard rules (.gortex.yaml) against changed symbols |
+| would_create_cycle | Checks if adding a dependency would create a circular dependency |
+
+### Code Quality
+| Tool | What it gives you |
+|------|-------------------|
+| find_dead_code | Symbols with zero incoming edges (excludes entry points, tests, exports) |
+| find_hotspots | Symbols ranked by fan-in, fan-out, and community boundary crossings |
+| find_cycles | Circular dependency detection via Tarjan's SCC, classified by severity |
+| index_health | Health score, parse failures, stale files, language coverage |
+| get_symbol_history | Symbols modified this session with counts; flags churning (3+ edits) |
+
+### Code Generation
+| Tool | What it gives you |
+|------|-------------------|
+| scaffold | Generates code, registration wiring, and test stubs from an example symbol |
+| batch_edit | Applies multiple edits in dependency order, re-indexes between steps |
+| diff_context | Git diff enriched with callers, callees, community, processes, per-file risk |
+| prefetch_context | Predicts needed symbols from task description + recent activity |
 
 ## Graph Schema
 
@@ -675,6 +728,10 @@ func writeMergeKiroMCP(path string) error {
 			"smart_context", "get_edit_plan", "get_test_targets", "suggest_pattern",
 			"get_communities", "get_community", "get_processes", "get_process",
 			"detect_changes", "index_repository",
+			"verify_change", "check_guards", "prefetch_context",
+			"find_dead_code", "find_hotspots", "find_cycles", "would_create_cycle",
+			"diff_context", "index_health", "get_symbol_history",
+			"scaffold", "batch_edit",
 		},
 	}
 	config["mcpServers"] = servers
@@ -704,9 +761,11 @@ inclusion: always
 
 # Gortex Code Intelligence
 
-Gortex is running as an MCP server. It indexes this repository into an in-memory knowledge graph and exposes 28 tools for code navigation, impact analysis, and refactoring.
+Gortex is running as an MCP server. It indexes this repository into an in-memory knowledge graph and exposes tools for code navigation, impact analysis, and refactoring.
 
 ## Use Gortex tools instead of file reads whenever possible
+
+### Navigation and Reading
 
 | Instead of...                         | Use...                                   |
 |---------------------------------------|------------------------------------------|
@@ -718,23 +777,49 @@ Gortex is running as an MCP server. It indexes this repository into an in-memory
 | Reading to understand a file          | ` + "`get_file_summary`" + ` or ` + "`get_editing_context`" + ` |
 | Reading multiple files to trace calls | ` + "`get_call_chain`" + ` / ` + "`get_callers`" + `         |
 | Guessing an import path              | ` + "`find_import_path`" + `                       |
-| Reading files to assess change scope  | ` + "`explain_change_impact`" + `                  |
 | Reading to check a function signature | ` + "`get_symbol_signature`" + `                   |
+| 5-10 calls to explore for a task      | ` + "`smart_context`" + ` (one call)               |
+
+### Impact Analysis and Safety
+
+| Instead of...                         | Use...                                   |
+|---------------------------------------|------------------------------------------|
+| Reading files to assess change scope  | ` + "`explain_change_impact`" + ` (includes cross-community warnings) |
 | Guessing which tests to run           | ` + "`get_test_targets`" + `                       |
 | Manual dependency ordering            | ` + "`get_edit_plan`" + `                          |
+| Hoping signature changes are safe     | ` + "`verify_change`" + ` — checks callers and interface implementors |
+| Manually checking team conventions    | ` + "`check_guards`" + ` — evaluates guard rules from .gortex.yaml |
+| Wondering if a new dep creates a cycle| ` + "`would_create_cycle`" + ` — checks before you add it |
+
+### Code Quality and Analysis
+
+| Instead of...                         | Use...                                   |
+|---------------------------------------|------------------------------------------|
+| Manually hunting unused code          | ` + "`find_dead_code`" + ` — zero incoming edges (excludes entry points, tests, exports) |
+| Guessing which symbols are over-coupled| ` + "`find_hotspots`" + ` — ranks by fan-in, fan-out, community crossings |
+| Manually scanning for circular deps   | ` + "`find_cycles`" + ` — Tarjan's SCC with severity classification |
+| Checking if the index is stale        | ` + "`index_health`" + ` — health score, parse failures, stale files |
+| Wondering what changed this session   | ` + "`get_symbol_history`" + ` — modification counts, flags churning (3+ edits) |
+
+### Code Generation and Editing
+
+| Instead of...                         | Use...                                   |
+|---------------------------------------|------------------------------------------|
 | Reading files to learn a pattern      | ` + "`suggest_pattern`" + `                        |
-| 5-10 calls to explore for a task      | ` + "`smart_context`" + ` (one call)               |
+| Manually scaffolding from a pattern   | ` + "`scaffold`" + ` — generates code, wiring, and test stubs from an example |
+| Sequencing multi-file edits yourself  | ` + "`batch_edit`" + ` — applies edits in dependency order, re-indexes between steps |
+| Reading a diff without graph context  | ` + "`diff_context`" + ` — enriches git diff with callers, callees, community, risk |
+| Guessing what context you need next   | ` + "`prefetch_context`" + ` — predicts needed symbols from task + recent activity |
 
 ## Session workflow
 
-1. Call ` + "`graph_stats`" + ` to confirm Gortex is running and orient in the codebase.
-2. If ` + "`total_nodes`" + ` is 0, call ` + "`index_repository`" + ` with path ` + "`\".\"`" + `.
-3. For a new task, call ` + "`smart_context`" + ` with the task description.
-4. Before editing any file, call ` + "`get_editing_context`" + ` first.
-5. To see one function's code, call ` + "`get_symbol_source`" + ` instead of reading the file.
-6. Before any refactor, call ` + "`get_edit_plan`" + ` for dependency-ordered file list.
-7. Before committing, call ` + "`detect_changes`" + ` to verify scope.
-8. After editing, call ` + "`get_test_targets`" + ` to know which tests to run.
+1. Call ` + "`graph_stats`" + ` to confirm Gortex is running. If ` + "`total_nodes`" + ` is 0, call ` + "`index_repository`" + ` with path ` + "`\".\"`" + `.
+2. For a new task, call ` + "`smart_context`" + ` with the task description.
+3. Before editing any file, call ` + "`get_editing_context`" + ` first.
+4. Before changing a function signature, call ` + "`verify_change`" + ` to catch contract violations.
+5. Before any refactor, call ` + "`get_edit_plan`" + ` for dependency-ordered file list. Use ` + "`batch_edit`" + ` to apply atomically.
+6. After editing, call ` + "`check_guards`" + ` to verify team conventions, then ` + "`get_test_targets`" + ` for tests to run.
+7. Before committing, call ` + "`detect_changes`" + ` to verify scope. Use ` + "`diff_context`" + ` for graph-enriched review.
 `
 
 const kiroSteeringExplore = `---
@@ -896,7 +981,7 @@ var kiroHooks = map[string]string{
   },
   "then": {
     "type": "askAgent",
-    "prompt": "Before reading this file, check if Gortex MCP server is available. If it is, call get_editing_context or get_file_summary for the file being read to get symbol context, callers, and callees first. This saves tokens and gives you architectural awareness before seeing the raw source. If the file is not a source code file (e.g. config, markdown, json), skip this step."
+    "prompt": "SKIP this hook entirely (do nothing, proceed with the read) if ANY of these are true: (1) the file path contains .kiro/, .claude/, .github/, .vscode/, or node_modules/, (2) the file extension is .md, .json, .yaml, .yml, .toml, .txt, .lock, .sum, .mod, .env, .gitignore, .html, .css, or .svg, (3) the file is not a source code file. ONLY for source code files (.go, .ts, .tsx, .js, .jsx, .py, .rs, .java, .kt, .cs, .rb, .php, .swift, .scala, .c, .cpp, .h): call get_editing_context or get_file_summary for the file to get symbol context before reading it."
   }
 }
 `}

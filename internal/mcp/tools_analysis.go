@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"context"
+	"math"
 	"strings"
 
 	"github.com/mark3labs/mcp-go/mcp"
@@ -203,7 +204,8 @@ func (s *Server) handleDetectChanges(_ context.Context, req mcp.CallToolRequest)
 	})
 }
 
-// handleEnhancedChangeImpact replaces the original explain_change_impact with risk tiering.
+// handleEnhancedChangeImpact replaces the original explain_change_impact with risk tiering
+// and cross-community warnings.
 func (s *Server) handleEnhancedChangeImpact(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	idsStr, err := req.RequireString("symbol_ids")
 	if err != nil {
@@ -216,5 +218,115 @@ func (s *Server) handleEnhancedChangeImpact(_ context.Context, req mcp.CallToolR
 	}
 
 	impact := analysis.AnalyzeImpact(s.graph, ids, s.getCommunities(), s.getProcesses())
-	return mcp.NewToolResultJSON(impact)
+
+	result := map[string]any{
+		"risk":                 impact.Risk,
+		"summary":              impact.Summary,
+		"by_depth":             impact.ByDepth,
+		"affected_processes":   impact.AffectedProcesses,
+		"affected_communities": impact.AffectedCommunities,
+		"test_files":           impact.TestFiles,
+		"total_affected":       impact.TotalAffected,
+	}
+
+	// Cross-community warning
+	if len(impact.AffectedCommunities) >= 2 {
+		communities := s.getCommunities()
+		warning := s.computeCrossCommunityWarning(impact.AffectedCommunities, communities)
+		result["cross_community_warning"] = warning
+	} else {
+		result["cross_community_warning"] = nil
+		if len(impact.AffectedCommunities) == 1 {
+			result["community_note"] = "change is community-local"
+		}
+	}
+
+	return mcp.NewToolResultJSON(result)
+}
+
+// CommunityCoupling describes the coupling between two communities.
+type CommunityCoupling struct {
+	CommunityA    string  `json:"community_a"`
+	CommunityB    string  `json:"community_b"`
+	LabelA        string  `json:"label_a"`
+	LabelB        string  `json:"label_b"`
+	CouplingScore float64 `json:"coupling_score"`
+	TightlyCoupled bool   `json:"tightly_coupled"`
+}
+
+// CrossCommunityWarning describes cross-community impact.
+type CrossCommunityWarning struct {
+	AffectedCommunities []string            `json:"affected_communities"`
+	Couplings           []CommunityCoupling `json:"couplings,omitempty"`
+}
+
+func (s *Server) computeCrossCommunityWarning(affectedCommunities []string, communities *analysis.CommunityResult) *CrossCommunityWarning {
+	warning := &CrossCommunityWarning{
+		AffectedCommunities: affectedCommunities,
+	}
+
+	if communities == nil {
+		return warning
+	}
+
+	// Build community label lookup
+	commLabels := make(map[string]string)
+	commMembers := make(map[string]map[string]bool)
+	for _, c := range communities.Communities {
+		commLabels[c.ID] = c.Label
+		memberSet := make(map[string]bool, len(c.Members))
+		for _, m := range c.Members {
+			memberSet[m] = true
+		}
+		commMembers[c.ID] = memberSet
+	}
+
+	// For each pair of affected communities, compute coupling score
+	for i := 0; i < len(affectedCommunities); i++ {
+		for j := i + 1; j < len(affectedCommunities); j++ {
+			cA := affectedCommunities[i]
+			cB := affectedCommunities[j]
+
+			membersA := commMembers[cA]
+			membersB := commMembers[cB]
+
+			if len(membersA) == 0 || len(membersB) == 0 {
+				continue
+			}
+
+			// Count edges crossing the boundary and total edges in both communities
+			crossBoundary := 0
+			totalEdges := 0
+
+			edges := s.graph.AllEdges()
+			for _, e := range edges {
+				inA := membersA[e.From] || membersA[e.To]
+				inB := membersB[e.From] || membersB[e.To]
+
+				if inA || inB {
+					totalEdges++
+				}
+				// Cross-boundary: one end in A, other in B
+				if (membersA[e.From] && membersB[e.To]) || (membersB[e.From] && membersA[e.To]) {
+					crossBoundary++
+				}
+			}
+
+			var couplingScore float64
+			if totalEdges > 0 {
+				couplingScore = math.Round(float64(crossBoundary)/float64(totalEdges)*10000) / 100
+			}
+
+			warning.Couplings = append(warning.Couplings, CommunityCoupling{
+				CommunityA:     cA,
+				CommunityB:     cB,
+				LabelA:         commLabels[cA],
+				LabelB:         commLabels[cB],
+				CouplingScore:  couplingScore,
+				TightlyCoupled: couplingScore > 15,
+			})
+		}
+	}
+
+	return warning
 }

@@ -66,7 +66,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 	eng.SetSearch(idx.Search())
 	gortexmcp.Version = version
 	// Watcher is set later via srv.SetWatcher after background init.
-	srv := gortexmcp.NewServer(eng, g, idx, nil, logger)
+	srv := gortexmcp.NewServer(eng, g, idx, nil, logger, cfg.Guards.Rules)
 
 	fmt.Fprintf(os.Stderr, "[gortex] MCP server ready (transport: %s)\n", serveTransport)
 

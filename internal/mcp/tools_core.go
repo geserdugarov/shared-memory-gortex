@@ -182,6 +182,12 @@ func (s *Server) handleGetSymbol(_ context.Context, req mcp.CallToolRequest) (*m
 	if err != nil {
 		return mcp.NewToolResultError("id is required"), nil
 	}
+
+	// Auto re-index stale file before querying.
+	if parts := strings.SplitN(id, "::", 2); len(parts) == 2 {
+		s.ensureFresh([]string{parts[0]})
+	}
+
 	node := s.engine.GetSymbol(id)
 	if node == nil {
 		return mcp.NewToolResultError("symbol not found: " + id), nil
@@ -240,6 +246,10 @@ func (s *Server) handleGetFileSummary(_ context.Context, req mcp.CallToolRequest
 	if err != nil {
 		return mcp.NewToolResultError("file_path is required"), nil
 	}
+
+	// Auto re-index stale file before querying.
+	s.ensureFresh([]string{fp})
+
 	sg := s.engine.GetFileSymbols(fp)
 	if len(sg.Nodes) == 0 {
 		return mcp.NewToolResultError("no symbols found for file: " + fp), nil

@@ -321,7 +321,8 @@ const mcpJSON = `{
       "args": [
         "serve",
         "--index", ".",
-        "--watch"
+        "--watch",
+        "--web"
       ],
       "env": {
         "GORTEX_INDEX_WORKERS": "${GORTEX_WORKERS:-8}"
@@ -662,7 +663,7 @@ func writeMergeKiroMCP(path string) error {
 
 	servers["gortex"] = map[string]any{
 		"command":  "gortex",
-		"args":     []string{"serve", "--index", ".", "--watch", "--port", "8766"},
+		"args":     []string{"serve", "--index", ".", "--watch"},
 		"env":      map[string]string{"GORTEX_INDEX_WORKERS": "8"},
 		"disabled": false,
 		"autoApprove": []string{

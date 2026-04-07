@@ -169,3 +169,8 @@ func (s *Server) WatchForReanalysis(h *hub.Hub, debounceMs int) {
 func (s *Server) ServeStdio() error {
 	return server.ServeStdio(s.mcpServer)
 }
+
+// SetWatcher sets the watcher after background initialization.
+func (s *Server) SetWatcher(w *indexer.Watcher) {
+	s.watcher = w
+}

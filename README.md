@@ -26,7 +26,7 @@ Built for AI coding agents (Claude Code, Cursor, Codex) — one `smart_context` 
 # Build (requires CGO for tree-sitter C bindings)
 go build -o gortex ./cmd/gortex/
 
-# Set up Gortex for a project (creates .mcp.json, .claude/commands/, CLAUDE.md, hooks, global skills)
+# Set up Gortex for a project (creates configs for Claude Code + Kiro IDE)
 gortex init /path/to/repo
 
 # Or with codebase analysis for a richer CLAUDE.md
@@ -47,6 +47,17 @@ After running `gortex init`, Claude Code automatically starts Gortex via `.mcp.j
 - **Global skills:** installed to `~/.claude/skills/` — available across all repos
 - **PreToolUse hook:** automatic graph context on Read/Grep calls
 - **CLAUDE.md instructions:** mandatory tool usage table and session workflow
+
+## Usage with Kiro
+
+`gortex init` also sets up Kiro IDE integration automatically:
+
+- **MCP server:** `.kiro/settings/mcp.json` — all 28 tools auto-approved for zero-friction use
+- **Steering files:** `.kiro/steering/gortex-workflow.md` (always active) teaches Kiro to prefer graph queries over file reads. Additional manual steering files for explore, debug, impact, and refactor workflows are available via `#` in chat.
+- **Agent hooks:**
+  - `gortex-smart-context` — on each prompt, assembles task-relevant context from the graph in one call
+  - `gortex-post-edit` — after saving source files, shows blast radius and which tests to run
+  - `gortex-pre-read` — before reading source files, enriches with symbol context from the graph
 
 ## CLI Commands
 

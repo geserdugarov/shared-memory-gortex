@@ -1,13 +1,11 @@
 package main
 
 import (
-	"context"
 	"fmt"
 	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
-	"time"
 
 	"github.com/spf13/cobra"
 
@@ -27,6 +25,7 @@ var (
 	serveTransport string
 	servePort      int
 	serveWatch     bool
+	serveWeb       bool
 	serveDebounce  int
 )
 
@@ -41,6 +40,7 @@ func init() {
 	serveCmd.Flags().StringVar(&serveTransport, "transport", "stdio", "transport: stdio")
 	serveCmd.Flags().IntVar(&servePort, "port", 8765, "port for HTTP transport")
 	serveCmd.Flags().BoolVar(&serveWatch, "watch", false, "keep graph in sync with filesystem changes")
+	serveCmd.Flags().BoolVar(&serveWeb, "web", false, "start web visualization UI")
 	serveCmd.Flags().IntVar(&serveDebounce, "debounce", 150, "debounce delay in ms")
 	rootCmd.AddCommand(serveCmd)
 }
@@ -60,91 +60,100 @@ func runServe(cmd *cobra.Command, args []string) error {
 
 	idx := indexer.New(g, reg, cfg.Index, logger)
 
-	// Index if path provided.
-	if serveIndex != "" {
-		fmt.Fprintf(os.Stderr, "[gortex] indexing %s...\n", serveIndex)
-		result, err := idx.Index(serveIndex)
-		if err != nil {
-			return fmt.Errorf("indexing failed: %w", err)
-		}
-		fmt.Fprintf(os.Stderr, "[gortex] indexed %d files (%d nodes, %d edges) in %dms\n",
-			result.FileCount, result.NodeCount, result.EdgeCount, result.DurationMs)
-	}
-
-	// Start watcher if requested.
-	var watcher *indexer.Watcher
-	if serveWatch {
-		wcfg := cfg.Watch
-		wcfg.Enabled = true
-		if serveDebounce > 0 {
-			wcfg.DebounceMs = serveDebounce
-		}
-
-		watcher, err = indexer.NewWatcher(idx, wcfg, logger)
-		if err != nil {
-			return fmt.Errorf("watcher setup failed: %w", err)
-		}
-
-		watchPaths := wcfg.Paths
-		if len(watchPaths) == 0 && serveIndex != "" {
-			watchPaths = []string{serveIndex}
-		}
-		if len(watchPaths) == 0 {
-			watchPaths = []string{"."}
-		}
-
-		if err := watcher.Start(watchPaths); err != nil {
-			return fmt.Errorf("watcher start failed: %w", err)
-		}
-		defer func() { _ = watcher.Stop() }()
-
-		fmt.Fprintf(os.Stderr, "[gortex] watch mode active\n")
-	}
-
-	// Create hub for fan-out of watcher events (also handles logging).
-	var eventHub *hub.Hub
-	if watcher != nil {
-		eventHub = hub.New()
-		go eventHub.Run(watcher.Events())
-		defer eventHub.Stop()
-	}
-
-	// Create and start MCP server.
+	// Create MCP server immediately so the stdio handshake can complete
+	// before indexing (which may take time on large repos).
 	eng := query.NewEngine(g)
 	eng.SetSearch(idx.Search())
 	gortexmcp.Version = version
-	srv := gortexmcp.NewServer(eng, g, idx, watcher, logger)
+	// Watcher is set later via srv.SetWatcher after background init.
+	srv := gortexmcp.NewServer(eng, g, idx, nil, logger)
 
-	// Run initial analysis (community detection + process discovery).
-	srv.RunAnalysis()
-	if eventHub != nil {
-		srv.WatchForReanalysis(eventHub, 500)
-	}
 	fmt.Fprintf(os.Stderr, "[gortex] MCP server ready (transport: %s)\n", serveTransport)
 
-	// Start web visualization server.
-	webSrv := web.NewServer(g, eng, eventHub, logger)
+	// Start MCP stdio in a goroutine so we can do background init.
+	errCh := make(chan error, 1)
 	go func() {
-		webAddr := fmt.Sprintf(":%d", servePort)
-		fmt.Fprintf(os.Stderr, "[gortex] web UI at http://localhost:%d\n", servePort)
-		if err := webSrv.Start(webAddr); err != nil && err != http.ErrServerClosed {
-			fmt.Fprintf(os.Stderr, "[gortex] web server error: %v\n", err)
-		}
+		errCh <- srv.ServeStdio()
 	}()
-	defer func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		_ = webSrv.Shutdown(ctx)
+
+	// Background: index, watch, analyze — graph populates while MCP is live.
+	go func() {
+		if serveIndex != "" {
+			fmt.Fprintf(os.Stderr, "[gortex] indexing %s...\n", serveIndex)
+			result, err := idx.Index(serveIndex)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "[gortex] indexing failed: %v\n", err)
+				return
+			}
+			fmt.Fprintf(os.Stderr, "[gortex] indexed %d files (%d nodes, %d edges) in %dms\n",
+				result.FileCount, result.NodeCount, result.EdgeCount, result.DurationMs)
+		}
+
+		// Start watcher if requested.
+		if serveWatch {
+			wcfg := cfg.Watch
+			wcfg.Enabled = true
+			if serveDebounce > 0 {
+				wcfg.DebounceMs = serveDebounce
+			}
+
+			watcher, err := indexer.NewWatcher(idx, wcfg, logger)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "[gortex] watcher setup failed: %v\n", err)
+				return
+			}
+
+			watchPaths := wcfg.Paths
+			if len(watchPaths) == 0 && serveIndex != "" {
+				watchPaths = []string{serveIndex}
+			}
+			if len(watchPaths) == 0 {
+				watchPaths = []string{"."}
+			}
+
+			if err := watcher.Start(watchPaths); err != nil {
+				fmt.Fprintf(os.Stderr, "[gortex] watcher start failed: %v\n", err)
+				return
+			}
+			srv.SetWatcher(watcher)
+
+			// Create hub for fan-out of watcher events.
+			eventHub := hub.New()
+			go eventHub.Run(watcher.Events())
+
+			srv.WatchForReanalysis(eventHub, 500)
+			fmt.Fprintf(os.Stderr, "[gortex] watch mode active\n")
+
+			// Start web visualization server (only if --web flag is set).
+			if serveWeb {
+				webSrv := web.NewServer(g, eng, eventHub, logger)
+				go func() {
+					webAddr := fmt.Sprintf(":%d", servePort)
+					fmt.Fprintf(os.Stderr, "[gortex] web UI at http://localhost:%d\n", servePort)
+					if err := webSrv.Start(webAddr); err != nil && err != http.ErrServerClosed {
+						fmt.Fprintf(os.Stderr, "[gortex] web server error: %v\n", err)
+					}
+				}()
+			}
+		} else if serveWeb {
+			// Web without watch — no event hub needed.
+			webSrv := web.NewServer(g, eng, nil, logger)
+			go func() {
+				webAddr := fmt.Sprintf(":%d", servePort)
+				fmt.Fprintf(os.Stderr, "[gortex] web UI at http://localhost:%d\n", servePort)
+				if err := webSrv.Start(webAddr); err != nil && err != http.ErrServerClosed {
+					fmt.Fprintf(os.Stderr, "[gortex] web server error: %v\n", err)
+				}
+			}()
+		}
+
+		// Run initial analysis.
+		srv.RunAnalysis()
 	}()
 
 	// Handle graceful shutdown.
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-
-	errCh := make(chan error, 1)
-	go func() {
-		errCh <- srv.ServeStdio()
-	}()
 
 	select {
 	case err := <-errCh:

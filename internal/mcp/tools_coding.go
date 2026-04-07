@@ -1383,6 +1383,24 @@ func (s *Server) handleEditSymbol(_ context.Context, req mcp.CallToolRequest) (*
 	symbolSource := strings.Join(lines[node.StartLine-1:node.EndLine], "\n")
 
 	if !strings.Contains(symbolSource, oldSource) {
+		// Expand search to include preceding doc comments (agents often include
+		// them because get_symbol_source returns context_lines above the symbol).
+		expandedStart := node.StartLine - 1
+		for expandedStart > 0 {
+			trimmed := strings.TrimSpace(lines[expandedStart-1])
+			if strings.HasPrefix(trimmed, "//") || strings.HasPrefix(trimmed, "/*") ||
+				strings.HasPrefix(trimmed, "*") || trimmed == "" {
+				expandedStart--
+			} else {
+				break
+			}
+		}
+		if expandedStart < node.StartLine-1 {
+			symbolSource = strings.Join(lines[expandedStart:node.EndLine], "\n")
+		}
+	}
+
+	if !strings.Contains(symbolSource, oldSource) {
 		return mcp.NewToolResultError(fmt.Sprintf(
 			"old_source not found within symbol %s (lines %d-%d). Use get_symbol_source to see the current code.",
 			id, node.StartLine, node.EndLine)), nil
@@ -1396,8 +1414,27 @@ func (s *Server) handleEditSymbol(_ context.Context, req mcp.CallToolRequest) (*
 
 	// Apply the edit to the full file content.
 	// Find old_source within the symbol's line range only (not the whole file).
+	// Use the expanded start if doc comments were included.
+	effectiveStart := node.StartLine
+	if strings.Contains(strings.Join(lines[node.StartLine-1:node.EndLine], "\n"), oldSource) {
+		effectiveStart = node.StartLine
+	} else {
+		// Recalculate expanded start for offset computation.
+		expandedStart := node.StartLine - 1
+		for expandedStart > 0 {
+			trimmed := strings.TrimSpace(lines[expandedStart-1])
+			if strings.HasPrefix(trimmed, "//") || strings.HasPrefix(trimmed, "/*") ||
+				strings.HasPrefix(trimmed, "*") || trimmed == "" {
+				expandedStart--
+			} else {
+				break
+			}
+		}
+		effectiveStart = expandedStart + 1
+	}
+
 	symbolStart := 0
-	for i := 0; i < node.StartLine-1 && i < len(lines); i++ {
+	for i := 0; i < effectiveStart-1 && i < len(lines); i++ {
 		symbolStart += len(lines[i]) + 1 // +1 for newline
 	}
 

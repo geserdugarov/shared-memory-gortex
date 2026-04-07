@@ -86,6 +86,15 @@ func (s *Server) registerCodingTools() {
 	)
 
 	s.mcpServer.AddTool(
+		mcp.NewTool("get_edit_plan",
+			mcp.WithDescription("Given symbols you plan to change, returns a dependency-ordered list of files and symbols to edit — definitions first, then implementations, then callers, then tests. Eliminates manual dependency reasoning. Use before any multi-file refactor."),
+			mcp.WithString("symbol_ids", mcp.Required(), mcp.Description("Comma-separated list of symbol IDs to change")),
+			mcp.WithNumber("depth", mcp.Description("Dependent traversal depth (default: 3)")),
+		),
+		s.handleGetEditPlan,
+	)
+
+	s.mcpServer.AddTool(
 		mcp.NewTool("get_recent_changes",
 			mcp.WithDescription("Returns files and symbols that changed since the last call (watch mode only). Use to re-orient after the user edits files outside of Claude Code's view, without re-reading anything."),
 			mcp.WithString("since", mcp.Description("ISO 8601 timestamp (omit for all changes since index)")),
@@ -755,6 +764,165 @@ func (s *Server) handleSuggestPattern(_ context.Context, req mcp.CallToolRequest
 	result["files_to_edit"] = filesToEdit
 
 	return mcp.NewToolResultJSON(result)
+}
+
+func (s *Server) handleGetEditPlan(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	idsStr, err := req.RequireString("symbol_ids")
+	if err != nil {
+		return mcp.NewToolResultError("symbol_ids is required"), nil
+	}
+
+	ids := strings.Split(idsStr, ",")
+	for i := range ids {
+		ids[i] = strings.TrimSpace(ids[i])
+	}
+
+	depth := req.GetInt("depth", 3)
+
+	type editStep struct {
+		File    string   `json:"file"`
+		Symbols []string `json:"symbols"`
+		Reason  string   `json:"reason"`
+		Order   int      `json:"order"`
+	}
+
+	// Track files by category and depth.
+	type fileInfo struct {
+		symbols map[string]bool
+		reason  string
+		order   int // lower = edit first
+	}
+	files := make(map[string]*fileInfo)
+
+	addFile := func(filePath, symbol, reason string, order int) {
+		if fi, ok := files[filePath]; ok {
+			fi.symbols[symbol] = true
+			// Keep the lowest (highest priority) order.
+			if order < fi.order {
+				fi.order = order
+				fi.reason = reason
+			}
+		} else {
+			files[filePath] = &fileInfo{
+				symbols: map[string]bool{symbol: true},
+				reason:  reason,
+				order:   order,
+			}
+		}
+	}
+
+	changedFiles := make(map[string]bool)
+
+	// Order 0: The changed symbols themselves (definitions).
+	for _, id := range ids {
+		node := s.engine.GetSymbol(id)
+		if node == nil {
+			continue
+		}
+		addFile(node.FilePath, node.Name, "definition — change starts here", 0)
+		changedFiles[node.FilePath] = true
+
+		// Check if symbol is an interface — implementations need updating.
+		if node.Kind == graph.KindInterface {
+			impls := s.engine.FindImplementations(id)
+			for _, impl := range impls {
+				addFile(impl.FilePath, impl.Name, "implements "+node.Name+" — must conform to changes", 1)
+			}
+		}
+
+		// Check MemberOf — if changing a type, its methods may need updating.
+		if node.Kind == graph.KindType || node.Kind == graph.KindInterface {
+			inEdges := s.engine.GetInEdges(id)
+			for _, e := range inEdges {
+				if e.Kind == graph.EdgeMemberOf {
+					memberNode := s.engine.GetSymbol(e.From)
+					if memberNode != nil {
+						addFile(memberNode.FilePath, memberNode.Name, "member of "+node.Name, 1)
+					}
+				}
+			}
+		}
+	}
+
+	// Order 2-N: Dependents at increasing depth (callers/importers).
+	for _, id := range ids {
+		dependents := s.engine.GetDependents(id, query.QueryOptions{Depth: depth, Limit: 100, Detail: "brief"})
+		for _, dn := range dependents.Nodes {
+			if dn.Kind == graph.KindFile {
+				continue
+			}
+			// Skip the changed symbols themselves.
+			isChanged := false
+			for _, cid := range ids {
+				if dn.ID == cid {
+					isChanged = true
+					break
+				}
+			}
+			if isChanged {
+				continue
+			}
+
+			if isTestFile(dn.FilePath) {
+				addFile(dn.FilePath, dn.Name, "test — verify after changes", 100)
+			} else if changedFiles[dn.FilePath] {
+				// Same file as a changed symbol, already covered.
+				addFile(dn.FilePath, dn.Name, "definition — change starts here", 0)
+			} else {
+				addFile(dn.FilePath, dn.Name, "dependent — may need updating", 2)
+			}
+		}
+	}
+
+	// Sort by order, then by file path.
+	type sortableStep struct {
+		filePath string
+		info     *fileInfo
+	}
+	var sorted []sortableStep
+	for fp, fi := range files {
+		sorted = append(sorted, sortableStep{fp, fi})
+	}
+	// Stable sort: order first, then alphabetical.
+	for i := 0; i < len(sorted); i++ {
+		for j := i + 1; j < len(sorted); j++ {
+			if sorted[j].info.order < sorted[i].info.order ||
+				(sorted[j].info.order == sorted[i].info.order && sorted[j].filePath < sorted[i].filePath) {
+				sorted[i], sorted[j] = sorted[j], sorted[i]
+			}
+		}
+	}
+
+	var steps []editStep
+	for _, s := range sorted {
+		var symbols []string
+		for sym := range s.info.symbols {
+			symbols = append(symbols, sym)
+		}
+		steps = append(steps, editStep{
+			File:    s.filePath,
+			Symbols: symbols,
+			Reason:  s.info.reason,
+			Order:   s.info.order,
+		})
+	}
+
+	// Separate test files.
+	var editSteps, testSteps []editStep
+	for _, step := range steps {
+		if isTestFile(step.File) {
+			testSteps = append(testSteps, step)
+		} else {
+			editSteps = append(editSteps, step)
+		}
+	}
+
+	return mcp.NewToolResultJSON(map[string]any{
+		"edit_order":  editSteps,
+		"test_after":  testSteps,
+		"total_files": len(steps),
+		"summary":     fmt.Sprintf("%d files to edit, %d test files to verify", len(editSteps), len(testSteps)),
+	})
 }
 
 // extractPrefix returns the common prefix of a camelCase/PascalCase name.

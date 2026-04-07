@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -74,10 +75,16 @@ func runInit(_ *cobra.Command, args []string) error {
 		return err
 	}
 
+	// 4. Install PreToolUse hook in .claude/settings.local.json
+	if err := installHook(filepath.Join(root, ".claude", "settings.local.json")); err != nil {
+		fmt.Fprintf(os.Stderr, "[gortex init] warning: could not install hook: %v\n", err)
+	}
+
 	fmt.Fprintf(os.Stderr, "[gortex init] done — created:\n")
 	fmt.Fprintf(os.Stderr, "  .mcp.json                     (MCP server config)\n")
 	fmt.Fprintf(os.Stderr, "  .claude/commands/gortex-*.md   (slash commands)\n")
 	fmt.Fprintf(os.Stderr, "  CLAUDE.md                      (Gortex instructions block)\n")
+	fmt.Fprintf(os.Stderr, "  .claude/settings.local.json    (PreToolUse hook)\n")
 	fmt.Fprintf(os.Stderr, "\nCommit these files so your team gets Gortex automatically.\n")
 	fmt.Fprintf(os.Stderr, "Run `gortex serve --index . --watch` or let Claude Code start it via .mcp.json.\n")
 	return nil
@@ -159,6 +166,72 @@ func searchString(s, substr string) bool {
 		}
 	}
 	return false
+}
+
+func installHook(settingsPath string) error {
+	// Read existing settings or start fresh.
+	var settings map[string]any
+	if data, err := os.ReadFile(settingsPath); err == nil {
+		if err := json.Unmarshal(data, &settings); err != nil {
+			settings = make(map[string]any)
+		}
+	} else {
+		settings = make(map[string]any)
+	}
+
+	// Check if Gortex hook already exists.
+	if hooks, ok := settings["hooks"].(map[string]any); ok {
+		if pre, ok := hooks["PreToolUse"].([]any); ok {
+			for _, h := range pre {
+				if hm, ok := h.(map[string]any); ok {
+					if hs, ok := hm["hooks"].([]any); ok {
+						for _, entry := range hs {
+							if em, ok := entry.(map[string]any); ok {
+								if cmd, ok := em["command"].(string); ok && contains(cmd, "gortex hook") {
+									fmt.Fprintf(os.Stderr, "[gortex init] skip %s (Gortex hook already present)\n", settingsPath)
+									return nil
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// Build the hook entry.
+	hookEntry := map[string]any{
+		"matcher": "Read|Grep",
+		"hooks": []any{
+			map[string]any{
+				"type":          "command",
+				"command":       "gortex hook",
+				"timeout":       3000,
+				"statusMessage": "Enriching with Gortex graph context...",
+			},
+		},
+	}
+
+	// Ensure hooks.PreToolUse exists and append.
+	if _, ok := settings["hooks"]; !ok {
+		settings["hooks"] = make(map[string]any)
+	}
+	hooks := settings["hooks"].(map[string]any)
+	if _, ok := hooks["PreToolUse"]; !ok {
+		hooks["PreToolUse"] = []any{}
+	}
+	pre := hooks["PreToolUse"].([]any)
+	hooks["PreToolUse"] = append(pre, hookEntry)
+
+	data, err := json.MarshalIndent(settings, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(settingsPath, data, 0o644); err != nil {
+		return err
+	}
+	fmt.Fprintf(os.Stderr, "[gortex init] installed PreToolUse hook in %s\n", settingsPath)
+	return nil
 }
 
 const mcpJSON = `{

@@ -75,7 +75,7 @@ func TestEvalServerLifecycle(t *testing.T) {
 	t.Run("health_check", func(t *testing.T) {
 		resp, err := client.Get(ts.URL + "/health")
 		require.NoError(t, err)
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 
 		assert.Equal(t, http.StatusOK, resp.StatusCode)
 		assert.Equal(t, "application/json", resp.Header.Get("Content-Type"))
@@ -100,7 +100,7 @@ func TestEvalServerLifecycle(t *testing.T) {
 			strings.NewReader(body),
 		)
 		require.NoError(t, err)
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 
 		assert.Equal(t, http.StatusOK, resp.StatusCode)
 
@@ -117,7 +117,7 @@ func TestEvalServerLifecycle(t *testing.T) {
 	t.Run("stats", func(t *testing.T) {
 		resp, err := client.Get(ts.URL + "/stats")
 		require.NoError(t, err)
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 
 		assert.Equal(t, http.StatusOK, resp.StatusCode)
 
@@ -139,7 +139,7 @@ func TestEvalServerLifecycle(t *testing.T) {
 			strings.NewReader(body),
 		)
 		require.NoError(t, err)
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 
 		assert.Equal(t, http.StatusNotFound, resp.StatusCode)
 	})

@@ -168,8 +168,34 @@ func (r *Resolver) resolveMethodCall(e *graph.Edge, methodName string, stats *Re
 		return
 	}
 
-	// Prefer same-package match for methods.
 	callerDir := filepath.Dir(e.FilePath)
+	receiverType := edgeReceiverType(e)
+
+	// If we have a type hint, try exact type match first.
+	if receiverType != "" {
+		// Pass 1: same-directory + exact type match (highest confidence).
+		for _, c := range candidates {
+			if c.Kind == graph.KindMethod &&
+				filepath.Dir(c.FilePath) == callerDir &&
+				nodeReceiverType(c) == receiverType {
+				e.To = c.ID
+				e.Confidence = 0.95
+				stats.Resolved++
+				return
+			}
+		}
+		// Pass 2: exact type match, any directory.
+		for _, c := range candidates {
+			if c.Kind == graph.KindMethod && nodeReceiverType(c) == receiverType {
+				e.To = c.ID
+				e.Confidence = 0.85
+				stats.Resolved++
+				return
+			}
+		}
+	}
+
+	// Fallback: name-only heuristic.
 	for _, c := range candidates {
 		if c.Kind == graph.KindMethod && filepath.Dir(c.FilePath) == callerDir {
 			e.To = c.ID
@@ -177,8 +203,6 @@ func (r *Resolver) resolveMethodCall(e *graph.Edge, methodName string, stats *Re
 			return
 		}
 	}
-
-	// Fall back to any method match.
 	for _, c := range candidates {
 		if c.Kind == graph.KindMethod {
 			e.To = c.ID
@@ -188,6 +212,28 @@ func (r *Resolver) resolveMethodCall(e *graph.Edge, methodName string, stats *Re
 	}
 
 	stats.Unresolved++
+}
+
+// edgeReceiverType extracts the receiver_type from Edge.Meta, if present.
+func edgeReceiverType(e *graph.Edge) string {
+	if e.Meta == nil {
+		return ""
+	}
+	if rt, ok := e.Meta["receiver_type"].(string); ok {
+		return rt
+	}
+	return ""
+}
+
+// nodeReceiverType extracts the receiver type from a method Node.Meta.
+func nodeReceiverType(n *graph.Node) string {
+	if n.Meta == nil {
+		return ""
+	}
+	if rt, ok := n.Meta["receiver"].(string); ok {
+		return rt
+	}
+	return ""
 }
 
 // InferImplements detects structural interface satisfaction by comparing

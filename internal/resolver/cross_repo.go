@@ -179,8 +179,36 @@ func (cr *CrossRepoResolver) resolveMethodCall(e *graph.Edge, methodName string,
 	}
 
 	callerRepo := cr.callerRepoPrefix(e)
+	receiverType := edgeReceiverType(e)
 
-	// 1. Prefer same-repo match.
+	// If we have a type hint, try exact type match first.
+	if receiverType != "" {
+		// Same-repo + exact type.
+		for _, c := range candidates {
+			if c.Kind == graph.KindMethod &&
+				c.RepoPrefix == callerRepo &&
+				nodeReceiverType(c) == receiverType {
+				e.To = c.ID
+				e.Confidence = 0.95
+				stats.Resolved++
+				return
+			}
+		}
+		// Cross-repo + exact type.
+		for _, c := range candidates {
+			if c.Kind == graph.KindMethod && nodeReceiverType(c) == receiverType {
+				e.To = c.ID
+				e.CrossRepo = true
+				e.Confidence = 0.85
+				stats.Resolved++
+				stats.CrossRepoEdges++
+				stats.ByRepo[c.RepoPrefix]++
+				return
+			}
+		}
+	}
+
+	// Fallback: name-only matching.
 	for _, c := range candidates {
 		if c.Kind == graph.KindMethod && c.RepoPrefix == callerRepo {
 			e.To = c.ID
@@ -188,8 +216,6 @@ func (cr *CrossRepoResolver) resolveMethodCall(e *graph.Edge, methodName string,
 			return
 		}
 	}
-
-	// 2. Cross-repo fallback.
 	for _, c := range candidates {
 		if c.Kind == graph.KindMethod {
 			e.To = c.ID

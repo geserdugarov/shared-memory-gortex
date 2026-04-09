@@ -72,6 +72,10 @@ const (
 	qConst = `(const_declaration
 		(const_spec
 			name: (identifier) @const.name)) @const.def`
+
+	qShortVar = `(short_var_declaration
+		left: (expression_list (identifier) @svar.name)
+		right: (expression_list (_) @svar.value)) @svar.def`
 )
 
 // GoExtractor extracts Go source files into graph nodes and edges.
@@ -123,8 +127,11 @@ func (e *GoExtractor) Extract(filePath string, src []byte) (*parser.ExtractionRe
 	// Imports.
 	e.extractImports(root, src, filePath, fileNode.ID, pkgName, result)
 
-	// Call sites.
-	e.extractCalls(root, src, filePath, result)
+	// Build type environment for receiver type inference.
+	tenv := e.buildTypeEnv(root, src)
+
+	// Call sites (with type env for receiver resolution).
+	e.extractCalls(root, src, filePath, result, tenv)
 
 	// Variables and constants.
 	e.extractVarsConsts(root, src, filePath, fileNode.ID, result)
@@ -315,9 +322,7 @@ func (e *GoExtractor) extractImports(root *sitter.Node, src []byte, filePath, fi
 	}
 }
 
-func (e *GoExtractor) extractCalls(root *sitter.Node, src []byte, filePath string, result *parser.ExtractionResult) {
-	// Build a map of function/method nodes defined in this file for caller tracking.
-	// We identify which enclosing function a call site belongs to.
+func (e *GoExtractor) extractCalls(root *sitter.Node, src []byte, filePath string, result *parser.ExtractionResult, tenv typeEnv) {
 	funcRanges := buildFuncRanges(result)
 
 	// Plain function calls: foo()
@@ -342,18 +347,27 @@ func (e *GoExtractor) extractCalls(root *sitter.Node, src []byte, filePath strin
 	matches, _ = parser.RunQuery(qCallSelector, e.lang, root, src)
 	for _, m := range matches {
 		methodName := m.Captures["call.method"].Text
+		receiverText := m.Captures["call.receiver"].Text
 		expr := m.Captures["call.expr"]
 		callerID := findEnclosingFunc(funcRanges, expr.StartLine+1)
 		if callerID == "" {
 			continue
 		}
-		result.Edges = append(result.Edges, &graph.Edge{
+
+		edge := &graph.Edge{
 			From:     callerID,
 			To:       "unresolved::*." + methodName,
 			Kind:     graph.EdgeCalls,
 			FilePath: filePath,
 			Line:     expr.StartLine + 1,
-		})
+		}
+
+		// Attach receiver type hint if the receiver variable is in the type env.
+		if recvType, ok := tenv[receiverText]; ok {
+			edge.Meta = map[string]any{"receiver_type": recvType}
+		}
+
+		result.Edges = append(result.Edges, edge)
 	}
 }
 
@@ -472,4 +486,96 @@ func captureText(c *parser.CapturedNode) string {
 		return "()"
 	}
 	return c.Text
+}
+
+// --- Type environment for receiver type inference ---
+
+// typeEnv maps variable name → inferred type name within a file.
+type typeEnv map[string]string
+
+// buildTypeEnv scans variable declarations and short variable declarations
+// to infer types (Tier 0: explicit annotations, Tier 1: composite literals
+// and Go constructor convention).
+func (e *GoExtractor) buildTypeEnv(root *sitter.Node, src []byte) typeEnv {
+	tenv := make(typeEnv)
+
+	// Tier 0: explicit var declarations — var x Type
+	matches, _ := parser.RunQuery(qVar, e.lang, root, src)
+	for _, m := range matches {
+		name := m.Captures["var.name"].Text
+		if typeCap, ok := m.Captures["var.type"]; ok && typeCap.Text != "" {
+			typeName := normalizeGoTypeName(typeCap.Text)
+			if typeName != "" {
+				tenv[name] = typeName
+			}
+		}
+	}
+
+	// Tier 0 + Tier 1: short variable declarations — x := expr
+	matches, _ = parser.RunQuery(qShortVar, e.lang, root, src)
+	for _, m := range matches {
+		name := m.Captures["svar.name"].Text
+		valueCap := m.Captures["svar.value"]
+		if valueCap == nil || valueCap.Node == nil {
+			continue
+		}
+		if inferred := inferTypeFromGoExpr(valueCap.Node, src); inferred != "" {
+			tenv[name] = inferred
+		}
+	}
+
+	return tenv
+}
+
+// normalizeGoTypeName strips pointer prefix and package qualifier.
+// "*User" → "User", "pkg.User" → "User", "*pkg.User" → "User"
+func normalizeGoTypeName(t string) string {
+	t = strings.TrimPrefix(t, "*")
+	if idx := strings.LastIndex(t, "."); idx >= 0 {
+		t = t[idx+1:]
+	}
+	if t == "" || t[0] < 'A' || t[0] > 'Z' {
+		return "" // skip built-in types like int, string, etc.
+	}
+	return t
+}
+
+// inferTypeFromGoExpr inspects a tree-sitter expression node to infer
+// the type of a short variable declaration's RHS.
+func inferTypeFromGoExpr(node *sitter.Node, src []byte) string {
+	switch node.Type() {
+	case "composite_literal":
+		// User{} or User{field: val}
+		// First named child is the type identifier.
+		if node.NamedChildCount() > 0 {
+			typeNode := node.NamedChild(0)
+			return normalizeGoTypeName(typeNode.Content(src))
+		}
+
+	case "unary_expression":
+		// &User{} — operand is composite_literal
+		for i := 0; i < int(node.NamedChildCount()); i++ {
+			child := node.NamedChild(i)
+			if child.Type() == "composite_literal" {
+				return inferTypeFromGoExpr(child, src)
+			}
+		}
+
+	case "call_expression":
+		// NewUser() → "User" (Go constructor convention)
+		if node.NamedChildCount() > 0 {
+			funcNode := node.NamedChild(0)
+			if funcNode.Type() == "identifier" {
+				funcName := funcNode.Content(src)
+				if strings.HasPrefix(funcName, "New") && len(funcName) > 3 {
+					candidate := funcName[3:]
+					if len(candidate) > 0 && candidate[0] >= 'A' && candidate[0] <= 'Z' {
+						return candidate
+					}
+				}
+			}
+		}
+	}
+
+	return ""
 }

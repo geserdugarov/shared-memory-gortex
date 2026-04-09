@@ -1,6 +1,7 @@
 package languages
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -254,6 +255,152 @@ type Handler func(w http.ResponseWriter, r *http.Request)
 	names := []string{types[0].Name, types[1].Name}
 	assert.Contains(t, names, "ID")
 	assert.Contains(t, names, "Handler")
+}
+
+// --- Type environment tests ---
+
+func TestGoExtractor_TypeEnv_ExplicitVar(t *testing.T) {
+	src := []byte(`package main
+
+type User struct{}
+
+func (u *User) Save() {}
+
+func main() {
+	var user User
+	user.Save()
+}
+`)
+	e := NewGoExtractor()
+	result, err := e.Extract("main.go", src)
+	require.NoError(t, err)
+
+	calls := edgesOfKind(result.Edges, graph.EdgeCalls)
+	var saveCall *graph.Edge
+	for _, c := range calls {
+		if strings.HasSuffix(c.To, "Save") {
+			saveCall = c
+			break
+		}
+	}
+	require.NotNil(t, saveCall, "expected a call edge to Save")
+	require.NotNil(t, saveCall.Meta, "expected Meta on Save call edge")
+	assert.Equal(t, "User", saveCall.Meta["receiver_type"])
+}
+
+func TestGoExtractor_TypeEnv_CompositeLiteral(t *testing.T) {
+	src := []byte(`package main
+
+type User struct{ Name string }
+
+func (u User) Save() {}
+
+func main() {
+	user := User{Name: "Alice"}
+	user.Save()
+}
+`)
+	e := NewGoExtractor()
+	result, err := e.Extract("main.go", src)
+	require.NoError(t, err)
+
+	calls := edgesOfKind(result.Edges, graph.EdgeCalls)
+	var saveCall *graph.Edge
+	for _, c := range calls {
+		if strings.HasSuffix(c.To, "Save") {
+			saveCall = c
+			break
+		}
+	}
+	require.NotNil(t, saveCall)
+	require.NotNil(t, saveCall.Meta)
+	assert.Equal(t, "User", saveCall.Meta["receiver_type"])
+}
+
+func TestGoExtractor_TypeEnv_AddressOf(t *testing.T) {
+	src := []byte(`package main
+
+type Server struct{}
+
+func (s *Server) Start() {}
+
+func main() {
+	srv := &Server{}
+	srv.Start()
+}
+`)
+	e := NewGoExtractor()
+	result, err := e.Extract("main.go", src)
+	require.NoError(t, err)
+
+	calls := edgesOfKind(result.Edges, graph.EdgeCalls)
+	var startCall *graph.Edge
+	for _, c := range calls {
+		if strings.HasSuffix(c.To, "Start") {
+			startCall = c
+			break
+		}
+	}
+	require.NotNil(t, startCall)
+	require.NotNil(t, startCall.Meta)
+	assert.Equal(t, "Server", startCall.Meta["receiver_type"])
+}
+
+func TestGoExtractor_TypeEnv_Constructor(t *testing.T) {
+	src := []byte(`package main
+
+type Client struct{}
+
+func NewClient() *Client { return &Client{} }
+
+func (c *Client) Connect() {}
+
+func main() {
+	client := NewClient()
+	client.Connect()
+}
+`)
+	e := NewGoExtractor()
+	result, err := e.Extract("main.go", src)
+	require.NoError(t, err)
+
+	calls := edgesOfKind(result.Edges, graph.EdgeCalls)
+	var connectCall *graph.Edge
+	for _, c := range calls {
+		if strings.HasSuffix(c.To, "Connect") {
+			connectCall = c
+			break
+		}
+	}
+	require.NotNil(t, connectCall)
+	require.NotNil(t, connectCall.Meta)
+	assert.Equal(t, "Client", connectCall.Meta["receiver_type"])
+}
+
+func TestGoExtractor_TypeEnv_Unknown(t *testing.T) {
+	src := []byte(`package main
+
+func getUser() interface{} { return nil }
+
+func main() {
+	user := getUser()
+	user.Save()
+}
+`)
+	e := NewGoExtractor()
+	result, err := e.Extract("main.go", src)
+	require.NoError(t, err)
+
+	calls := edgesOfKind(result.Edges, graph.EdgeCalls)
+	var saveCall *graph.Edge
+	for _, c := range calls {
+		if strings.HasSuffix(c.To, "Save") {
+			saveCall = c
+			break
+		}
+	}
+	require.NotNil(t, saveCall, "expected a call edge to Save")
+	assert.Nil(t, saveCall.Meta, "unknown type should not produce Meta")
 }
 
 // --- helpers ---

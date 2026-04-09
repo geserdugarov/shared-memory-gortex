@@ -141,6 +141,85 @@ func TestInferImplements_EmptyInterface(t *testing.T) {
 	assert.Equal(t, 0, added)
 }
 
+func TestResolveMethodCall_TypeAware(t *testing.T) {
+	g := graph.New()
+	g.AddNode(&graph.Node{ID: "pkg/a.go::Caller", Kind: graph.KindFunction, Name: "Caller", FilePath: "pkg/a.go", Language: "go"})
+
+	// Two methods named "Start" on different types.
+	g.AddNode(&graph.Node{
+		ID: "pkg/server.go::Server.Start", Kind: graph.KindMethod, Name: "Start",
+		FilePath: "pkg/server.go", Language: "go",
+		Meta: map[string]any{"receiver": "Server"},
+	})
+	g.AddNode(&graph.Node{
+		ID: "pkg/client.go::Client.Start", Kind: graph.KindMethod, Name: "Start",
+		FilePath: "pkg/client.go", Language: "go",
+		Meta: map[string]any{"receiver": "Client"},
+	})
+
+	// Call edge with type hint → should resolve to Server.Start.
+	callEdge := &graph.Edge{
+		From: "pkg/a.go::Caller", To: "unresolved::*.Start",
+		Kind: graph.EdgeCalls, FilePath: "pkg/a.go", Line: 10,
+		Meta: map[string]any{"receiver_type": "Server"},
+	}
+	g.AddEdge(callEdge)
+
+	r := New(g)
+	stats := r.ResolveAll()
+
+	assert.Equal(t, 1, stats.Resolved)
+	assert.Equal(t, "pkg/server.go::Server.Start", callEdge.To)
+	assert.Equal(t, 0.95, callEdge.Confidence) // same directory + exact type
+}
+
+func TestResolveMethodCall_TypeAware_Fallback(t *testing.T) {
+	g := graph.New()
+	g.AddNode(&graph.Node{ID: "pkg/a.go::Caller", Kind: graph.KindFunction, Name: "Caller", FilePath: "pkg/a.go", Language: "go"})
+	g.AddNode(&graph.Node{
+		ID: "pkg/b.go::Server.Start", Kind: graph.KindMethod, Name: "Start",
+		FilePath: "pkg/b.go", Language: "go",
+		Meta: map[string]any{"receiver": "Server"},
+	})
+
+	// Call edge with unknown type → falls back to name-only.
+	callEdge := &graph.Edge{
+		From: "pkg/a.go::Caller", To: "unresolved::*.Start",
+		Kind: graph.EdgeCalls, FilePath: "pkg/a.go", Line: 10,
+		Meta: map[string]any{"receiver_type": "UnknownType"},
+	}
+	g.AddEdge(callEdge)
+
+	r := New(g)
+	stats := r.ResolveAll()
+
+	assert.Equal(t, 1, stats.Resolved)
+	assert.Equal(t, "pkg/b.go::Server.Start", callEdge.To) // falls back to any method match
+}
+
+func TestResolveMethodCall_NoMeta(t *testing.T) {
+	g := graph.New()
+	g.AddNode(&graph.Node{ID: "pkg/a.go::Caller", Kind: graph.KindFunction, Name: "Caller", FilePath: "pkg/a.go", Language: "go"})
+	g.AddNode(&graph.Node{
+		ID: "pkg/b.go::Server.Start", Kind: graph.KindMethod, Name: "Start",
+		FilePath: "pkg/b.go", Language: "go",
+		Meta: map[string]any{"receiver": "Server"},
+	})
+
+	// Call edge with nil Meta → existing behavior.
+	callEdge := &graph.Edge{
+		From: "pkg/a.go::Caller", To: "unresolved::*.Start",
+		Kind: graph.EdgeCalls, FilePath: "pkg/a.go", Line: 10,
+	}
+	g.AddEdge(callEdge)
+
+	r := New(g)
+	stats := r.ResolveAll()
+
+	assert.Equal(t, 1, stats.Resolved)
+	assert.Equal(t, "pkg/b.go::Server.Start", callEdge.To)
+}
+
 func TestResolveFile(t *testing.T) {
 	g := graph.New()
 	g.AddNode(&graph.Node{ID: "a.go", Kind: graph.KindFile, Name: "a.go", FilePath: "a.go", Language: "go"})

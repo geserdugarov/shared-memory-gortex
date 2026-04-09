@@ -98,14 +98,21 @@ func (e *PythonExtractor) Extract(filePath string, src []byte) (*parser.Extracti
 		seen[id] = true
 		methodLines[def.StartLine] = true
 
-		result.Nodes = append(result.Nodes, &graph.Node{
+		node := &graph.Node{
 			ID: id, Kind: graph.KindMethod, Name: methodName,
 			FilePath: filePath, StartLine: def.StartLine + 1, EndLine: def.EndLine + 1,
 			Language: "python", Meta: map[string]any{
 				"receiver":  className,
 				"signature": "def " + methodName + "(...)",
 			},
-		})
+		}
+		// Extract return type hint from the function_definition node.
+		if def.Node != nil {
+			if rt := extractPyReturnType(def.Node, src); rt != "" {
+				node.Meta["return_type"] = rt
+			}
+		}
+		result.Nodes = append(result.Nodes, node)
 		result.Edges = append(result.Edges, &graph.Edge{
 			From: fileNode.ID, To: id, Kind: graph.EdgeDefines, FilePath: filePath, Line: def.StartLine + 1,
 		})
@@ -212,6 +219,10 @@ func (e *PythonExtractor) Extract(filePath string, src []byte) (*parser.Extracti
 		}
 		if recvType, ok := tenv[receiverText]; ok {
 			edge.Meta = map[string]any{"receiver_type": recvType}
+		} else if strings.Contains(receiverText, ".") || strings.Contains(receiverText, "(") {
+			if chainType := resolveChainType(receiverText, tenv, result); chainType != "" {
+				edge.Meta = map[string]any{"receiver_type": chainType}
+			}
 		}
 		result.Edges = append(result.Edges, edge)
 	}
@@ -272,6 +283,21 @@ func (e *PythonExtractor) buildTypeEnv(root *sitter.Node, src []byte) typeEnv {
 	}
 
 	return tenv
+}
+
+// extractPyReturnType walks a function_definition node for a return_type child
+// (the `-> Type` annotation) and returns the normalized type name.
+func extractPyReturnType(funcNode *sitter.Node, src []byte) string {
+	for i := 0; i < int(funcNode.NamedChildCount()); i++ {
+		child := funcNode.NamedChild(i)
+		if child.Type() == "type" {
+			// Check if preceding sibling token is "->".
+			// In tree-sitter Python grammar, the return type is a "type" child
+			// that appears after the parameters.
+			return normalizePyTypeName(child.Content(src))
+		}
+	}
+	return ""
 }
 
 // normalizePyTypeName strips Optional[], List[], etc. and skips builtins.

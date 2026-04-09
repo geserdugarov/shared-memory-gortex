@@ -123,11 +123,15 @@ func (e *KotlinExtractor) Extract(filePath string, src []byte) (*parser.Extracti
 		}
 		seen[id] = true
 		seen[filePath+"::_method_L"+fmt.Sprint(def.StartLine+1)] = true
+		meta := map[string]any{"receiver": objName}
+		if rt := extractKotlinReturnType(def.Node, src); rt != "" {
+			meta["return_type"] = rt
+		}
 		result.Nodes = append(result.Nodes, &graph.Node{
 			ID: id, Kind: graph.KindMethod, Name: name,
 			FilePath: filePath, StartLine: def.StartLine + 1, EndLine: def.EndLine + 1,
 			Language: "kotlin",
-			Meta:     map[string]any{"receiver": objName},
+			Meta:     meta,
 		})
 		result.Edges = append(result.Edges, &graph.Edge{
 			From: fileNode.ID, To: id, Kind: graph.EdgeDefines, FilePath: filePath, Line: def.StartLine + 1,
@@ -153,11 +157,15 @@ func (e *KotlinExtractor) Extract(filePath string, src []byte) (*parser.Extracti
 		}
 		seen[id] = true
 		seen[filePath+"::_method_L"+fmt.Sprint(def.StartLine+1)] = true
+		meta := map[string]any{"receiver": className}
+		if rt := extractKotlinReturnType(def.Node, src); rt != "" {
+			meta["return_type"] = rt
+		}
 		result.Nodes = append(result.Nodes, &graph.Node{
 			ID: id, Kind: graph.KindMethod, Name: name,
 			FilePath: filePath, StartLine: def.StartLine + 1, EndLine: def.EndLine + 1,
 			Language: "kotlin",
-			Meta:     map[string]any{"receiver": className},
+			Meta:     meta,
 		})
 		result.Edges = append(result.Edges, &graph.Edge{
 			From: fileNode.ID, To: id, Kind: graph.EdgeDefines, FilePath: filePath, Line: def.StartLine + 1,
@@ -273,6 +281,10 @@ func (e *KotlinExtractor) extractCalls(root *sitter.Node, src []byte, filePath s
 		}
 		if recvType, ok := tenv[receiverText]; ok {
 			edge.Meta = map[string]any{"receiver_type": recvType}
+		} else if strings.Contains(receiverText, ".") || strings.Contains(receiverText, "(") {
+			if chainType := resolveChainType(receiverText, tenv, result); chainType != "" {
+				edge.Meta = map[string]any{"receiver_type": chainType}
+			}
 		}
 		result.Edges = append(result.Edges, edge)
 	}
@@ -404,6 +416,36 @@ func (e *KotlinExtractor) extractClassesAndInterfaces(
 			From: fileNode.ID, To: id, Kind: graph.EdgeDefines, FilePath: filePath, Line: startLine,
 		})
 	})
+}
+
+// extractKotlinReturnType walks a function_declaration node to find the return type annotation.
+// Kotlin functions have optional `: ReturnType` after the parameter list.
+func extractKotlinReturnType(node *sitter.Node, src []byte) string {
+	if node == nil {
+		return ""
+	}
+	// Look for user_type or nullable_type child after the function_value_parameters.
+	pastParams := false
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+		if child.Type() == "function_value_parameters" {
+			pastParams = true
+			continue
+		}
+		if pastParams {
+			switch child.Type() {
+			case "user_type", "nullable_type":
+				rawType := string(src[child.StartByte():child.EndByte()])
+				if rt := normalizeKotlinTypeName(rawType); rt != "" {
+					return rt
+				}
+			case "function_body":
+				// Stop looking once we hit the body.
+				return ""
+			}
+		}
+	}
+	return ""
 }
 
 // walkNodes does a depth-first walk of the tree-sitter node tree.

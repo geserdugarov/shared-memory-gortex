@@ -169,6 +169,11 @@ func (e *GoExtractor) extractFunctions(root *sitter.Node, src []byte, filePath, 
 			Meta:      make(map[string]any),
 		}
 		node.Meta["signature"] = buildFuncSignature(name, m.Captures["func.params"], m.Captures["func.result"])
+		if resultCap, ok := m.Captures["func.result"]; ok && resultCap.Text != "" {
+			if rt := normalizeGoTypeName(resultCap.Text); rt != "" {
+				node.Meta["return_type"] = rt
+			}
+		}
 		result.Nodes = append(result.Nodes, node)
 		result.Edges = append(result.Edges, &graph.Edge{
 			From: fileID, To: id, Kind: graph.EdgeDefines, FilePath: filePath, Line: def.StartLine + 1,
@@ -201,6 +206,11 @@ func (e *GoExtractor) extractMethods(root *sitter.Node, src []byte, filePath, fi
 			},
 		}
 		node.Meta["signature"] = buildMethodSignature(receiverText, name, m.Captures["method.params"], m.Captures["method.result"])
+		if resultCap, ok := m.Captures["method.result"]; ok && resultCap.Text != "" {
+			if rt := normalizeGoTypeName(resultCap.Text); rt != "" {
+				node.Meta["return_type"] = rt
+			}
+		}
 		result.Nodes = append(result.Nodes, node)
 		result.Edges = append(result.Edges, &graph.Edge{
 			From: fileID, To: id, Kind: graph.EdgeDefines, FilePath: filePath, Line: def.StartLine + 1,
@@ -362,9 +372,13 @@ func (e *GoExtractor) extractCalls(root *sitter.Node, src []byte, filePath strin
 			Line:     expr.StartLine + 1,
 		}
 
-		// Attach receiver type hint if the receiver variable is in the type env.
+		// Attach receiver type hint from type env (Tier 0+1) or chain resolution (Tier 2).
 		if recvType, ok := tenv[receiverText]; ok {
 			edge.Meta = map[string]any{"receiver_type": recvType}
+		} else if strings.Contains(receiverText, ".") || strings.Contains(receiverText, "(") {
+			if chainType := resolveChainType(receiverText, tenv, result); chainType != "" {
+				edge.Meta = map[string]any{"receiver_type": chainType}
+			}
 		}
 
 		result.Edges = append(result.Edges, edge)
@@ -577,5 +591,80 @@ func inferTypeFromGoExpr(node *sitter.Node, src []byte) string {
 		}
 	}
 
+	return ""
+}
+
+// --- Tier 2: Chain resolution ---
+
+// resolveChainType tries to infer the type of a chained expression like
+// "svc.GetUser()" by looking up the root variable in the type env, then
+// following method return types through already-extracted nodes.
+func resolveChainType(expr string, tenv typeEnv, result *parser.ExtractionResult) string {
+	// Strip balanced parentheses and their contents.
+	// "svc.GetUser(arg1, arg2).Save()" → "svc.GetUser.Save"
+	cleaned := stripCallArgs(expr)
+
+	parts := strings.Split(cleaned, ".")
+	if len(parts) < 2 {
+		return ""
+	}
+
+	// Look up the root variable.
+	currentType, ok := tenv[parts[0]]
+	if !ok {
+		return ""
+	}
+
+	// Walk the chain: for each segment, find a method on currentType and read return_type.
+	for i := 1; i < len(parts); i++ {
+		methodName := parts[i]
+		returnType := findMethodReturnType(currentType, methodName, result)
+		if returnType == "" {
+			return "" // chain breaks
+		}
+		currentType = returnType
+	}
+
+	return currentType
+}
+
+// stripCallArgs removes balanced parenthesized argument lists from an expression.
+// "svc.GetUser(arg1).Save()" → "svc.GetUser.Save"
+func stripCallArgs(expr string) string {
+	var b strings.Builder
+	depth := 0
+	for _, ch := range expr {
+		switch ch {
+		case '(':
+			depth++
+		case ')':
+			if depth > 0 {
+				depth--
+			}
+		default:
+			if depth == 0 {
+				b.WriteRune(ch)
+			}
+		}
+	}
+	return b.String()
+}
+
+// findMethodReturnType searches extracted nodes for a method with the given
+// receiver type and name, returning its Meta["return_type"] if found.
+func findMethodReturnType(receiverType, methodName string, result *parser.ExtractionResult) string {
+	for _, n := range result.Nodes {
+		if n.Kind != graph.KindMethod && n.Kind != graph.KindFunction {
+			continue
+		}
+		if n.Name != methodName {
+			continue
+		}
+		if recv, ok := n.Meta["receiver"].(string); ok && recv == receiverType {
+			if rt, ok := n.Meta["return_type"].(string); ok {
+				return rt
+			}
+		}
+	}
 	return ""
 }

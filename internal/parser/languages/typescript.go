@@ -178,12 +178,19 @@ func (e *TypeScriptExtractor) extractMethods(classNode *sitter.Node, src []byte,
 		name := m.Captures["method.name"].Text
 		def := m.Captures["method.def"]
 		id := filePath + "::" + className + "." + name
-		result.Nodes = append(result.Nodes, &graph.Node{
+		node := &graph.Node{
 			ID: id, Kind: graph.KindMethod, Name: name,
 			FilePath: filePath, StartLine: def.StartLine + 1, EndLine: def.EndLine + 1,
 			Language: "typescript",
 			Meta:     map[string]any{"receiver": className},
-		})
+		}
+		// Walk the method_definition node's children for a return type annotation.
+		if def.Node != nil {
+			if rt := extractTSMethodReturnType(def.Node, src); rt != "" {
+				node.Meta["return_type"] = rt
+			}
+		}
+		result.Nodes = append(result.Nodes, node)
 		result.Edges = append(result.Edges, &graph.Edge{
 			From: id, To: classID, Kind: graph.EdgeMemberOf, FilePath: filePath, Line: def.StartLine + 1,
 		})
@@ -354,6 +361,10 @@ func (e *TypeScriptExtractor) extractCalls(root *sitter.Node, src []byte, filePa
 		}
 		if recvType, ok := tenv[receiverText]; ok {
 			edge.Meta = map[string]any{"receiver_type": recvType}
+		} else if strings.Contains(receiverText, ".") || strings.Contains(receiverText, "(") {
+			if chainType := resolveChainType(receiverText, tenv, result); chainType != "" {
+				edge.Meta = map[string]any{"receiver_type": chainType}
+			}
 		}
 		result.Edges = append(result.Edges, edge)
 	}
@@ -430,6 +441,22 @@ func normalizeTypeName(t string) string {
 		return "" // skip lowercase type names (primitives, type aliases like 'object')
 	}
 	return t
+}
+
+// extractTSMethodReturnType walks a method_definition node's children to find
+// a type_annotation child and returns the normalized type name.
+func extractTSMethodReturnType(methodNode *sitter.Node, src []byte) string {
+	for i := 0; i < int(methodNode.NamedChildCount()); i++ {
+		child := methodNode.NamedChild(i)
+		if child.Type() == "type_annotation" {
+			// The type_annotation's first named child is the actual type node.
+			if child.NamedChildCount() > 0 {
+				typeNode := child.NamedChild(0)
+				return normalizeTypeName(typeNode.Content(src))
+			}
+		}
+	}
+	return ""
 }
 
 // inferTypeFromNewExpr extracts the class name from a new_expression node.

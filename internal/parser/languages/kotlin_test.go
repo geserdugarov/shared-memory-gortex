@@ -319,3 +319,48 @@ fun main() {
 	require.NotNil(t, processCall)
 	assert.Nil(t, processCall.Meta, "unknown type should not produce Meta")
 }
+
+func TestKotlinExtractor_TypeEnv_Chain(t *testing.T) {
+	src := []byte(`class Order {
+    val id: Int = 0
+}
+
+class UserService {
+    fun getOrder(): Order {
+        return Order()
+    }
+}
+
+fun main() {
+    val svc = UserService()
+    svc.getOrder().toString()
+}
+`)
+	e := NewKotlinExtractor()
+	result, err := e.Extract("app.kt", src)
+	require.NoError(t, err)
+
+	// Verify return_type is set on getOrder method.
+	var getOrderNode *graph.Node
+	for _, n := range result.Nodes {
+		if n.Name == "getOrder" {
+			getOrderNode = n
+			break
+		}
+	}
+	require.NotNil(t, getOrderNode, "expected a node for getOrder")
+	assert.Equal(t, "Order", getOrderNode.Meta["return_type"])
+
+	// Verify chain resolution: svc.getOrder() should resolve to Order.
+	calls := edgesOfKind(result.Edges, graph.EdgeCalls)
+	var toStringCall *graph.Edge
+	for _, c := range calls {
+		if strings.HasSuffix(c.To, "toString") {
+			toStringCall = c
+			break
+		}
+	}
+	require.NotNil(t, toStringCall, "expected a call edge to toString")
+	require.NotNil(t, toStringCall.Meta, "expected Meta on toString call edge")
+	assert.Equal(t, "Order", toStringCall.Meta["receiver_type"])
+}

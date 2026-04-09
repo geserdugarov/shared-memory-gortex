@@ -307,3 +307,48 @@ func TestCSharpExtractor_TypeEnv_Unknown(t *testing.T) {
 	require.NotNil(t, processCall)
 	assert.Nil(t, processCall.Meta, "unknown type should not produce Meta")
 }
+
+func TestCSharpExtractor_TypeEnv_Chain(t *testing.T) {
+	src := []byte(`public class Order {
+    public int Id;
+}
+
+public class UserService {
+    public Order GetOrder() { return new Order(); }
+}
+
+public class App {
+    public void Main() {
+        UserService svc = new UserService();
+        svc.GetOrder().ToString();
+    }
+}
+`)
+	e := NewCSharpExtractor()
+	result, err := e.Extract("app.cs", src)
+	require.NoError(t, err)
+
+	// Verify return_type is set on GetOrder method.
+	var getOrderNode *graph.Node
+	for _, n := range result.Nodes {
+		if n.Name == "GetOrder" {
+			getOrderNode = n
+			break
+		}
+	}
+	require.NotNil(t, getOrderNode, "expected a node for GetOrder")
+	assert.Equal(t, "Order", getOrderNode.Meta["return_type"])
+
+	// Verify chain resolution: svc.GetOrder() should resolve to Order.
+	calls := edgesOfKind(result.Edges, graph.EdgeCalls)
+	var toStringCall *graph.Edge
+	for _, c := range calls {
+		if strings.HasSuffix(c.To, "ToString") {
+			toStringCall = c
+			break
+		}
+	}
+	require.NotNil(t, toStringCall, "expected a call edge to ToString")
+	require.NotNil(t, toStringCall.Meta, "expected Meta on ToString call edge")
+	assert.Equal(t, "Order", toStringCall.Meta["receiver_type"])
+}

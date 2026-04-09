@@ -196,6 +196,46 @@ function main() {
 	assert.Nil(t, processCall.Meta, "unknown type should not produce Meta")
 }
 
+func TestTSExtractor_TypeEnv_Chain(t *testing.T) {
+	src := []byte(`
+class Connection {
+  query(): Result {
+    return new Result();
+  }
+}
+
+class Result {
+  first(): User {
+    return new User();
+  }
+}
+
+class User {
+  save() {}
+}
+
+function main() {
+  const conn = new Connection();
+  conn.query().first().save();
+}
+`)
+	e := NewTypeScriptExtractor()
+	result, err := e.Extract("app.ts", src)
+	require.NoError(t, err)
+
+	calls := edgesOfKind(result.Edges, graph.EdgeCalls)
+	var saveCall *graph.Edge
+	for _, c := range calls {
+		if strings.HasSuffix(c.To, "save") {
+			saveCall = c
+			break
+		}
+	}
+	require.NotNil(t, saveCall, "expected a call edge to save")
+	require.NotNil(t, saveCall.Meta, "expected Meta on chained save call edge")
+	assert.Equal(t, "User", saveCall.Meta["receiver_type"])
+}
+
 func TestTSExtractor_MethodReceiver(t *testing.T) {
 	src := []byte(`
 class Server {

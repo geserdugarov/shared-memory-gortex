@@ -333,6 +333,10 @@ func (e *CSharpExtractor) extractCalls(root *sitter.Node, src []byte, filePath s
 		}
 		if recvType, ok := tenv[receiverText]; ok {
 			edge.Meta = map[string]any{"receiver_type": recvType}
+		} else if strings.Contains(receiverText, ".") || strings.Contains(receiverText, "(") {
+			if chainType := resolveChainType(receiverText, tenv, result); chainType != "" {
+				edge.Meta = map[string]any{"receiver_type": chainType}
+			}
 		}
 		result.Edges = append(result.Edges, edge)
 	}
@@ -447,11 +451,32 @@ func (e *CSharpExtractor) extractMethods(
 			continue
 		}
 		seen[id] = true
+		meta := map[string]any{"receiver": ownerName}
+		// Extract return type from method_declaration node.
+		// In C# tree-sitter, method_declaration has a type child before the name.
+		if def.Node != nil {
+			for i := 0; i < int(def.Node.ChildCount()); i++ {
+				child := def.Node.Child(i)
+				if child.Type() == "identifier" && string(src[child.StartByte():child.EndByte()]) == name {
+					break
+				}
+				childType := child.Type()
+				// Type nodes include predefined_type, identifier, qualified_name, generic_name, nullable_type, array_type, etc.
+				switch childType {
+				case "predefined_type", "identifier", "qualified_name", "generic_name",
+					"nullable_type", "array_type", "tuple_type":
+					rawType := string(src[child.StartByte():child.EndByte()])
+					if rt := normalizeCSharpTypeName(rawType); rt != "" && rt != "var" {
+						meta["return_type"] = rt
+					}
+				}
+			}
+		}
 		result.Nodes = append(result.Nodes, &graph.Node{
 			ID: id, Kind: graph.KindMethod, Name: name,
 			FilePath: filePath, StartLine: def.StartLine + 1, EndLine: def.EndLine + 1,
 			Language: "csharp",
-			Meta:     map[string]any{"receiver": ownerName},
+			Meta:     meta,
 		})
 		result.Edges = append(result.Edges, &graph.Edge{
 			From: filePath, To: id, Kind: graph.EdgeDefines, FilePath: filePath, Line: def.StartLine + 1,

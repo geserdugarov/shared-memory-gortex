@@ -223,3 +223,58 @@ fn main() {
 	require.NotNil(t, processCall)
 	assert.Nil(t, processCall.Meta, "unknown type should not produce Meta")
 }
+
+func TestRsExtractor_TypeEnv_Chain(t *testing.T) {
+	src := []byte(`struct Order {
+    id: i32,
+}
+
+struct UserService {
+    name: String,
+}
+
+impl UserService {
+    fn get_order(&self) -> Order {
+        Order { id: 1 }
+    }
+}
+
+impl Order {
+    fn total(&self) -> i32 {
+        42
+    }
+}
+
+fn main() {
+    let svc: UserService = UserService { name: String::new() };
+    svc.get_order().total();
+}
+`)
+	e := NewRustExtractor()
+	result, err := e.Extract("app.rs", src)
+	require.NoError(t, err)
+
+	// Verify return_type is set on get_order method.
+	var getOrderNode *graph.Node
+	for _, n := range result.Nodes {
+		if n.Name == "get_order" {
+			getOrderNode = n
+			break
+		}
+	}
+	require.NotNil(t, getOrderNode, "expected a node for get_order")
+	assert.Equal(t, "Order", getOrderNode.Meta["return_type"])
+
+	// Verify chain resolution: svc.get_order() should resolve to Order.
+	calls := edgesOfKind(result.Edges, graph.EdgeCalls)
+	var totalCall *graph.Edge
+	for _, c := range calls {
+		if strings.HasSuffix(c.To, "total") {
+			totalCall = c
+			break
+		}
+	}
+	require.NotNil(t, totalCall, "expected a call edge to total")
+	require.NotNil(t, totalCall.Meta, "expected Meta on total call edge")
+	assert.Equal(t, "Order", totalCall.Meta["receiver_type"])
+}

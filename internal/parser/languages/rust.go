@@ -110,13 +110,17 @@ func (e *RustExtractor) Extract(filePath string, src []byte) (*parser.Extraction
 		}
 		seen[id] = true
 		implMethodLines[def.StartLine] = true
+		meta := map[string]any{
+			"receiver":  typeName,
+			"signature": "fn " + methodName + "(...)",
+		}
+		if rt := extractRustReturnType(def.Node, src); rt != "" {
+			meta["return_type"] = rt
+		}
 		result.Nodes = append(result.Nodes, &graph.Node{
 			ID: id, Kind: graph.KindMethod, Name: methodName,
 			FilePath: filePath, StartLine: def.StartLine + 1, EndLine: def.EndLine + 1,
-			Language: "rust", Meta: map[string]any{
-				"receiver":  typeName,
-				"signature": "fn " + methodName + "(...)",
-			},
+			Language: "rust", Meta: meta,
 		})
 		result.Edges = append(result.Edges, &graph.Edge{
 			From: fileNode.ID, To: id, Kind: graph.EdgeDefines, FilePath: filePath, Line: def.StartLine + 1,
@@ -312,6 +316,10 @@ func (e *RustExtractor) extractCalls(root *sitter.Node, src []byte, filePath str
 		}
 		if recvType, ok := tenv[receiverText]; ok {
 			edge.Meta = map[string]any{"receiver_type": recvType}
+		} else if strings.Contains(receiverText, ".") || strings.Contains(receiverText, "(") {
+			if chainType := resolveChainType(receiverText, tenv, result); chainType != "" {
+				edge.Meta = map[string]any{"receiver_type": chainType}
+			}
 		}
 		result.Edges = append(result.Edges, edge)
 	}
@@ -349,6 +357,36 @@ func (e *RustExtractor) buildTypeEnv(root *sitter.Node, src []byte) typeEnv {
 	}
 
 	return tenv
+}
+
+// extractRustReturnType walks a function_item node to find the return type after `->`.
+func extractRustReturnType(node *sitter.Node, src []byte) string {
+	if node == nil {
+		return ""
+	}
+	// In tree-sitter-rust, function_item has children: fn, name, parameters, ->, type, block.
+	// Look for a type child after "->".
+	pastArrow := false
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+		text := string(src[child.StartByte():child.EndByte()])
+		if text == "->" {
+			pastArrow = true
+			continue
+		}
+		if pastArrow {
+			if child.Type() == "block" {
+				return ""
+			}
+			// This should be the return type node.
+			rawType := string(src[child.StartByte():child.EndByte()])
+			if rt := normalizeRustTypeName(rawType); rt != "" {
+				return rt
+			}
+			return ""
+		}
+	}
+	return ""
 }
 
 // normalizeRustTypeName strips references, generics, and module paths from a Rust type.

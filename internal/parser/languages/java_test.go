@@ -184,6 +184,47 @@ func TestJavaExtractor_TypeEnv_UnknownType(t *testing.T) {
 	}
 }
 
+func TestJavaExtractor_TypeEnv_Chain(t *testing.T) {
+	src := []byte(`public class App {
+    public void run() {
+        Connection conn = new Connection();
+        conn.query().first().save();
+    }
+}
+
+class Connection {
+    public Result query() {
+        return new Result();
+    }
+}
+
+class Result {
+    public User first() {
+        return new User();
+    }
+}
+
+class User {
+    public void save() {}
+}
+`)
+	e := NewJavaExtractor()
+	result, err := e.Extract("App.java", src)
+	require.NoError(t, err)
+
+	callEdges := edgesOfKind(result.Edges, graph.EdgeCalls)
+	var found bool
+	for _, edge := range callEdges {
+		if edge.To == "unresolved::*.save" && edge.Meta != nil {
+			rt, ok := edge.Meta["receiver_type"].(string)
+			if ok && rt == "User" {
+				found = true
+			}
+		}
+	}
+	assert.True(t, found, "expected call edge with receiver_type=User for chained conn.query().first().save()")
+}
+
 func TestJavaExtractor_Imports(t *testing.T) {
 	src := []byte(`import java.util.List;
 import com.example.service.UserService;

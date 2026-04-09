@@ -179,12 +179,19 @@ func (e *JavaExtractor) Extract(filePath string, src []byte) (*parser.Extraction
 		seen[id] = true
 		// Mark line so fallback query skips this method.
 		seen[filePath+"::_method_L"+fmt.Sprint(def.StartLine+1)] = true
-		result.Nodes = append(result.Nodes, &graph.Node{
+		node := &graph.Node{
 			ID: id, Kind: graph.KindMethod, Name: name,
 			FilePath: filePath, StartLine: def.StartLine + 1, EndLine: def.EndLine + 1,
 			Language: "java",
 			Meta:     map[string]any{"receiver": className},
-		})
+		}
+		// Extract return type from the method_declaration node.
+		if def.Node != nil {
+			if rt := extractJavaMethodReturnType(def.Node, src); rt != "" {
+				node.Meta["return_type"] = rt
+			}
+		}
+		result.Nodes = append(result.Nodes, node)
 		result.Edges = append(result.Edges, &graph.Edge{
 			From: fileNode.ID, To: id, Kind: graph.EdgeDefines, FilePath: filePath, Line: def.StartLine + 1,
 		})
@@ -360,6 +367,10 @@ func (e *JavaExtractor) extractCalls(root *sitter.Node, src []byte, filePath str
 		}
 		if recvType, ok := tenv[receiverText]; ok {
 			edge.Meta = map[string]any{"receiver_type": recvType}
+		} else if strings.Contains(receiverText, ".") || strings.Contains(receiverText, "(") {
+			if chainType := resolveChainType(receiverText, tenv, result); chainType != "" {
+				edge.Meta = map[string]any{"receiver_type": chainType}
+			}
 		}
 		result.Edges = append(result.Edges, edge)
 	}
@@ -437,6 +448,26 @@ func normalizeJavaTypeName(t string) string {
 		return "" // skip lowercase type names (primitives)
 	}
 	return t
+}
+
+// extractJavaMethodReturnType walks a method_declaration node to find the return
+// type child (typically a type_identifier) and returns the normalized type name.
+func extractJavaMethodReturnType(methodNode *sitter.Node, src []byte) string {
+	for i := 0; i < int(methodNode.NamedChildCount()); i++ {
+		child := methodNode.NamedChild(i)
+		switch child.Type() {
+		case "type_identifier":
+			return normalizeJavaTypeName(child.Content(src))
+		case "generic_type":
+			// e.g., List<User> — take the first named child (the base type).
+			if child.NamedChildCount() > 0 {
+				return normalizeJavaTypeName(child.NamedChild(0).Content(src))
+			}
+		case "array_type":
+			return normalizeJavaTypeName(child.Content(src))
+		}
+	}
+	return ""
 }
 
 // inferTypeFromJavaNewExpr extracts the class name from an object_creation_expression node.

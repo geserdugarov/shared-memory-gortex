@@ -120,6 +120,41 @@ def main():
 	assert.Equal(t, "Client", connectCall.Meta["receiver_type"])
 }
 
+func TestPyExtractor_TypeEnv_Chain(t *testing.T) {
+	src := []byte(`
+class Connection:
+    def query(self) -> Result:
+        return Result()
+
+class Result:
+    def first(self) -> User:
+        return User()
+
+class User:
+    def save(self):
+        pass
+
+def main():
+    conn = Connection()
+    conn.query().first().save()
+`)
+	e := NewPythonExtractor()
+	result, err := e.Extract("app.py", src)
+	require.NoError(t, err)
+
+	calls := edgesOfKind(result.Edges, graph.EdgeCalls)
+	var saveCall *graph.Edge
+	for _, c := range calls {
+		if strings.HasSuffix(c.To, "save") {
+			saveCall = c
+			break
+		}
+	}
+	require.NotNil(t, saveCall, "expected a call edge to save")
+	require.NotNil(t, saveCall.Meta, "expected Meta on chained save call edge")
+	assert.Equal(t, "User", saveCall.Meta["receiver_type"])
+}
+
 func TestPyExtractor_TypeEnv_Unknown(t *testing.T) {
 	src := []byte(`
 def get_service():

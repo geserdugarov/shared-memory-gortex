@@ -403,6 +403,99 @@ func main() {
 	assert.Nil(t, saveCall.Meta, "unknown type should not produce Meta")
 }
 
+// --- Tier 2: Chain resolution tests ---
+
+func TestGoExtractor_TypeEnv_Chain(t *testing.T) {
+	src := []byte(`package main
+
+type Service struct{}
+type User struct{}
+
+func (s *Service) GetUser() *User { return nil }
+func (u *User) Save() error { return nil }
+
+func main() {
+	svc := &Service{}
+	svc.GetUser().Save()
+}
+`)
+	e := NewGoExtractor()
+	result, err := e.Extract("main.go", src)
+	require.NoError(t, err)
+
+	// Verify return_type is set on GetUser method.
+	var getUserNode *graph.Node
+	for _, n := range result.Nodes {
+		if n.Name == "GetUser" && n.Kind == graph.KindMethod {
+			getUserNode = n
+			break
+		}
+	}
+	require.NotNil(t, getUserNode)
+	assert.Equal(t, "User", getUserNode.Meta["return_type"])
+
+	// Verify chain resolution: svc.GetUser().Save() should have receiver_type=User.
+	calls := edgesOfKind(result.Edges, graph.EdgeCalls)
+	var saveCall *graph.Edge
+	for _, c := range calls {
+		if strings.HasSuffix(c.To, "Save") {
+			saveCall = c
+			break
+		}
+	}
+	require.NotNil(t, saveCall, "expected a call edge to Save")
+	require.NotNil(t, saveCall.Meta, "Save call should have Meta from chain resolution")
+	assert.Equal(t, "User", saveCall.Meta["receiver_type"])
+}
+
+func TestGoExtractor_TypeEnv_ChainUnresolvable(t *testing.T) {
+	src := []byte(`package main
+
+func getService() interface{} { return nil }
+
+func main() {
+	svc := getService()
+	svc.Process().Finish()
+}
+`)
+	e := NewGoExtractor()
+	result, err := e.Extract("main.go", src)
+	require.NoError(t, err)
+
+	calls := edgesOfKind(result.Edges, graph.EdgeCalls)
+	var finishCall *graph.Edge
+	for _, c := range calls {
+		if strings.HasSuffix(c.To, "Finish") {
+			finishCall = c
+			break
+		}
+	}
+	require.NotNil(t, finishCall)
+	assert.Nil(t, finishCall.Meta, "unresolvable chain should not produce Meta")
+}
+
+func TestGoExtractor_ReturnType(t *testing.T) {
+	src := []byte(`package main
+
+type User struct{}
+
+func NewUser() *User { return &User{} }
+func (u *User) Name() string { return "" }
+`)
+	e := NewGoExtractor()
+	result, err := e.Extract("main.go", src)
+	require.NoError(t, err)
+
+	for _, n := range result.Nodes {
+		switch n.Name {
+		case "NewUser":
+			assert.Equal(t, "User", n.Meta["return_type"], "NewUser should return User")
+		case "Name":
+			assert.Nil(t, n.Meta["return_type"], "string return type should be skipped (primitive)")
+		}
+	}
+}
+
 // --- helpers ---
 
 func nodesOfKind(nodes []*graph.Node, kind graph.NodeKind) []*graph.Node {

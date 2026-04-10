@@ -1,96 +1,71 @@
 'use client'
 
-import { useState } from 'react'
-import { MessageSquare, Send, Settings } from 'lucide-react'
-import {
-  Card,
-  CardHeader,
-  CardTitle,
-  CardDescription,
-  CardContent,
-} from '@/components/ui/card'
-import { Input } from '@/components/ui/input'
-import { Button } from '@/components/ui/button'
+import { MessageSquare, Sparkles, ArrowRight } from 'lucide-react'
 
-interface Message {
-  id: string
-  role: 'user' | 'assistant' | 'system'
-  content: string
-  timestamp: Date
-}
+const SUGGESTIONS = [
+  'What are the main entry points?',
+  'Show me the most complex symbols',
+  'Which packages have circular dependencies?',
+  'Find all HTTP handlers',
+  'What does the resolver do?',
+  'How are communities detected?',
+]
 
 export default function ChatPage() {
-  const [messages] = useState<Message[]>([
-    {
-      id: 'system-1',
-      role: 'system',
-      content:
-        'AI Chat coming soon — configure LLM provider in settings to enable this feature.',
-      timestamp: new Date(),
-    },
-  ])
-  const [input, setInput] = useState('')
-
   return (
     <div className="flex h-full flex-col">
-      <div className="mb-4">
+      <div className="mb-6">
         <h1 className="text-xl font-semibold text-zinc-100">AI Chat</h1>
         <p className="text-sm text-zinc-500">
           Chat with AI about your codebase using Gortex context
         </p>
       </div>
 
-      <Card className="flex flex-1 flex-col border-zinc-800 bg-zinc-900">
-        <CardContent className="flex flex-1 flex-col">
-          {/* Message area */}
-          <div className="flex flex-1 flex-col items-center justify-center gap-4 py-12">
-            <div className="flex h-12 w-12 items-center justify-center rounded-full bg-zinc-800">
-              <MessageSquare className="h-6 w-6 text-zinc-500" />
-            </div>
+      <div className="flex flex-1 flex-col items-center justify-center">
+        <div className="flex max-w-lg flex-col items-center gap-6">
+          {/* Icon */}
+          <div className="flex h-16 w-16 items-center justify-center rounded-2xl bg-gradient-to-br from-zinc-800 to-zinc-900 ring-1 ring-zinc-700/50">
+            <MessageSquare className="h-7 w-7 text-zinc-400" />
+          </div>
 
-            {messages.map((msg) => (
-              <div key={msg.id} className="max-w-md text-center">
-                {msg.role === 'system' && (
-                  <Card className="border-zinc-700 bg-zinc-800/50">
-                    <CardHeader>
-                      <CardTitle className="flex items-center justify-center gap-2 text-sm text-zinc-300">
-                        <Settings className="h-4 w-4" />
-                        Setup Required
-                      </CardTitle>
-                      <CardDescription className="text-zinc-400">
-                        {msg.content}
-                      </CardDescription>
-                    </CardHeader>
-                  </Card>
-                )}
-              </div>
-            ))}
-
-            <p className="mt-2 text-xs text-zinc-600">
-              Future integration with Vercel AI SDK planned
+          {/* Title */}
+          <div className="text-center">
+            <h2 className="text-lg font-medium text-zinc-200">
+              Codebase Chat
+            </h2>
+            <p className="mt-1 text-sm text-zinc-500">
+              Ask questions about your code using Gortex&apos;s knowledge graph
+              for context-aware answers.
             </p>
           </div>
 
-          {/* Input area */}
-          <div className="flex items-center gap-2 border-t border-zinc-800 pt-4">
-            <Input
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
-              placeholder="Configure API key to enable"
-              disabled
-              className="flex-1 border-zinc-700 bg-zinc-800/50 text-zinc-400 placeholder:text-zinc-600 disabled:opacity-60"
-            />
-            <Button
-              variant="secondary"
-              size="icon"
-              disabled
-              className="shrink-0 bg-zinc-800 text-zinc-500"
-            >
-              <Send className="h-4 w-4" />
-            </Button>
+          {/* Status */}
+          <div className="flex items-center gap-2 rounded-full border border-zinc-800 bg-zinc-900/80 px-4 py-2">
+            <Sparkles className="h-3.5 w-3.5 text-yellow-500/70" />
+            <span className="text-xs text-zinc-400">
+              Coming soon
+            </span>
           </div>
-        </CardContent>
-      </Card>
+
+          {/* Sample questions */}
+          <div className="w-full pt-2">
+            <p className="mb-3 text-center text-xs font-medium uppercase tracking-wider text-zinc-600">
+              Example questions
+            </p>
+            <div className="grid gap-2 sm:grid-cols-2">
+              {SUGGESTIONS.map((q) => (
+                <div
+                  key={q}
+                  className="group flex items-center gap-2 rounded-lg border border-zinc-800/60 bg-zinc-900/50 px-3 py-2.5 text-xs text-zinc-500 transition-colors"
+                >
+                  <ArrowRight className="h-3 w-3 shrink-0 text-zinc-700 transition-colors group-hover:text-zinc-500" />
+                  <span>{q}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      </div>
     </div>
   )
 }

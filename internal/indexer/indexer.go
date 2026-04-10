@@ -120,6 +120,15 @@ func (idx *Indexer) ImportVectorIndex(data []byte, dims, count int) error {
 		return nil
 	}
 
+	// Validate dimensions match the current embedder to avoid mismatches
+	// when switching providers (e.g., GloVe 50d → ONNX 384d).
+	embedderDims := idx.embedder.Dimensions()
+	if embedderDims > 0 && embedderDims != dims {
+		idx.logger.Info("vector index dims mismatch, will re-embed",
+			zap.Int("cached_dims", dims), zap.Int("embedder_dims", embedderDims))
+		return nil // skip import, buildSearchIndex will re-embed
+	}
+
 	vec := search.NewVector(dims)
 	if err := vec.LoadFrom(bytes.NewReader(data)); err != nil {
 		return fmt.Errorf("import vector index: %w", err)

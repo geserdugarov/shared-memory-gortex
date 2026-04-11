@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/mark3labs/mcp-go/mcp"
+	toon "github.com/toon-format/toon-go"
 	"github.com/zzet/gortex/internal/config"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/query"
@@ -17,6 +18,105 @@ func isCompact(req mcp.CallToolRequest) bool {
 		return v
 	}
 	return false
+}
+
+// isTOON checks if the format is set to "toon" in the request.
+func isTOON(req mcp.CallToolRequest) bool {
+	if v, ok := req.GetArguments()["format"].(string); ok {
+		return v == "toon"
+	}
+	return false
+}
+
+// toonNodeRow is a TOON-optimized flat representation of a graph node.
+type toonNodeRow struct {
+	ID        string `toon:"id"`
+	Kind      string `toon:"kind"`
+	Name      string `toon:"name"`
+	FilePath  string `toon:"file_path"`
+	StartLine int    `toon:"start_line"`
+}
+
+// toonEdgeRow is a TOON-optimized flat representation of a graph edge.
+type toonEdgeRow struct {
+	From       string  `toon:"from"`
+	To         string  `toon:"to"`
+	Kind       string  `toon:"kind"`
+	Confidence float64 `toon:"confidence"`
+	Label      string  `toon:"label"`
+}
+
+// toonSubGraphResult wraps nodes and edges for TOON tabular output.
+type toonSubGraphResult struct {
+	Nodes     []toonNodeRow `toon:"nodes"`
+	Edges     []toonEdgeRow `toon:"edges"`
+	Total     int           `toon:"total"`
+	Truncated bool          `toon:"truncated"`
+}
+
+// toonSearchResult wraps search results for TOON tabular output.
+type toonSearchResult struct {
+	Results   []toonNodeRow `toon:"results"`
+	Total     int           `toon:"total"`
+	Truncated bool          `toon:"truncated"`
+}
+
+// nodesToTOONRows converts graph nodes to flat TOON rows.
+func nodesToTOONRows(nodes []*graph.Node) []toonNodeRow {
+	rows := make([]toonNodeRow, 0, len(nodes))
+	for _, n := range nodes {
+		if n.Kind == graph.KindFile || n.Kind == graph.KindImport {
+			continue
+		}
+		rows = append(rows, toonNodeRow{
+			ID:        n.ID,
+			Kind:      string(n.Kind),
+			Name:      n.Name,
+			FilePath:  n.FilePath,
+			StartLine: n.StartLine,
+		})
+	}
+	return rows
+}
+
+// returnSubGraph returns a SubGraph in the requested format (JSON, compact, or TOON).
+func returnSubGraph(req mcp.CallToolRequest, sg *query.SubGraph) (*mcp.CallToolResult, error) {
+	if isCompact(req) {
+		return mcp.NewToolResultText(compactSubGraph(sg)), nil
+	}
+	if isTOON(req) {
+		return subGraphToTOON(sg)
+	}
+	return mcp.NewToolResultJSON(sg)
+}
+
+// subGraphToTOON converts a SubGraph to a TOON-encoded text result.
+func subGraphToTOON(sg *query.SubGraph) (*mcp.CallToolResult, error) {
+	var edgeRows []toonEdgeRow
+	for _, e := range sg.Edges {
+		label := e.ConfidenceLabel
+		if label == "" {
+			label = graph.ConfidenceLabelFor(e.Kind, e.Confidence)
+		}
+		edgeRows = append(edgeRows, toonEdgeRow{
+			From:       e.From,
+			To:         e.To,
+			Kind:       string(e.Kind),
+			Confidence: e.Confidence,
+			Label:      label,
+		})
+	}
+	result := toonSubGraphResult{
+		Nodes:     nodesToTOONRows(sg.Nodes),
+		Edges:     edgeRows,
+		Total:     sg.TotalNodes,
+		Truncated: sg.Truncated,
+	}
+	data, err := toon.Marshal(result)
+	if err != nil {
+		return mcp.NewToolResultJSON(sg)
+	}
+	return mcp.NewToolResultText(string(data)), nil
 }
 
 // resolveRepoFilter resolves the optional repo/project/ref params into a set
@@ -214,6 +314,7 @@ func (s *Server) registerCoreTools() {
 			mcp.WithString("query", mcp.Required(), mcp.Description("Search query — can be symbol name, concept, or multiple keywords")),
 			mcp.WithNumber("limit", mcp.Description("Max results (default: 20)")),
 			mcp.WithBoolean("compact", mcp.Description("Return one-line-per-result text instead of JSON objects (saves 50-70% tokens)")),
+			mcp.WithString("format", mcp.Description("Output format: json (default) or toon (TOON tabular format, ~40% fewer tokens)")),
 			mcp.WithString("repo", mcp.Description("Filter results to a specific repository prefix")),
 			mcp.WithString("project", mcp.Description("Filter results to repositories in a specific project")),
 			mcp.WithString("ref", mcp.Description("Filter results to repositories with a specific reference tag")),
@@ -240,6 +341,7 @@ func (s *Server) registerCoreTools() {
 			mcp.WithNumber("depth", mcp.Description("Traversal depth (default: 2)")),
 			mcp.WithNumber("limit", mcp.Description("Max nodes (default: 50)")),
 			mcp.WithBoolean("compact", mcp.Description("One-line-per-symbol text output (saves 50-70% tokens)")),
+			mcp.WithString("format", mcp.Description("Output format: json (default) or toon")),
 		),
 		s.handleGetDependencies,
 	)
@@ -251,6 +353,7 @@ func (s *Server) registerCoreTools() {
 			mcp.WithNumber("depth", mcp.Description("Traversal depth (default: 3)")),
 			mcp.WithNumber("limit", mcp.Description("Max nodes (default: 50)")),
 			mcp.WithBoolean("compact", mcp.Description("One-line-per-symbol text output (saves 50-70% tokens)")),
+			mcp.WithString("format", mcp.Description("Output format: json (default) or toon")),
 		),
 		s.handleGetDependents,
 	)
@@ -262,6 +365,7 @@ func (s *Server) registerCoreTools() {
 			mcp.WithNumber("depth", mcp.Description("Traversal depth (default: 4)")),
 			mcp.WithNumber("limit", mcp.Description("Max nodes (default: 50)")),
 			mcp.WithBoolean("compact", mcp.Description("One-line-per-symbol text output (saves 50-70% tokens)")),
+			mcp.WithString("format", mcp.Description("Output format: json (default) or toon")),
 			mcp.WithString("repo", mcp.Description("Filter results to a specific repository prefix")),
 			mcp.WithString("project", mcp.Description("Filter results to repositories in a specific project")),
 			mcp.WithString("ref", mcp.Description("Filter results to repositories with a specific reference tag")),
@@ -276,6 +380,7 @@ func (s *Server) registerCoreTools() {
 			mcp.WithNumber("depth", mcp.Description("Traversal depth (default: 2)")),
 			mcp.WithNumber("limit", mcp.Description("Max nodes (default: 50)")),
 			mcp.WithBoolean("compact", mcp.Description("One-line-per-symbol text output (saves 50-70% tokens)")),
+			mcp.WithString("format", mcp.Description("Output format: json (default) or toon")),
 		),
 		s.handleGetCallers,
 	)
@@ -284,6 +389,7 @@ func (s *Server) registerCoreTools() {
 		mcp.NewTool("find_implementations",
 			mcp.WithDescription("Finds all concrete types that implement an interface. Use before changing an interface to identify all types that will be affected."),
 			mcp.WithString("interface_id", mcp.Required(), mcp.Description("Interface node ID")),
+			mcp.WithString("format", mcp.Description("Output format: json (default) or toon")),
 		),
 		s.handleFindImplementations,
 	)
@@ -294,6 +400,7 @@ func (s *Server) registerCoreTools() {
 			mcp.WithString("id", mcp.Required(), mcp.Description("Node ID")),
 			mcp.WithNumber("limit", mcp.Description("Max nodes (default: 50)")),
 			mcp.WithBoolean("compact", mcp.Description("One-line-per-symbol text output (saves 50-70% tokens)")),
+			mcp.WithString("format", mcp.Description("Output format: json (default) or toon")),
 			mcp.WithString("repo", mcp.Description("Filter results to a specific repository prefix")),
 			mcp.WithString("project", mcp.Description("Filter results to repositories in a specific project")),
 			mcp.WithString("ref", mcp.Description("Filter results to repositories with a specific reference tag")),
@@ -308,6 +415,7 @@ func (s *Server) registerCoreTools() {
 			mcp.WithNumber("radius", mcp.Description("Bidirectional hops (default: 2)")),
 			mcp.WithNumber("limit", mcp.Description("Max nodes (default: 50)")),
 			mcp.WithBoolean("compact", mcp.Description("One-line-per-symbol text output (saves 50-70% tokens)")),
+			mcp.WithString("format", mcp.Description("Output format: json (default) or toon")),
 		),
 		s.handleGetCluster,
 	)
@@ -399,12 +507,25 @@ func (s *Server) handleSearchSymbols(_ context.Context, req mcp.CallToolRequest)
 		return mcp.NewToolResultText(compactNodes(nodes)), nil
 	}
 
-	var results []map[string]any
 	total := len(nodes)
-	for i, n := range nodes {
-		if i >= limit {
-			break
+	if len(nodes) > limit {
+		nodes = nodes[:limit]
+	}
+
+	if isTOON(req) {
+		result := toonSearchResult{
+			Results:   nodesToTOONRows(nodes),
+			Total:     total,
+			Truncated: total > limit,
 		}
+		data, err := toon.Marshal(result)
+		if err == nil {
+			return mcp.NewToolResultText(string(data)), nil
+		}
+	}
+
+	var results []map[string]any
+	for _, n := range nodes {
 		results = append(results, n.Brief())
 	}
 	return mcp.NewToolResultJSON(map[string]any{
@@ -456,10 +577,7 @@ func (s *Server) handleGetDependencies(_ context.Context, req mcp.CallToolReques
 	}
 	sg := s.engine.GetDependencies(id, opts)
 	enrichSubGraphEdges(sg)
-	if isCompact(req) {
-		return mcp.NewToolResultText(compactSubGraph(sg)), nil
-	}
-	return mcp.NewToolResultJSON(sg)
+	return returnSubGraph(req, sg)
 }
 
 func (s *Server) handleGetDependents(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -474,10 +592,7 @@ func (s *Server) handleGetDependents(_ context.Context, req mcp.CallToolRequest)
 	}
 	sg := s.engine.GetDependents(id, opts)
 	enrichSubGraphEdges(sg)
-	if isCompact(req) {
-		return mcp.NewToolResultText(compactSubGraph(sg)), nil
-	}
-	return mcp.NewToolResultJSON(sg)
+	return returnSubGraph(req, sg)
 }
 
 func (s *Server) handleGetCallChain(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -499,11 +614,7 @@ func (s *Server) handleGetCallChain(_ context.Context, req mcp.CallToolRequest) 
 	}
 	sg = filterSubGraph(sg, allowed)
 	enrichSubGraphEdges(sg)
-
-	if isCompact(req) {
-		return mcp.NewToolResultText(compactSubGraph(sg)), nil
-	}
-	return mcp.NewToolResultJSON(sg)
+	return returnSubGraph(req, sg)
 }
 
 func (s *Server) handleGetCallers(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -518,10 +629,7 @@ func (s *Server) handleGetCallers(_ context.Context, req mcp.CallToolRequest) (*
 	}
 	sg := s.engine.GetCallers(id, opts)
 	enrichSubGraphEdges(sg)
-	if isCompact(req) {
-		return mcp.NewToolResultText(compactSubGraph(sg)), nil
-	}
-	return mcp.NewToolResultJSON(sg)
+	return returnSubGraph(req, sg)
 }
 
 func (s *Server) handleFindImplementations(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -530,6 +638,20 @@ func (s *Server) handleFindImplementations(_ context.Context, req mcp.CallToolRe
 		return mcp.NewToolResultError("interface_id is required"), nil
 	}
 	impls := s.engine.FindImplementations(id)
+
+	if isTOON(req) {
+		result := struct {
+			Implementations []toonNodeRow `toon:"implementations"`
+			Total           int           `toon:"total"`
+		}{
+			Implementations: nodesToTOONRows(impls),
+			Total:           len(impls),
+		}
+		if data, err := toon.Marshal(result); err == nil {
+			return mcp.NewToolResultText(string(data)), nil
+		}
+	}
+
 	var results []map[string]any
 	for _, n := range impls {
 		results = append(results, n.Brief())
@@ -554,11 +676,7 @@ func (s *Server) handleFindUsages(_ context.Context, req mcp.CallToolRequest) (*
 	}
 	sg = filterSubGraph(sg, allowed)
 	enrichSubGraphEdges(sg)
-
-	if isCompact(req) {
-		return mcp.NewToolResultText(compactSubGraph(sg)), nil
-	}
-	return mcp.NewToolResultJSON(sg)
+	return returnSubGraph(req, sg)
 }
 
 func (s *Server) handleGetCluster(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -573,10 +691,7 @@ func (s *Server) handleGetCluster(_ context.Context, req mcp.CallToolRequest) (*
 	}
 	sg := s.engine.GetCluster(id, opts)
 	enrichSubGraphEdges(sg)
-	if isCompact(req) {
-		return mcp.NewToolResultText(compactSubGraph(sg)), nil
-	}
-	return mcp.NewToolResultJSON(sg)
+	return returnSubGraph(req, sg)
 }
 
 func (s *Server) handleGraphStats(_ context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {

@@ -82,15 +82,19 @@ export default function GraphExplorerPage() {
     if (!fullGraphData) return
 
     if (selectedRepo === 'all') {
-      // For "all", filter heavy node types if too large.
+      // For "all", filter heavy node types if too large but keep cross-repo edges.
       if (fullGraphData.nodes.length > 10000) {
         const filtered = fullGraphData.nodes.filter(n =>
           n.kind !== 'file' && n.kind !== 'import' && n.kind !== 'variable'
         )
         const ids = new Set(filtered.map(n => n.id))
+        // Keep edges where both endpoints are visible, plus cross-repo edges
+        const filteredEdges = fullGraphData.edges.filter(e =>
+          ids.has(e.from) && ids.has(e.to)
+        )
         setGraphData({
           nodes: filtered,
-          edges: fullGraphData.edges.filter(e => ids.has(e.from) && ids.has(e.to)),
+          edges: filteredEdges,
           stats: fullGraphData.stats,
         })
       } else {
@@ -126,14 +130,22 @@ export default function GraphExplorerPage() {
     const clusterEdges = (fullGraphData?.edges || []).filter(
       e => clusterNodeIds.has(e.from) && clusterNodeIds.has(e.to)
     )
+
+    // Clear repo_prefix so the layout uses gentle single-graph settings.
+    const resetNodes = cluster.nodes.map(n => ({
+      ...n,
+      repo_prefix: '',
+    }))
+
     setGraphData({
-      nodes: cluster.nodes,
+      nodes: resetNodes,
       edges: clusterEdges,
       stats: graphData?.stats || { total_nodes: 0, total_edges: 0, by_kind: {}, by_language: {} },
     })
     setClusterActive(true)
-    // Re-layout with the smaller cluster graph
-    setTimeout(() => relayoutRef.current?.(), 200)
+    // GraphCanvas useEffect will destroy old Sigma and create a fresh graph+layout.
+    // Just fit camera after layout has had time to settle.
+    setTimeout(() => fitCameraRef.current?.(), 3000)
   }
 
   function handleExitCluster() {

@@ -164,7 +164,7 @@ export default function ServiceGraph({ services, edges, onSelectRepo }: ServiceG
   return (
     <div
       ref={containerRef}
-      className="h-[400px] w-full rounded-lg border border-zinc-800 bg-zinc-950"
+      className="h-[400px] w-full rounded-lg border border-zinc-800 bg-zinc-950 relative overflow-hidden"
       style={{ cursor: 'pointer' }}
     />
   )

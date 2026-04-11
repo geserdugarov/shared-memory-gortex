@@ -40,6 +40,23 @@ type FindDeadCodeOptions struct {
 	// though Go's compiler enforces their usage. Package-level variables
 	// cannot be reliably distinguished from locals in the current graph model.
 	IncludeVariables bool
+
+	// IncludeCgoExports includes functions annotated with //export pragma.
+	// Default false — CGo-exported functions are called from C, not Go,
+	// so they have no incoming Go-level edges.
+	// Requires the Go extractor to populate Node.Meta["cgo_export"] = true.
+	IncludeCgoExports bool
+
+	// IncludeLinknameTargets includes functions annotated with //go:linkname.
+	// Default false — linkname targets are linked by name from another package
+	// and have no visible call edges in the graph.
+	// Requires the Go extractor to populate Node.Meta["go_linkname"] = true.
+	IncludeLinknameTargets bool
+
+	// SkipCrossRepoNodes excludes nodes whose RepoPrefix is non-empty.
+	// Useful when cross-repo linking is incomplete — functions in secondary
+	// repos may lack incoming edges from the primary repo.
+	SkipCrossRepoNodes bool
 }
 
 // FindDeadCode returns all symbols with zero incoming calls or references,
@@ -95,6 +112,12 @@ func FindDeadCode(g *graph.Graph, processes *ProcessResult, excludePatterns []st
 			continue
 		}
 
+		// Skip Go main() — it's the binary entry point, called by the runtime.
+		// Constrained to KindFunction so (*Foo).main() methods are still checked.
+		if n.Name == "main" && n.Language == "go" && n.Kind == graph.KindFunction {
+			continue
+		}
+
 		// Skip vendored/generated C header functions — they're used via C
 		// macros and linker symbols, invisible to the graph.
 		if isVendoredOrGenerated(n.FilePath) {
@@ -144,6 +167,32 @@ func FindDeadCode(g *graph.Graph, processes *ProcessResult, excludePatterns []st
 			if incomingCount > 0 {
 				continue
 			}
+
+			// Fallback: well-known standard-library interface methods.
+			// If the implements edge wasn't inferred, methods like ServeHTTP,
+			// MarshalJSON, String, etc. are still almost certainly alive.
+			if isWellKnownInterfaceMethod(n.Name, n.Language) {
+				continue
+			}
+		}
+
+		// Skip CGo-exported functions (called from C, no Go-level callers).
+		if n.Language == "go" && !opt.IncludeCgoExports {
+			if cgoExport, ok := n.Meta["cgo_export"].(bool); ok && cgoExport {
+				continue
+			}
+		}
+
+		// Skip go:linkname targets (linked by name from another package).
+		if n.Language == "go" && !opt.IncludeLinknameTargets {
+			if linkname, ok := n.Meta["go_linkname"].(bool); ok && linkname {
+				continue
+			}
+		}
+
+		// Skip nodes from secondary repos when cross-repo linking is incomplete.
+		if opt.SkipCrossRepoNodes && n.RepoPrefix != "" {
+			continue
 		}
 
 		// Check exclusions
@@ -399,13 +448,99 @@ func isExportedSymbol(name, lang string) bool {
 	return len(name) > 0 && !strings.HasPrefix(name, "_")
 }
 
+// goWellKnownMethods contains method names that satisfy standard-library or
+// widely-used Go interfaces.  When an implements edge wasn't inferred, a method
+// with one of these names is almost certainly alive via implicit interface
+// satisfaction rather than truly dead.
+var goWellKnownMethods = map[string]bool{
+	// io interfaces
+	"Read": true, "Write": true, "Close": true, "Flush": true,
+	"Seek": true, "ReadAt": true, "WriteAt": true, "ReadFrom": true,
+	"WriteTo": true, "ReadByte": true, "UnreadByte": true,
+	"ReadRune": true, "UnreadRune": true, "WriteByte": true,
+	"WriteString": true,
+	// net/http
+	"ServeHTTP": true, "RoundTrip": true,
+	// encoding
+	"MarshalJSON": true, "UnmarshalJSON": true,
+	"MarshalXML": true, "UnmarshalXML": true,
+	"MarshalText": true, "UnmarshalText": true,
+	"MarshalBinary": true, "UnmarshalBinary": true,
+	"MarshalYAML": true, "UnmarshalYAML": true,
+	// fmt
+	"String": true, "Error": true, "Format": true, "GoString": true,
+	// sort
+	"Len": true, "Less": true, "Swap": true,
+	// sql
+	"Scan": true, "Value": true,
+	// hash
+	"Sum": true, "Reset": true, "BlockSize": true,
+	// driver
+	"Open": true, "Exec": true, "Query": true, "Begin": true,
+	"Prepare": true,
+	// proto/gRPC
+	"mustEmbedUnimplemented": true, "ProtoMessage": true,
+	"ProtoReflect": true,
+}
+
+// isWellKnownInterfaceMethod returns true if the method name matches a
+// standard-library or widely-used interface method in the given language.
+func isWellKnownInterfaceMethod(name, lang string) bool {
+	if lang != "go" {
+		return false
+	}
+	return goWellKnownMethods[name]
+}
+
 // isVendoredOrGenerated checks if a file is vendored or generated code that
-// should be excluded from dead code analysis (C headers, tree-sitter bindings, etc.).
+// should be excluded from dead code analysis.
 func isVendoredOrGenerated(path string) bool {
-	return strings.Contains(path, "tree_sitter/") ||
+	if strings.Contains(path, "tree_sitter/") ||
 		strings.Contains(path, "vendor/") ||
 		strings.HasSuffix(path, ".h") ||
-		strings.HasSuffix(path, ".c")
+		strings.HasSuffix(path, ".c") {
+		return true
+	}
+	base := filepath.Base(path)
+	// Protobuf / gRPC generated Go files
+	if strings.HasSuffix(base, ".pb.go") {
+		return true
+	}
+	// Code-generation convention suffixes
+	if strings.HasSuffix(base, "_gen.go") ||
+		strings.HasSuffix(base, "_generated.go") ||
+		strings.HasSuffix(base, ".gen.go") {
+		return true
+	}
+	// controller-gen / kubebuilder: zz_generated.*.go
+	if strings.HasPrefix(base, "zz_generated") {
+		return true
+	}
+	// Mock files (mockery, gomock)
+	if strings.HasPrefix(base, "mock_") && strings.HasSuffix(base, ".go") {
+		return true
+	}
+	if strings.HasSuffix(base, "_mock.go") {
+		return true
+	}
+	return false
+}
+
+// buildConstraintSuffixes covers OS, architecture, and special build-tag
+// suffixes used by the Go toolchain for conditional compilation.
+var buildConstraintSuffixes = []string{
+	// OS
+	"_linux.go", "_darwin.go", "_windows.go", "_freebsd.go",
+	"_openbsd.go", "_netbsd.go", "_dragonfly.go", "_plan9.go",
+	"_solaris.go", "_illumos.go", "_aix.go", "_android.go",
+	"_ios.go", "_js.go", "_wasip1.go",
+	// Architecture
+	"_amd64.go", "_arm64.go", "_arm.go", "_386.go",
+	"_mips.go", "_mipsle.go", "_mips64.go", "_mips64le.go",
+	"_ppc64.go", "_ppc64le.go", "_s390x.go", "_riscv64.go",
+	"_loong64.go", "_wasm.go",
+	// Special
+	"_stub.go", "_cgo.go", "_nocgo.go", "_purego.go", "_appengine.go",
 }
 
 // hasBuildConstraint checks if a Go file has build constraints (build tags).
@@ -413,13 +548,7 @@ func isVendoredOrGenerated(path string) bool {
 // is active per build, so inactive variants always look "dead".
 func hasBuildConstraint(path string) bool {
 	base := filepath.Base(path)
-	// Common suffixes: _linux.go, _darwin.go, _windows.go, _stub.go, _cgo.go
-	suffixes := []string{
-		"_linux.go", "_darwin.go", "_windows.go", "_freebsd.go",
-		"_amd64.go", "_arm64.go", "_386.go",
-		"_stub.go", "_cgo.go", "_nocgo.go",
-	}
-	for _, s := range suffixes {
+	for _, s := range buildConstraintSuffixes {
 		if strings.HasSuffix(base, s) {
 			return true
 		}

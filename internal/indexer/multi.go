@@ -432,6 +432,22 @@ func (mi *MultiIndexer) GetIndexer(repoPrefix string) *Indexer {
 	return mi.indexers[repoPrefix]
 }
 
+// ResolveFilePath takes a repo-prefixed relative path (e.g. "ade/internal/foo.go")
+// and returns the absolute filesystem path by looking up the repo's root directory.
+// Returns empty string if the repo prefix is not found.
+func (mi *MultiIndexer) ResolveFilePath(prefixedPath string) string {
+	mi.mu.RLock()
+	defer mi.mu.RUnlock()
+
+	for prefix, meta := range mi.repos {
+		if strings.HasPrefix(prefixedPath, prefix+"/") {
+			relPath := strings.TrimPrefix(prefixedPath, prefix+"/")
+			return filepath.Join(meta.RootPath, relPath)
+		}
+	}
+	return ""
+}
+
 // MergedContractRegistry combines contract registries from all per-repo
 // indexers into a single registry. In multi-repo mode each repo's indexer
 // runs extractContracts independently; this merges the results.

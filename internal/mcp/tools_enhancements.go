@@ -15,6 +15,7 @@ import (
 	"github.com/zzet/gortex/internal/contracts"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/query"
+	"go.uber.org/zap"
 )
 
 // ensureFresh checks if any of the given file paths are stale (modified on disk
@@ -40,8 +41,22 @@ func (s *Server) ensureFresh(filePaths []string) []string {
 			if root := s.indexer.RootPath(); root != "" {
 				absPath = filepath.Join(root, fp)
 			}
+
+			// In multi-repo mode, the file path may be prefixed with a repo name
+			// (e.g. "ade/internal/..."). If the resolved path doesn't exist, try
+			// resolving via the MultiIndexer which knows each repo's root.
+			if _, statErr := os.Stat(absPath); statErr != nil && s.multiIndexer != nil {
+				resolved := s.multiIndexer.ResolveFilePath(fp)
+				if resolved != "" {
+					absPath = resolved
+				}
+			}
+
 			if err := s.indexer.IndexFile(absPath); err != nil {
-				s.logger.Warn("auto re-index failed for " + fp)
+				s.logger.Warn("auto re-index failed",
+					zap.String("file", fp),
+					zap.String("resolved", absPath),
+					zap.Error(err))
 				continue
 			}
 			refreshed = append(refreshed, fp)
@@ -516,8 +531,18 @@ func (s *Server) handlePrefetchContext(_ context.Context, req mcp.CallToolReques
 
 func (s *Server) handleFindDeadCode(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	opts := analysis.FindDeadCodeOptions{}
-	if v, ok := req.GetArguments()["include_variables"].(bool); ok && v {
+	args := req.GetArguments()
+	if v, ok := args["include_variables"].(bool); ok && v {
 		opts.IncludeVariables = true
+	}
+	if v, ok := args["include_cgo_exports"].(bool); ok && v {
+		opts.IncludeCgoExports = true
+	}
+	if v, ok := args["include_linkname_targets"].(bool); ok && v {
+		opts.IncludeLinknameTargets = true
+	}
+	if v, ok := args["skip_cross_repo_nodes"].(bool); ok && v {
+		opts.SkipCrossRepoNodes = true
 	}
 
 	entries := analysis.FindDeadCode(s.graph, s.getProcesses(), nil, opts)

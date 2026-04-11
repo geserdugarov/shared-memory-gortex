@@ -268,6 +268,21 @@ func TestPropertyDeadCode_Completeness(t *testing.T) {
 				continue
 			}
 
+			// Go main() excluded
+			if node.Name == "main" && node.Language == "go" && node.Kind == graph.KindFunction {
+				continue
+			}
+
+			// Generated/vendored files excluded
+			if isVendoredOrGenerated(node.FilePath) {
+				continue
+			}
+
+			// Build-constrained files excluded
+			if node.Language == "go" && hasBuildConstraint(node.FilePath) {
+				continue
+			}
+
 			// Check incoming edges (calls, references, member_of, implements, instantiates)
 			inEdges := tc.Graph.GetInEdges(node.ID)
 			hasIncoming := false
@@ -282,6 +297,21 @@ func TestPropertyDeadCode_Completeness(t *testing.T) {
 				}
 			}
 			if hasIncoming {
+				continue
+			}
+
+			// Well-known interface methods excluded
+			if node.Kind == graph.KindMethod && isWellKnownInterfaceMethod(node.Name, node.Language) {
+				continue
+			}
+
+			// CGo exports excluded by default
+			if cgoExport, ok := node.Meta["cgo_export"].(bool); ok && cgoExport {
+				continue
+			}
+
+			// go:linkname targets excluded by default
+			if linkname, ok := node.Meta["go_linkname"].(bool); ok && linkname {
 				continue
 			}
 
@@ -621,4 +651,174 @@ func TestDeadCode_StructuralNodesExcluded(t *testing.T) {
 
 	result := FindDeadCode(g, processes, nil)
 	assert.Empty(t, result, "structural nodes should never be reported as dead code")
+}
+
+// TestDeadCode_GeneratedFilesExcluded verifies that symbols in generated files
+// (protobuf, codegen, mocks) are not reported as dead code.
+func TestDeadCode_GeneratedFilesExcluded(t *testing.T) {
+	g := graph.New()
+
+	generatedFiles := []struct {
+		file string
+		name string
+	}{
+		{"pkg/api.pb.go", "apiHelper"},
+		{"pkg/api_grpc.pb.go", "grpcHelper"},
+		{"pkg/types_gen.go", "genHelper"},
+		{"pkg/types_generated.go", "generatedHelper"},
+		{"pkg/types.gen.go", "dotGenHelper"},
+		{"pkg/zz_generated.deepcopy.go", "deepCopyHelper"},
+		{"pkg/mock_service.go", "mockHelper"},
+		{"pkg/service_mock.go", "mockHelper2"},
+	}
+
+	for _, gf := range generatedFiles {
+		g.AddNode(&graph.Node{
+			ID: gf.file + "::" + gf.name, Kind: graph.KindFunction,
+			Name: gf.name, FilePath: gf.file, StartLine: 1, EndLine: 10, Language: "go",
+		})
+	}
+
+	result := FindDeadCode(g, nil, nil)
+	assert.Empty(t, result, "symbols in generated files should be excluded")
+}
+
+// TestDeadCode_MainFunctionExcluded verifies that Go main() is not reported as dead.
+func TestDeadCode_MainFunctionExcluded(t *testing.T) {
+	g := graph.New()
+
+	g.AddNode(&graph.Node{
+		ID: "cmd/app/main.go::main", Kind: graph.KindFunction,
+		Name: "main", FilePath: "cmd/app/main.go", StartLine: 5, EndLine: 20, Language: "go",
+	})
+
+	result := FindDeadCode(g, nil, nil)
+	assert.Empty(t, result, "Go main() should be excluded as runtime entry point")
+}
+
+// TestDeadCode_MainMethodNotExcluded verifies that a method named main on a
+// type IS reported as dead (only the package-level main function is special).
+func TestDeadCode_MainMethodNotExcluded(t *testing.T) {
+	g := graph.New()
+
+	g.AddNode(&graph.Node{
+		ID: "pkg/foo.go::Foo.main", Kind: graph.KindMethod,
+		Name: "main", FilePath: "pkg/foo.go", StartLine: 5, EndLine: 10, Language: "go",
+	})
+
+	result := FindDeadCode(g, nil, nil)
+	assert.Len(t, result, 1, "a method named main should still be reported as dead")
+}
+
+// TestDeadCode_WellKnownMethodsExcluded verifies that methods matching
+// well-known stdlib interface names are excluded even without implements edges.
+func TestDeadCode_WellKnownMethodsExcluded(t *testing.T) {
+	g := graph.New()
+
+	wellKnown := []string{"ServeHTTP", "MarshalJSON", "UnmarshalJSON", "String", "Error", "Read", "Write", "Close"}
+	for _, name := range wellKnown {
+		g.AddNode(&graph.Node{
+			ID: "pkg/foo.go::myType." + name, Kind: graph.KindMethod,
+			Name: name, FilePath: "pkg/foo.go", StartLine: 1, EndLine: 5, Language: "go",
+		})
+	}
+
+	result := FindDeadCode(g, nil, nil)
+	assert.Empty(t, result, "well-known interface methods should be excluded")
+}
+
+// TestDeadCode_WellKnownDoesNotSuppressOtherMethods verifies that non-well-known
+// method names are still reported as dead.
+func TestDeadCode_WellKnownDoesNotSuppressOtherMethods(t *testing.T) {
+	g := graph.New()
+
+	g.AddNode(&graph.Node{
+		ID: "pkg/foo.go::myType.handleInternal", Kind: graph.KindMethod,
+		Name: "handleInternal", FilePath: "pkg/foo.go", StartLine: 1, EndLine: 5, Language: "go",
+	})
+
+	result := FindDeadCode(g, nil, nil)
+	assert.Len(t, result, 1, "non-well-known methods should still be reported")
+	assert.Equal(t, "pkg/foo.go::myType.handleInternal", result[0].ID)
+}
+
+// TestDeadCode_CgoExportExcluded verifies that functions with cgo_export Meta
+// are excluded by default but included when IncludeCgoExports is set.
+func TestDeadCode_CgoExportExcluded(t *testing.T) {
+	g := graph.New()
+
+	g.AddNode(&graph.Node{
+		ID: "pkg/bridge.go::bridge_init", Kind: graph.KindFunction,
+		Name: "bridge_init", FilePath: "pkg/bridge.go", StartLine: 10, EndLine: 20, Language: "go",
+		Meta: map[string]any{"cgo_export": true},
+	})
+
+	// Default: excluded
+	result := FindDeadCode(g, nil, nil)
+	assert.Empty(t, result, "CGo exports should be excluded by default")
+
+	// With IncludeCgoExports: included
+	result = FindDeadCode(g, nil, nil, FindDeadCodeOptions{IncludeCgoExports: true})
+	assert.Len(t, result, 1, "CGo exports should be included when IncludeCgoExports is true")
+}
+
+// TestDeadCode_LinknameExcluded verifies that functions with go_linkname Meta
+// are excluded by default but included when IncludeLinknameTargets is set.
+func TestDeadCode_LinknameExcluded(t *testing.T) {
+	g := graph.New()
+
+	g.AddNode(&graph.Node{
+		ID: "pkg/runtime.go::nanotime", Kind: graph.KindFunction,
+		Name: "nanotime", FilePath: "pkg/runtime.go", StartLine: 10, EndLine: 15, Language: "go",
+		Meta: map[string]any{"go_linkname": true},
+	})
+
+	// Default: excluded
+	result := FindDeadCode(g, nil, nil)
+	assert.Empty(t, result, "linkname targets should be excluded by default")
+
+	// With IncludeLinknameTargets: included
+	result = FindDeadCode(g, nil, nil, FindDeadCodeOptions{IncludeLinknameTargets: true})
+	assert.Len(t, result, 1, "linkname targets should be included when IncludeLinknameTargets is true")
+}
+
+// TestDeadCode_CrossRepoNodeExcluded verifies that nodes with a RepoPrefix
+// are excluded when SkipCrossRepoNodes is set.
+func TestDeadCode_CrossRepoNodeExcluded(t *testing.T) {
+	g := graph.New()
+
+	g.AddNode(&graph.Node{
+		ID: "github.com/other/repo/pkg/util.go::helperFunc", Kind: graph.KindFunction,
+		Name: "helperFunc", FilePath: "pkg/util.go", StartLine: 1, EndLine: 10, Language: "go",
+		RepoPrefix: "github.com/other/repo",
+	})
+
+	// Default: included (so users see them)
+	result := FindDeadCode(g, nil, nil)
+	assert.Len(t, result, 1, "cross-repo nodes should be included by default")
+
+	// With SkipCrossRepoNodes: excluded
+	result = FindDeadCode(g, nil, nil, FindDeadCodeOptions{SkipCrossRepoNodes: true})
+	assert.Empty(t, result, "cross-repo nodes should be excluded when SkipCrossRepoNodes is true")
+}
+
+// TestDeadCode_ExpandedBuildConstraints verifies that the expanded set of
+// OS/arch-suffixed files are excluded.
+func TestDeadCode_ExpandedBuildConstraints(t *testing.T) {
+	g := graph.New()
+
+	constrainedFiles := []string{
+		"pkg/net_openbsd.go", "pkg/net_plan9.go", "pkg/net_js.go",
+		"pkg/asm_riscv64.go", "pkg/asm_s390x.go", "pkg/sys_purego.go",
+	}
+	for i, f := range constrainedFiles {
+		g.AddNode(&graph.Node{
+			ID: f + "::helper", Kind: graph.KindFunction,
+			Name: "helper", FilePath: f, StartLine: 1, EndLine: 10, Language: "go",
+		})
+		_ = i
+	}
+
+	result := FindDeadCode(g, nil, nil)
+	assert.Empty(t, result, "symbols in build-constrained files should be excluded")
 }

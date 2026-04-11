@@ -244,6 +244,7 @@ func (e *GoExtractor) extractFunctions(root *sitter.Node, src []byte, filePath, 
 				node.Meta["return_type"] = rt
 			}
 		}
+		scanGoPragmas(src, def.StartLine, node)
 		result.Nodes = append(result.Nodes, node)
 		result.Edges = append(result.Edges, &graph.Edge{
 			From: fileID, To: id, Kind: graph.EdgeDefines, FilePath: filePath, Line: def.StartLine + 1,
@@ -281,6 +282,7 @@ func (e *GoExtractor) extractMethods(root *sitter.Node, src []byte, filePath, fi
 				node.Meta["return_type"] = rt
 			}
 		}
+		scanGoPragmas(src, def.StartLine, node)
 		result.Nodes = append(result.Nodes, node)
 		result.Edges = append(result.Edges, &graph.Edge{
 			From: fileID, To: id, Kind: graph.EdgeDefines, FilePath: filePath, Line: def.StartLine + 1,
@@ -583,15 +585,11 @@ func (e *GoExtractor) extractValueRefs(root *sitter.Node, src []byte, filePath s
 			callerID = filePath // package-level expression
 		}
 
-		// Skip if this selector is actually the function position of a call
-		// (already handled by extractCalls).  We check the parent of the
-		// selector — if it's a call_expression whose function child is this
-		// selector, skip it.
-		// We detect this heuristically: if the field starts with an uppercase
-		// letter it's likely a package-qualified call (pkg.Func()), not a value.
-		if len(fieldName) > 0 && fieldName[0] >= 'A' && fieldName[0] <= 'Z' {
-			continue
-		}
+		// NOTE: We previously skipped uppercase field names here as a heuristic
+		// to avoid package-qualified calls (pkg.Func()). However, the tree-sitter
+		// query qSelectorArg only matches selectors inside argument_list, never
+		// in call function position, so the skip was over-broad and suppressed
+		// legitimate method value references like http.HandlerFunc(s.ServeHTTP).
 
 		edge := &graph.Edge{
 			From:     callerID,
@@ -695,6 +693,52 @@ func isGoBuiltinOrKeyword(name string) bool {
 		return true
 	}
 	return false
+}
+
+// scanGoPragmas inspects up to 5 source lines immediately before a function or
+// method declaration for Go compiler pragmas (//export, //go:linkname) and sets
+// the corresponding Meta keys on the node.  startLine is 0-based (tree-sitter).
+func scanGoPragmas(src []byte, startLine int, node *graph.Node) {
+	// Walk backward through src to find the start of each preceding line.
+	// We scan at most 5 lines before the declaration.
+	lineNum := 0 // 0-based line number
+	lineStarts := make([]int, 0, startLine+1)
+	for i := range src {
+		if lineNum > startLine {
+			break
+		}
+		if i == 0 || src[i-1] == '\n' {
+			lineStarts = append(lineStarts, i)
+			lineNum++
+		}
+	}
+
+	for scanLine := startLine - 1; scanLine >= 0 && scanLine >= startLine-5; scanLine-- {
+		if scanLine >= len(lineStarts) {
+			continue
+		}
+		start := lineStarts[scanLine]
+		end := len(src)
+		if scanLine+1 < len(lineStarts) {
+			end = lineStarts[scanLine+1]
+		}
+		line := strings.TrimSpace(string(src[start:end]))
+
+		// Stop scanning if we hit a non-comment, non-empty line (the previous
+		// declaration's body).
+		if line != "" && !strings.HasPrefix(line, "//") {
+			break
+		}
+
+		if strings.HasPrefix(line, "//export ") {
+			node.Meta["cgo_export"] = true
+			return
+		}
+		if strings.HasPrefix(line, "//go:linkname ") {
+			node.Meta["go_linkname"] = true
+			return
+		}
+	}
 }
 
 // --- Helpers ---

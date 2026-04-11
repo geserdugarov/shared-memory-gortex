@@ -6,6 +6,7 @@ import Sigma from 'sigma'
 import { EdgeArrowProgram } from 'sigma/rendering'
 import FA2LayoutSupervisor from 'graphology-layout-forceatlas2/worker'
 import { inferSettings } from 'graphology-layout-forceatlas2'
+import noverlap from 'graphology-layout-noverlap'
 import type { GortexNode, GortexEdge, NodeKind, EdgeKind } from '@/lib/types'
 import { NODE_COLORS, EDGE_COLORS } from '@/lib/colors'
 import { useStore } from '@/lib/store'
@@ -31,14 +32,43 @@ export default function GraphCanvas({ nodes, edges, fitCameraRef, relayoutRef }:
     const graph = new Graph({ multi: true, type: 'directed' })
 
     const nodeIds = new Set<string>()
+    
+    // In multi-repo mode, pre-compute cluster centers so each repo
+    // starts as a spatially separated island on the canvas.
+    const repoSet = new Set<string>()
+    for (const node of nodes) {
+      if (node.repo_prefix) repoSet.add(node.repo_prefix)
+    }
+    const repoList = Array.from(repoSet).sort()
+    const repoCount = repoList.length
+    const clusterRadius = repoCount > 1 ? Math.max(800, repoCount * 400) : 0
+    const repoCenters = new Map<string, { cx: number; cy: number }>()
+    repoList.forEach((repo, i) => {
+      const angle = (2 * Math.PI * i) / repoCount
+      repoCenters.set(repo, {
+        cx: Math.cos(angle) * clusterRadius,
+        cy: Math.sin(angle) * clusterRadius,
+      })
+    })
+
     for (const node of nodes) {
       if (nodeIds.has(node.id)) continue
       nodeIds.add(node.id)
 
-      // Spread initial positions wide so repulsion has room to work
+      // Position nodes near their repo cluster center with local jitter,
+      // so ForceAtlas2 refines the internal layout while keeping clusters apart.
+      const center = repoCenters.get(node.repo_prefix || '')
+      const spread = 300 // local spread within a cluster
+      const x = center
+        ? center.cx + (Math.random() - 0.5) * spread
+        : (Math.random() - 0.5) * 1000
+      const y = center
+        ? center.cy + (Math.random() - 0.5) * spread
+        : (Math.random() - 0.5) * 1000
+
       graph.addNode(node.id, {
-        x: (Math.random() - 0.5) * 1000,
-        y: (Math.random() - 0.5) * 1000,
+        x,
+        y,
         label: node.name,
         size: 5,
         color: NODE_COLORS[node.kind as NodeKind] || '#6b7280',
@@ -64,10 +94,10 @@ export default function GraphCanvas({ nodes, edges, fitCameraRef, relayoutRef }:
       }
     }
 
-    // Set node sizes based on degree (logarithmic)
+    // Set node sizes based on degree (logarithmic, capped tightly)
     graph.forEachNode((nodeId) => {
       const degree = graph.degree(nodeId)
-      const size = Math.min(20, Math.max(3, 3 + Math.log2(degree + 1) * 3))
+      const size = Math.min(10, Math.max(2, 2 + Math.log2(degree + 1) * 1.5))
       graph.setNodeAttribute(nodeId, 'size', size)
     })
 
@@ -101,12 +131,20 @@ export default function GraphCanvas({ nodes, edges, fitCameraRef, relayoutRef }:
       }
     })
 
-    // Assign edge weights: cross-community edges are weaker (push clusters apart),
-    // same-file edges are stronger (keep related symbols close).
+    // Assign edge weights: same-repo edges pull clusters tight,
+    // cross-repo edges are very weak (just enough to show the connection).
     layoutGraph.forEachEdge((edge, attrs, source, target) => {
       const srcFile = layoutGraph.getNodeAttribute(source, 'filePath') as string
       const tgtFile = layoutGraph.getNodeAttribute(target, 'filePath') as string
+      const srcRepo = layoutGraph.getNodeAttribute(source, 'repoPrefix') as string
+      const tgtRepo = layoutGraph.getNodeAttribute(target, 'repoPrefix') as string
       const kind = attrs.edgeKind as string
+
+      // Cross-repo edges: very weak so clusters stay separated
+      if (srcRepo && tgtRepo && srcRepo !== tgtRepo) {
+        layoutGraph.setEdgeAttribute(edge, 'weight', 0.05)
+        return
+      }
 
       let weight = 1
       if (srcFile && tgtFile && srcFile === tgtFile) {
@@ -122,17 +160,26 @@ export default function GraphCanvas({ nodes, edges, fitCameraRef, relayoutRef }:
     })
 
     const settings = inferSettings(layoutGraph)
+    
+    // Detect multi-repo mode: increase repulsion to keep repo clusters apart
+    const repoSet2 = new Set<string>()
+    layoutGraph.forEachNode((_id, attrs) => {
+      const rp = attrs.repoPrefix as string
+      if (rp) repoSet2.add(rp)
+    })
+    const isMultiRepo = repoSet2.size > 1
+
     const layout = new FA2LayoutSupervisor(layoutGraph, {
       settings: {
         ...settings,
         barnesHutOptimize: layoutGraph.order > 500,
         barnesHutTheta: 0.5,
-        slowDown: 3,
-        gravity: 0.05,                  // very weak gravity → clusters drift apart
-        scalingRatio: 30,               // strong repulsion → clear gaps between clusters
+        slowDown: isMultiRepo ? 5 : 3,
+        gravity: isMultiRepo ? 0.01 : 0.05,       // weaker gravity in multi-repo → clusters drift apart more
+        scalingRatio: isMultiRepo ? 80 : 30,       // stronger repulsion in multi-repo → clear gaps between repos
         strongGravityMode: false,
-        edgeWeightInfluence: 1,         // respect the weights we assigned
-        outboundAttractionDistribution: true, // hubs don't collapse their neighbors
+        edgeWeightInfluence: 1,                     // respect the weights we assigned
+        outboundAttractionDistribution: true,       // hubs don't collapse their neighbors
       },
     })
 
@@ -159,6 +206,21 @@ export default function GraphCanvas({ nodes, edges, fitCameraRef, relayoutRef }:
       }
       syncPositions()
       clearInterval(syncInterval)
+
+      // Run noverlap to push apart overlapping nodes — but only for
+      // reasonably sized graphs. On large graphs (>5000 nodes) it's too
+      // expensive on the main thread and will freeze the browser.
+      if (graph.order < 5000) {
+        noverlap.assign(graph, {
+          maxIterations: 50,
+          settings: {
+            ratio: 2.0,
+            speed: 8,
+            gridSize: 20,
+            margin: 3,
+          },
+        })
+      }
     }, 8000)
 
     return layout
@@ -224,13 +286,15 @@ export default function GraphCanvas({ nodes, edges, fitCameraRef, relayoutRef }:
 
     sigma.setSetting('edgeReducer', (_edge, data) => {
       const hovered = hoveredNodeRef.current
-      if (hovered) {
-        const graph = graphRef.current
-        if (graph) {
-          const [source, target] = graph.extremities(_edge)
-          if (source !== hovered && target !== hovered) {
-            return { ...data, hidden: true }
-          }
+      if (!hovered) {
+        // No node hovered — hide all edges
+        return { ...data, hidden: true }
+      }
+      const graph = graphRef.current
+      if (graph) {
+        const [source, target] = graph.extremities(_edge)
+        if (source !== hovered && target !== hovered) {
+          return { ...data, hidden: true }
         }
       }
       return data
@@ -265,6 +329,10 @@ export default function GraphCanvas({ nodes, edges, fitCameraRef, relayoutRef }:
       allowInvalidContainer: true,
       // Disable the default hover highlight (bright white halo)
       defaultDrawNodeHover: () => {},
+      // Hide all edges by default — they appear on hover via the edgeReducer
+      edgeReducer: (_edge: string, data: Record<string, unknown>) => {
+        return { ...data, hidden: true }
+      },
       nodeReducer: (nodeId, data) => {
         const kind = data.nodeKind as string
         const filePath = data.filePath as string

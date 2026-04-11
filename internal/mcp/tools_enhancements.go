@@ -14,6 +14,7 @@ import (
 	"github.com/zzet/gortex/internal/analysis"
 	"github.com/zzet/gortex/internal/contracts"
 	"github.com/zzet/gortex/internal/graph"
+	"github.com/zzet/gortex/internal/persistence"
 	"github.com/zzet/gortex/internal/query"
 	"go.uber.org/zap"
 )
@@ -213,6 +214,30 @@ func (s *Server) registerEnhancementTools() {
 		),
 		s.handleCheckContracts,
 	)
+
+	// record_feedback
+	s.mcpServer.AddTool(
+		mcp.NewTool("record_feedback",
+			mcp.WithDescription("Report which symbols from a smart_context or prefetch_context call were useful, not needed, or missing. Improves future context quality for this repository."),
+			mcp.WithString("task", mcp.Required(), mcp.Description("The task description used in the original context call")),
+			mcp.WithString("useful", mcp.Description("Comma-separated symbol IDs that were useful for the task")),
+			mcp.WithString("not_needed", mcp.Description("Comma-separated symbol IDs that were returned but not needed")),
+			mcp.WithString("missing", mcp.Description("Comma-separated symbol IDs that should have been included but were not")),
+			mcp.WithString("tool_source", mcp.Description("Which tool produced the context: smart_context or prefetch_context (default: smart_context)")),
+		),
+		s.handleRecordFeedback,
+	)
+
+	// query_feedback
+	s.mcpServer.AddTool(
+		mcp.NewTool("query_feedback",
+			mcp.WithDescription("Returns aggregated feedback statistics: most useful symbols, most missed symbols, and accuracy metrics for context tools."),
+			mcp.WithNumber("top_n", mcp.Description("Number of top symbols to return per category (default: 10)")),
+			mcp.WithString("tool_source", mcp.Description("Filter by tool_source: smart_context, prefetch_context, or all (default: all)")),
+			mcp.WithBoolean("compact", mcp.Description("One-line-per-symbol text output")),
+		),
+		s.handleQueryFeedback,
+	)
 }
 
 // ---------------------------------------------------------------------------
@@ -339,6 +364,7 @@ func (s *Server) handlePrefetchContext(_ context.Context, req mcp.CallToolReques
 		search    float64
 		proximity float64
 		community float64
+		feedback  float64
 		reason    string
 		node      *graph.Node
 	}
@@ -439,6 +465,16 @@ func (s *Server) handlePrefetchContext(_ context.Context, req mcp.CallToolReques
 		}
 	}
 
+	// 4. Feedback signal (weight 0.15 when data exists, else use original 3-signal weights).
+	hasFeedback := s.feedback != nil && s.feedback.HasData()
+	if hasFeedback {
+		for _, sc := range scoreMap {
+			fbScore := s.feedback.GetSymbolScore(sc.node.ID)
+			// Normalize from [-1, 1] to [0, 1].
+			sc.feedback = (fbScore + 1.0) / 2.0
+		}
+	}
+
 	// Compute combined scores and build candidates
 	var candidates []prefetchCandidate
 	for id, sc := range scoreMap {
@@ -454,7 +490,12 @@ func (s *Server) handlePrefetchContext(_ context.Context, req mcp.CallToolReques
 			continue
 		}
 
-		combined := 0.4*sc.search + 0.4*sc.proximity + 0.2*sc.community
+		var combined float64
+		if hasFeedback {
+			combined = 0.35*sc.search + 0.35*sc.proximity + 0.15*sc.community + 0.15*sc.feedback
+		} else {
+			combined = 0.4*sc.search + 0.4*sc.proximity + 0.2*sc.community
+		}
 		if combined <= 0 {
 			continue
 		}
@@ -1566,4 +1607,94 @@ func (s *Server) handleCheckContracts(_ context.Context, req mcp.CallToolRequest
 			"orphan_consumers": len(result.OrphanConsumers),
 		},
 	})
+}
+
+// ---------------------------------------------------------------------------
+// 12.1 handleRecordFeedback / handleQueryFeedback
+// ---------------------------------------------------------------------------
+
+func (s *Server) handleRecordFeedback(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	task := req.GetString("task", "")
+	if task == "" {
+		return mcp.NewToolResultError("task is required"), nil
+	}
+
+	useful := splitCSV(req.GetString("useful", ""))
+	notNeeded := splitCSV(req.GetString("not_needed", ""))
+	missing := splitCSV(req.GetString("missing", ""))
+
+	if len(useful) == 0 && len(notNeeded) == 0 && len(missing) == 0 {
+		return mcp.NewToolResultError("at least one of useful, not_needed, or missing must be provided"), nil
+	}
+
+	source := req.GetString("tool_source", "smart_context")
+
+	entry := persistence.FeedbackEntry{
+		Task:      task,
+		Useful:    useful,
+		NotNeeded: notNeeded,
+		Missing:   missing,
+		Source:    source,
+	}
+
+	if s.feedback == nil {
+		return mcp.NewToolResultError("feedback storage not initialized (no cache directory)"), nil
+	}
+
+	if err := s.feedback.Record(entry); err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("failed to record feedback: %v", err)), nil
+	}
+
+	return mcp.NewToolResultJSON(map[string]any{
+		"recorded":         true,
+		"useful_count":     len(useful),
+		"not_needed_count": len(notNeeded),
+		"missing_count":    len(missing),
+	})
+}
+
+func (s *Server) handleQueryFeedback(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	if s.feedback == nil || !s.feedback.HasData() {
+		return mcp.NewToolResultJSON(map[string]any{
+			"total_entries": 0,
+			"accuracy":      0,
+			"most_useful":   []any{},
+			"most_missed":   []any{},
+			"most_demoted":  []any{},
+		})
+	}
+
+	topN := 10
+	if n := req.GetInt("top_n", 0); n > 0 {
+		topN = n
+	}
+
+	toolSource := req.GetString("tool_source", "all")
+
+	stats := s.feedback.AggregatedStats(toolSource, topN)
+
+	if isCompact(req) {
+		var sb strings.Builder
+		fmt.Fprintf(&sb, "Feedback: %v entries, %.0f%% accuracy\n",
+			stats["total_entries"], stats["accuracy"].(float64)*100)
+		return mcp.NewToolResultText(sb.String()), nil
+	}
+
+	return mcp.NewToolResultJSON(stats)
+}
+
+// splitCSV splits a comma-separated string into trimmed, non-empty parts.
+func splitCSV(s string) []string {
+	if s == "" {
+		return nil
+	}
+	parts := strings.Split(s, ",")
+	var result []string
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			result = append(result, p)
+		}
+	}
+	return result
 }

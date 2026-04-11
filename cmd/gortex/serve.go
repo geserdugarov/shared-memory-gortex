@@ -221,6 +221,9 @@ func runServe(cmd *cobra.Command, args []string) error {
 		srv.SetSemanticManager(semMgr)
 	}
 
+	// Initialize feedback persistence for cross-session context learning.
+	srv.InitFeedback(serveCacheDir, serveIndex)
+
 	fmt.Fprintf(os.Stderr, "[gortex] MCP server ready (transport: %s)\n", serveTransport)
 
 	// Start bridge HTTP API if requested.

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -1061,6 +1062,52 @@ func (s *Server) handleSmartContext(_ context.Context, req mcp.CallToolRequest) 
 		return mcp.NewToolResultError(filterErr.Error()), nil
 	}
 	relevantSymbols = filterNodes(relevantSymbols, allowed)
+
+	// 3c. Feedback-aware reranking (when feedback data exists).
+	if s.feedback != nil && s.feedback.HasData() && len(relevantSymbols) > 0 {
+		type scored struct {
+			node  *graph.Node
+			score float64
+		}
+		scoredSyms := make([]scored, len(relevantSymbols))
+		for i, sym := range relevantSymbols {
+			baseScore := 1.0 / float64(i+1) // BM25 rank-based score
+			fbScore := s.feedback.GetSymbolScore(sym.ID)
+			scoredSyms[i] = scored{node: sym, score: baseScore + fbScore*0.3}
+		}
+		sort.Slice(scoredSyms, func(i, j int) bool {
+			return scoredSyms[i].score > scoredSyms[j].score
+		})
+		for i, ss := range scoredSyms {
+			relevantSymbols[i] = ss.node
+		}
+
+		// Inject frequently-missed symbols that match task keywords.
+		missed := s.feedback.MissedSymbols(3)
+		injected := 0
+		for _, missedID := range missed {
+			if injected >= 2 {
+				break
+			}
+			if seen[missedID] {
+				continue
+			}
+			missedNode := s.graph.GetNode(missedID)
+			if missedNode == nil {
+				continue
+			}
+			// Check if the missed symbol name matches any keyword.
+			nameLower := strings.ToLower(missedNode.Name)
+			for _, kw := range keywords {
+				if strings.Contains(nameLower, strings.ToLower(kw)) {
+					relevantSymbols = append(relevantSymbols, missedNode)
+					seen[missedID] = true
+					injected++
+					break
+				}
+			}
+		}
+	}
 
 	// 4. Limit to top N most relevant symbols.
 	if len(relevantSymbols) > maxSymbols {

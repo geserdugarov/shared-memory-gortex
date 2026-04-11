@@ -86,6 +86,7 @@ type Server struct {
 	guardRules       []config.GuardRule
 	contractRegistry *contracts.Registry
 	semanticMgr      *semantic.Manager
+	feedback         *feedbackManager
 }
 
 // sessionState tracks recent agent activity for context recovery after compaction.
@@ -241,6 +242,12 @@ func NewServer(engine *query.Engine, g *graph.Graph, idx *indexer.Indexer, watch
 	}
 
 	return s
+}
+
+// InitFeedback initializes the feedback manager for cross-session feedback persistence.
+// Call after NewServer with the cache directory and primary repo path.
+func (s *Server) InitFeedback(cacheDir, repoPath string) {
+	s.feedback = newFeedbackManager(cacheDir, repoPath)
 }
 
 // RunAnalysis performs community detection and process discovery on the current graph.

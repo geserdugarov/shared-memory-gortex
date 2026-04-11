@@ -1,12 +1,15 @@
 package mcp
 
 import (
+	"context"
+	"encoding/json"
 	"math"
 	"sync"
 	"time"
 
 	"go.uber.org/zap"
 
+	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 	"github.com/zzet/gortex/internal/analysis"
 	"github.com/zzet/gortex/internal/config"
@@ -248,6 +251,25 @@ func NewServer(engine *query.Engine, g *graph.Graph, idx *indexer.Indexer, watch
 // Call after NewServer with the cache directory and primary repo path.
 func (s *Server) InitFeedback(cacheDir, repoPath string) {
 	s.feedback = newFeedbackManager(cacheDir, repoPath)
+}
+
+// ExportContext generates a portable context briefing for the given task.
+// This is the public API for the CLI command, delegating to the MCP handler.
+func (s *Server) ExportContext(ctx context.Context, task, entryPoint, format string, maxSymbols, tokenBudget int) (*mcp.CallToolResult, error) {
+	args := map[string]any{
+		"task":         task,
+		"format":       format,
+		"max_symbols":  float64(maxSymbols),
+		"token_budget": float64(tokenBudget),
+	}
+	if entryPoint != "" {
+		args["entry_point"] = entryPoint
+	}
+	argsJSON, _ := json.Marshal(args)
+	req := mcp.CallToolRequest{}
+	req.Params.Name = "export_context"
+	_ = json.Unmarshal(argsJSON, &req.Params.Arguments)
+	return s.handleExportContext(ctx, req)
 }
 
 // RunAnalysis performs community detection and process discovery on the current graph.

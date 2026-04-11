@@ -238,6 +238,19 @@ func (s *Server) registerEnhancementTools() {
 		),
 		s.handleQueryFeedback,
 	)
+
+	// export_context
+	s.mcpServer.AddTool(
+		mcp.NewTool("export_context",
+			mcp.WithDescription("Generates a portable context briefing for a task as self-contained markdown or JSON. Use for sharing context outside MCP — paste into Slack, PRs, docs, or non-MCP AI tools."),
+			mcp.WithString("task", mcp.Required(), mcp.Description("Natural language task description")),
+			mcp.WithString("entry_point", mcp.Description("Optional symbol ID or file path to start from")),
+			mcp.WithNumber("max_symbols", mcp.Description("Max symbols to include (default: 5)")),
+			mcp.WithString("format", mcp.Description("Output format: markdown (default) or json")),
+			mcp.WithNumber("token_budget", mcp.Description("Approximate token budget for output (default: 2000, max: 8000)")),
+		),
+		s.handleExportContext,
+	)
 }
 
 // ---------------------------------------------------------------------------
@@ -1697,4 +1710,167 @@ func splitCSV(s string) []string {
 		}
 	}
 	return result
+}
+
+// ---------------------------------------------------------------------------
+// 12.2 handleExportContext
+// ---------------------------------------------------------------------------
+
+func (s *Server) handleExportContext(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	// Delegate to smart_context to get the raw data.
+	smartResult, err := s.handleSmartContext(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+	// If smart_context returned an error result, pass it through.
+	if smartResult.IsError {
+		return smartResult, nil
+	}
+
+	format := req.GetString("format", "markdown")
+	tokenBudget := req.GetInt("token_budget", 2000)
+	if tokenBudget <= 0 {
+		tokenBudget = 2000
+	}
+	if tokenBudget > 8000 {
+		tokenBudget = 8000
+	}
+
+	// Extract the JSON data from smart_context result.
+	var data map[string]any
+	for _, content := range smartResult.Content {
+		if textContent, ok := content.(mcp.TextContent); ok {
+			if jsonErr := json.Unmarshal([]byte(textContent.Text), &data); jsonErr != nil {
+				return mcp.NewToolResultError(fmt.Sprintf("failed to parse smart_context output: %v", jsonErr)), nil
+			}
+			break
+		}
+	}
+	if data == nil {
+		return mcp.NewToolResultError("no data from smart_context"), nil
+	}
+
+	if format == "json" {
+		return mcp.NewToolResultJSON(data)
+	}
+
+	// Render as markdown briefing.
+	md := renderContextMarkdown(data, tokenBudget)
+	return mcp.NewToolResultText(md), nil
+}
+
+// renderContextMarkdown converts smart_context JSON output into a self-contained
+// markdown briefing suitable for sharing outside MCP.
+func renderContextMarkdown(data map[string]any, tokenBudget int) string {
+	var sb strings.Builder
+	charBudget := tokenBudget * 4 // rough token-to-char ratio
+
+	// Header.
+	task, _ := data["task"].(string)
+	sb.WriteString("# Context Briefing\n\n")
+	fmt.Fprintf(&sb, "**Task:** %s\n\n", task)
+
+	// Keywords.
+	if kws, ok := data["keywords"].([]any); ok && len(kws) > 0 {
+		sb.WriteString("**Keywords:** ")
+		for i, kw := range kws {
+			if i > 0 {
+				sb.WriteString(", ")
+			}
+			fmt.Fprintf(&sb, "`%v`", kw)
+		}
+		sb.WriteString("\n\n")
+	}
+
+	// Key symbols.
+	if symbols, ok := data["relevant_symbols"].([]any); ok && len(symbols) > 0 {
+		sb.WriteString("## Key Symbols\n\n")
+		for _, sym := range symbols {
+			symMap, ok := sym.(map[string]any)
+			if !ok {
+				continue
+			}
+			name, _ := symMap["name"].(string)
+			kind, _ := symMap["kind"].(string)
+			id, _ := symMap["id"].(string)
+			filePath, _ := symMap["file_path"].(string)
+			startLine, _ := symMap["start_line"].(float64)
+
+			fmt.Fprintf(&sb, "### `%s` (%s)\n\n", name, kind)
+			fmt.Fprintf(&sb, "- **ID:** `%s`\n", id)
+			fmt.Fprintf(&sb, "- **File:** `%s:%d`\n", filePath, int(startLine))
+
+			if sig, ok := symMap["signature"].(string); ok && sig != "" {
+				fmt.Fprintf(&sb, "- **Signature:** `%s`\n", sig)
+			}
+
+			// Include source if within budget.
+			if source, ok := symMap["source"].(string); ok && source != "" {
+				if sb.Len()+len(source) < charBudget {
+					sb.WriteString("\n```go\n")
+					sb.WriteString(source)
+					sb.WriteString("\n```\n")
+				} else {
+					sb.WriteString("- *(source omitted — token budget exceeded)*\n")
+				}
+			}
+			sb.WriteString("\n")
+		}
+	}
+
+	// Callers and callees.
+	if callers, ok := data["callers"].([]any); ok && len(callers) > 0 {
+		sb.WriteString("## Callers\n\n")
+		for _, c := range callers {
+			fmt.Fprintf(&sb, "- `%v`\n", c)
+		}
+		sb.WriteString("\n")
+	}
+
+	if callees, ok := data["callees"].([]any); ok && len(callees) > 0 {
+		sb.WriteString("## Callees\n\n")
+		for _, c := range callees {
+			fmt.Fprintf(&sb, "- `%v`\n", c)
+		}
+		sb.WriteString("\n")
+	}
+
+	// Cross-repo dependencies.
+	if crossDeps, ok := data["cross_repo_dependencies"].([]any); ok && len(crossDeps) > 0 {
+		sb.WriteString("## Cross-Repo Dependencies\n\n")
+		for _, dep := range crossDeps {
+			depMap, ok := dep.(map[string]any)
+			if !ok {
+				continue
+			}
+			name, _ := depMap["name"].(string)
+			repo, _ := depMap["repo_prefix"].(string)
+			edgeKind, _ := depMap["edge_kind"].(string)
+			fmt.Fprintf(&sb, "- `%s` (repo: %s, %s)\n", name, repo, edgeKind)
+		}
+		sb.WriteString("\n")
+	}
+
+	// Test files.
+	if tests, ok := data["related_test_files"].([]any); ok && len(tests) > 0 {
+		sb.WriteString("## Related Tests\n\n")
+		for _, t := range tests {
+			fmt.Fprintf(&sb, "- `%v`\n", t)
+		}
+		sb.WriteString("\n")
+	}
+
+	// Files to edit.
+	if files, ok := data["files_to_edit"].([]any); ok && len(files) > 0 {
+		sb.WriteString("## Files to Edit\n\n")
+		for _, f := range files {
+			fmt.Fprintf(&sb, "- `%v`\n", f)
+		}
+		sb.WriteString("\n")
+	}
+
+	// Footer.
+	sb.WriteString("---\n*Generated by `gortex export_context`*\n")
+
+	return sb.String()
 }

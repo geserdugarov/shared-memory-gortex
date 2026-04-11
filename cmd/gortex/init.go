@@ -81,17 +81,22 @@ func runInit(_ *cobra.Command, args []string) error {
 		fmt.Fprintf(os.Stderr, "[gortex init] warning: could not install global skills: %v\n", err)
 	}
 
-	// 5. Install PreToolUse hook in .claude/settings.local.json
+	// 5. Install MCP tool permissions in .claude/settings.json (shared, committed)
+	if err := installPermissions(filepath.Join(root, ".claude", "settings.json")); err != nil {
+		fmt.Fprintf(os.Stderr, "[gortex init] warning: could not install permissions: %v\n", err)
+	}
+
+	// 6. Install PreToolUse hook in .claude/settings.local.json (local, not committed)
 	if err := installHook(filepath.Join(root, ".claude", "settings.local.json")); err != nil {
 		fmt.Fprintf(os.Stderr, "[gortex init] warning: could not install hook: %v\n", err)
 	}
 
-	// 6. Set up Kiro IDE integration
+	// 7. Set up Kiro IDE integration
 	if err := setupKiro(root); err != nil {
 		fmt.Fprintf(os.Stderr, "[gortex init] warning: Kiro setup failed: %v\n", err)
 	}
 
-	// 7. Create/update GlobalConfig for multi-repo mode.
+	// 8. Create/update GlobalConfig for multi-repo mode.
 	if err := ensureGlobalConfig(root); err != nil {
 		fmt.Fprintf(os.Stderr, "[gortex init] warning: could not update global config: %v\n", err)
 	}
@@ -99,8 +104,9 @@ func runInit(_ *cobra.Command, args []string) error {
 	fmt.Fprintf(os.Stderr, "[gortex init] done — created:\n")
 	fmt.Fprintf(os.Stderr, "  .mcp.json                       (MCP server config — shared)\n")
 	fmt.Fprintf(os.Stderr, "  .claude/commands/gortex-*.md     (Claude Code slash commands)\n")
+	fmt.Fprintf(os.Stderr, "  .claude/settings.json            (Claude Code MCP permissions — shared)\n")
+	fmt.Fprintf(os.Stderr, "  .claude/settings.local.json      (Claude Code PreToolUse hook — local)\n")
 	fmt.Fprintf(os.Stderr, "  CLAUDE.md                        (Claude Code instructions)\n")
-	fmt.Fprintf(os.Stderr, "  .claude/settings.local.json      (Claude Code PreToolUse hook)\n")
 	fmt.Fprintf(os.Stderr, "  ~/.claude/skills/gortex-*        (Claude Code global skills)\n")
 	fmt.Fprintf(os.Stderr, "  .kiro/settings/mcp.json          (Kiro MCP server config)\n")
 	fmt.Fprintf(os.Stderr, "  .kiro/steering/gortex-*.md       (Kiro steering files)\n")
@@ -246,6 +252,51 @@ description: "Use when the user wants to rename, extract, split, move, or restru
 ` + commandRefactor,
 }
 
+func installPermissions(settingsPath string) error {
+	// Read existing settings or start fresh.
+	var settings map[string]any
+	if data, err := os.ReadFile(settingsPath); err == nil {
+		if err := json.Unmarshal(data, &settings); err != nil {
+			settings = make(map[string]any)
+		}
+	} else {
+		settings = make(map[string]any)
+	}
+
+	// Check if Gortex permission already exists.
+	if perms, ok := settings["permissions"].(map[string]any); ok {
+		if allow, ok := perms["allow"].([]any); ok {
+			for _, entry := range allow {
+				if s, ok := entry.(string); ok && contains(s, "mcp__gortex__") {
+					fmt.Fprintf(os.Stderr, "[gortex init] skip %s (Gortex permissions already present)\n", settingsPath)
+					return nil
+				}
+			}
+		}
+	}
+
+	// Ensure permissions.allow exists and append the wildcard rule.
+	if _, ok := settings["permissions"]; !ok {
+		settings["permissions"] = make(map[string]any)
+	}
+	perms := settings["permissions"].(map[string]any)
+	if _, ok := perms["allow"]; !ok {
+		perms["allow"] = []any{}
+	}
+	allow := perms["allow"].([]any)
+	perms["allow"] = append(allow, "mcp__gortex__*")
+
+	data, err := json.MarshalIndent(settings, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(settingsPath, data, 0o644); err != nil {
+		return err
+	}
+	fmt.Fprintf(os.Stderr, "[gortex init] installed MCP permissions in %s\n", settingsPath)
+	return nil
+}
+
 func installHook(settingsPath string) error {
 	// Read existing settings or start fresh.
 	var settings map[string]any
@@ -383,9 +434,18 @@ Gortex is running as an MCP server. You MUST use graph queries instead of file r
 |---------------------------------------|------------------------------------------|
 | Reading files to learn a pattern      | ` + "`suggest_pattern`" + `                        |
 | Manually scaffolding from a pattern   | ` + "`scaffold`" + ` — generates code, wiring, and test stubs from an example |
+| Read→Edit roundtrip for one symbol    | ` + "`edit_symbol`" + ` — edit source by ID, no Read needed |
+| Manual find-and-replace for renames   | ` + "`rename_symbol`" + ` — coordinated rename across all references |
 | Sequencing multi-file edits yourself  | ` + "`batch_edit`" + ` — applies edits in dependency order, re-indexes between steps |
 | Reading a diff without graph context  | ` + "`diff_context`" + ` — enriches git diff with callers, callees, community, risk |
 | Guessing what context you need next   | ` + "`prefetch_context`" + ` — predicts needed symbols from task + recent activity |
+
+### API Contracts
+
+| Instead of...                         | You MUST use...                          |
+|---------------------------------------|------------------------------------------|
+| Manually tracking API routes/services | ` + "`get_contracts`" + ` — lists HTTP, gRPC, GraphQL, topic, WebSocket, env, OpenAPI |
+| Guessing if APIs match across repos   | ` + "`check_contracts`" + ` — detects orphan providers/consumers and mismatches |
 
 ### Multi-Repo Management
 
@@ -476,6 +536,8 @@ Quick reference for all Gortex MCP tools and the knowledge graph schema.
 | batch_symbols | Multiple symbols with source/callers/callees in one call |
 | find_import_path | Correct import path for a symbol in a target file |
 | explain_change_impact | Risk-tiered blast radius with affected processes/communities |
+| edit_symbol | Edit symbol source by ID — no Read needed, resolves file + lines |
+| rename_symbol | Coordinated rename: generates edits for definition + all references |
 | get_recent_changes | Files/symbols changed since timestamp (watch mode) |
 
 ### Agent-Optimized (token efficiency)
@@ -519,10 +581,25 @@ Quick reference for all Gortex MCP tools and the knowledge graph schema.
 | diff_context | Git diff enriched with callers, callees, community, processes, per-file risk |
 | prefetch_context | Predicts needed symbols from task description + recent activity |
 
+### API Contracts
+| Tool | What it gives you |
+|------|-------------------|
+| get_contracts | Lists detected API contracts: HTTP routes, gRPC, GraphQL, topics, WebSocket, env vars, OpenAPI |
+| check_contracts | Matches providers to consumers, reports orphans and mismatches across repos |
+
+### Multi-Repo
+| Tool | What it gives you |
+|------|-------------------|
+| index_repository | Index a repository path into the graph |
+| track_repository | Add a repo to the workspace, index immediately, persist to config |
+| untrack_repository | Remove a repo, evict its nodes/edges, persist to config |
+| get_active_project | Current project name and member repository list |
+| set_active_project | Switch project scope — re-scopes all subsequent queries |
+
 ## Graph Schema
 
-**Node kinds:** file, function, method, type, interface, variable, import, package
-**Edge kinds:** calls, imports, defines, implements, extends, references, member_of, instantiates
+**Node kinds:** file, function, method, type, interface, variable, import, package, contract
+**Edge kinds:** calls, imports, defines, implements, extends, references, member_of, instantiates, provides, consumes
 `
 
 const commandExplore = `# Exploring Codebases with Gortex
@@ -619,9 +696,8 @@ const commandRefactor = `# Refactoring with Gortex
 
 - search_symbols to find the symbol ID
 - explain_change_impact to assess blast radius
-- find_usages to get every reference location
-- get_editing_context on each affected file
-- Edit in dependency order: definition -> callers -> tests
+- rename_symbol({id: "<id>", new_name: "<name>"}) — generates all edits (definition + references)
+- Review the generated edits, then apply with the Edit tool
 - detect_changes to verify only expected files changed
 
 ## Extract Module

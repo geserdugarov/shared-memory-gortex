@@ -62,9 +62,18 @@ Gortex is running as an MCP server. You MUST use graph queries instead of file r
 |---------------------------------------|------------------------------------------|
 | Reading files to learn a pattern      | `suggest_pattern`                        |
 | Manually scaffolding from a pattern   | `scaffold` — generates code, wiring, and test stubs from an example |
+| Read→Edit roundtrip for one symbol    | `edit_symbol` — edit source by ID, no Read needed |
+| Manual find-and-replace for renames   | `rename_symbol` — coordinated rename across all references |
 | Sequencing multi-file edits yourself  | `batch_edit` — applies edits in dependency order, re-indexes between steps |
 | Reading a diff without graph context  | `diff_context` — enriches git diff with callers, callees, community, risk |
 | Guessing what context you need next   | `prefetch_context` — predicts needed symbols from task + recent activity |
+
+### API Contracts
+
+| Instead of...                         | You MUST use...                          |
+|---------------------------------------|------------------------------------------|
+| Manually tracking API routes/services | `get_contracts` — lists HTTP, gRPC, GraphQL, topic, WebSocket, env, OpenAPI |
+| Guessing if APIs match across repos   | `check_contracts` — detects orphan providers/consumers and mismatches |
 
 ### Multi-Repo Management
 

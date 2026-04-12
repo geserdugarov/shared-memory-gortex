@@ -14,16 +14,28 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
+          # goreleaser reads the tag list to build the changelog. Without
+          # full history the changelog section will be empty or wrong.
           fetch-depth: 0
 
-      - uses: actions/setup-go@v6
-        with:
-          go-version: '1.25'
-
-      - name: Run GoReleaser
-        uses: goreleaser/goreleaser-action@v7
-        with:
-          version: latest
-          args: release --clean
+      - name: Run GoReleaser (cross-compile via Docker)
+        # goreleaser-cross ships osxcross + aarch64/x86_64 gcc toolchains
+        # so all 4 targets (linux/amd64, linux/arm64, darwin/amd64,
+        # darwin/arm64) cross-compile from one ubuntu runner — no matrix,
+        # no macOS minutes burned.
+        #
+        # Image tag is pinned to the Go major.minor; bump together with
+        # go.mod and the setup-go step elsewhere in the workflows.
+        run: |
+          docker run --rm --privileged \
+            -v "$PWD":/go/src/gortex \
+            -w /go/src/gortex \
+            -e GITHUB_TOKEN \
+            -e HOMEBREW_TAP_TOKEN \
+            ghcr.io/goreleaser/goreleaser-cross:v1.25 \
+            release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Personal access token with `repo` scope on zzet/homebrew-tap.
+          # GITHUB_TOKEN can only push to the source repo, not the tap.
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}

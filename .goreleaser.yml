@@ -1,12 +1,18 @@
 version: 2
 
+# Run inside ghcr.io/goreleaser/goreleaser-cross — the Docker image ships
+# cross-compile toolchains for all four targets below so CGO (tree-sitter)
+# links cleanly on a single Linux runner. See .github/workflows/release.yml.
 before:
   hooks:
     - go mod tidy
-    - go test ./...
+    # Tests run in CI on every push. Re-running ./... inside
+    # goreleaser-cross slows the tag-to-artifact loop without catching
+    # anything new — the tag is already on a green commit.
 
 builds:
-  - main: ./cmd/gortex/
+  - id: main
+    main: ./cmd/gortex/
     binary: gortex
     ldflags:
       - -s -w -X main.version={{.Version}}
@@ -18,12 +24,29 @@ builds:
     goarch:
       - amd64
       - arm64
-    ignore:
+    # Per-target CC. goreleaser-cross exposes these cross-toolchains on
+    # PATH; CGO needs an explicit CC per target triple to pick the right
+    # linker. Overrides is cleaner than embedding an if/else in env.
+    overrides:
+      - goos: darwin
+        goarch: amd64
+        env:
+          - CC=o64-clang
+      - goos: darwin
+        goarch: arm64
+        env:
+          - CC=oa64-clang
+      - goos: linux
+        goarch: amd64
+        env:
+          - CC=x86_64-linux-gnu-gcc
       - goos: linux
         goarch: arm64
+        env:
+          - CC=aarch64-linux-gnu-gcc
 
 archives:
-  - format: tar.gz
+  - formats: [tar.gz]
     name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
 
 checksum:
@@ -36,3 +59,33 @@ changelog:
       - '^docs:'
       - '^test:'
       - '^ci:'
+
+nfpms:
+  - id: gortex
+    file_name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    ids:
+      - main
+    formats:
+      - deb
+      - rpm
+      - apk
+    vendor: "zzet"
+    homepage: "https://github.com/zzet/gortex"
+    maintainer: "zzet"
+    description: "Code intelligence engine that indexes repositories into an in-memory knowledge graph."
+    license: "Custom"
+
+brews:
+  - name: gortex
+    # GITHUB_TOKEN can only push to the source repo. Pushing the updated
+    # formula to zzet/homebrew-tap needs a PAT with `repo` scope stored as
+    # HOMEBREW_TAP_TOKEN in repo secrets. Workflow wires it into the env.
+    repository:
+      owner: zzet
+      name: homebrew-tap
+      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
+    homepage: "https://github.com/zzet/gortex"
+    description: "Code intelligence engine that indexes repositories into an in-memory knowledge graph."
+    license: "Custom (PolyForm Small Business base)"
+    test: |
+      system "#{bin}/gortex", "version"

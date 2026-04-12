@@ -189,3 +189,21 @@ func captureStdout(t *testing.T, fn func()) string {
 	<-done
 	return buf.String()
 }
+
+// withStdin runs fn with os.Stdin swapped to a pipe fed with data.
+func withStdin(t *testing.T, data []byte, fn func()) {
+	t.Helper()
+	old := os.Stdin
+	defer func() { os.Stdin = old }()
+
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() {
+		_, _ = w.Write(data)
+		_ = w.Close()
+	}()
+	os.Stdin = r
+	fn()
+}

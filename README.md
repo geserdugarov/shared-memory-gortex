@@ -31,7 +31,7 @@ Built for AI coding agents (Claude Code, Kiro, Cursor, Windsurf, Copilot, Contin
 - **Watch mode** — surgical graph updates on file change across all tracked repos, live sync with agents
 - **Web UI** — Sigma.js force-directed visualization with node size proportional to importance
 - **IMPLEMENTS inference** — structural interface satisfaction for Go, TypeScript, Java, Rust, C#, Scala, Swift, Protobuf
-- **PreToolUse + PreCompact hooks** — PreToolUse enriches Read/Grep/Glob with graph context and redirects to Gortex MCP tools. PreCompact injects a condensed orientation snapshot (index stats, recently-modified symbols, top hotspots, feedback-ranked symbols) before Claude Code compacts the conversation, so the agent survives compaction without re-exploring. Silent fallback when bridge is unreachable
+- **PreToolUse + PreCompact + Stop hooks** — PreToolUse enriches Read/Grep/Glob with graph context and redirects to Gortex MCP tools. PreCompact injects a condensed orientation snapshot (index stats, recently-modified symbols, top hotspots, feedback-ranked symbols) before Claude Code compacts the conversation. Stop runs post-task diagnostics (`detect_changes` → `get_test_targets`, `check_guards`, `analyze dead_code`, `contracts check` on modified symbols) so the agent self-corrects before handoff. All three degrade silently when the bridge is unreachable
 - **Benchmarked** — per-language parsing, query engine, indexer benchmarks
 - **Per-community skills** — `gortex skills` auto-generates SKILL.md per detected community with key files, entry points, cross-community connections, and MCP tool invocations for Claude Code auto-discovery
 - **Eval framework** — SWE-bench harness for A/B benchmarking tool effectiveness with Docker-based environments and multi-model support
@@ -49,7 +49,7 @@ gortex init /path/to/repo
 # Or with codebase analysis for a richer CLAUDE.md
 gortex init --analyze /path/to/repo
 
-# Install/update only the hooks — PreToolUse (Read/Grep/Glob interception) + PreCompact (orientation snapshot)
+# Install/update only the hooks — PreToolUse (Read/Grep/Glob), PreCompact (orientation snapshot), Stop (post-task diagnostics)
 gortex init --hooks /path/to/repo
 
 # Index a repo and print stats
@@ -143,6 +143,7 @@ After running `gortex init`, Claude Code automatically starts Gortex via `.mcp.j
 - **Global skills:** installed to `~/.claude/skills/` — available across all repos
 - **PreToolUse hook:** automatic graph context + graph-tool suggestions on Read/Grep/Glob
 - **PreCompact hook:** condensed orientation snapshot injected before context compaction so the agent resumes without re-exploring
+- **Stop hook:** post-task diagnostics — tests to run, guard violations, dead code, and contract issues on the changed symbols — injected as context before the agent hands off
 - **CLAUDE.md instructions:** mandatory tool usage table and session workflow
 
 ## Usage with Kiro

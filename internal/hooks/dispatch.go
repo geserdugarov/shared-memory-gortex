@@ -30,5 +30,7 @@ func Run(port int) {
 		runPreToolUse(data, port)
 	case "PreCompact":
 		runPreCompact(data, port)
+	case "Stop":
+		runPostTask(data, port)
 	}
 }

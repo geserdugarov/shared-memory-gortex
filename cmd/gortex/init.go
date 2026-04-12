@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -431,6 +432,20 @@ func installHook(settingsPath string) error {
 		},
 	}
 
+	// Build the Stop entry (post-task diagnostics on changed symbols).
+	// Fires after the agent finishes responding; self-guards against recursion
+	// via the stop_hook_active flag inside the handler.
+	stopEntry := map[string]any{
+		"hooks": []any{
+			map[string]any{
+				"type":          "command",
+				"command":       hookCommand,
+				"timeout":       5000,
+				"statusMessage": "Running Gortex post-task diagnostics...",
+			},
+		},
+	}
+
 	// Ensure hooks.PreToolUse exists and append.
 	if _, ok := settings["hooks"]; !ok {
 		settings["hooks"] = make(map[string]any)
@@ -442,29 +457,24 @@ func installHook(settingsPath string) error {
 	pre := hooks["PreToolUse"].([]any)
 	hooks["PreToolUse"] = append(pre, preToolUseEntry)
 
-	// Register PreCompact only if not already present — avoid duplicates on rerun.
-	preCompactAlreadyInstalled := false
-	if existing, ok := hooks["PreCompact"].([]any); ok {
-		for _, h := range existing {
-			if hm, ok := h.(map[string]any); ok {
-				if hs, ok := hm["hooks"].([]any); ok {
-					for _, entry := range hs {
-						if em, ok := entry.(map[string]any); ok {
-							if cmd, ok := em["command"].(string); ok && contains(cmd, "gortex hook") {
-								preCompactAlreadyInstalled = true
-							}
-						}
-					}
-				}
-			}
-		}
-	}
+	// Register PreCompact and Stop only if not already present — avoid
+	// duplicates on rerun. Both dedupe by looking for "gortex hook" in the command.
+	preCompactAlreadyInstalled := hasGortexHookEntry(hooks, "PreCompact")
 	if !preCompactAlreadyInstalled {
 		if _, ok := hooks["PreCompact"]; !ok {
 			hooks["PreCompact"] = []any{}
 		}
 		compact := hooks["PreCompact"].([]any)
 		hooks["PreCompact"] = append(compact, preCompactEntry)
+	}
+
+	stopAlreadyInstalled := hasGortexHookEntry(hooks, "Stop")
+	if !stopAlreadyInstalled {
+		if _, ok := hooks["Stop"]; !ok {
+			hooks["Stop"] = []any{}
+		}
+		stop := hooks["Stop"].([]any)
+		hooks["Stop"] = append(stop, stopEntry)
 	}
 
 	data, err := json.MarshalIndent(settings, "", "  ")
@@ -474,12 +484,48 @@ func installHook(settingsPath string) error {
 	if err := os.WriteFile(settingsPath, data, 0o644); err != nil {
 		return err
 	}
-	if preCompactAlreadyInstalled {
-		fmt.Fprintf(os.Stderr, "[gortex init] installed PreToolUse hook in %s (PreCompact already present)\n", settingsPath)
-	} else {
-		fmt.Fprintf(os.Stderr, "[gortex init] installed PreToolUse + PreCompact hooks in %s\n", settingsPath)
+
+	// Build a human-readable summary of which hooks were newly installed.
+	var installed []string
+	installed = append(installed, "PreToolUse")
+	if !preCompactAlreadyInstalled {
+		installed = append(installed, "PreCompact")
 	}
+	if !stopAlreadyInstalled {
+		installed = append(installed, "Stop")
+	}
+	fmt.Fprintf(os.Stderr, "[gortex init] installed %s hooks in %s\n",
+		strings.Join(installed, " + "), settingsPath)
 	return nil
+}
+
+// hasGortexHookEntry returns true when the given event (PreCompact, Stop, etc.)
+// already has a hook entry that invokes `gortex hook`.
+func hasGortexHookEntry(hooks map[string]any, event string) bool {
+	existing, ok := hooks[event].([]any)
+	if !ok {
+		return false
+	}
+	for _, h := range existing {
+		hm, ok := h.(map[string]any)
+		if !ok {
+			continue
+		}
+		hs, ok := hm["hooks"].([]any)
+		if !ok {
+			continue
+		}
+		for _, entry := range hs {
+			em, ok := entry.(map[string]any)
+			if !ok {
+				continue
+			}
+			if cmd, ok := em["command"].(string); ok && contains(cmd, "gortex hook") {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 const mcpJSON = `{

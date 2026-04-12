@@ -132,6 +132,16 @@ func (s *Server) registerCodingTools() {
 	)
 
 	s.mcpServer.AddTool(
+		mcp.NewTool("get_untested_symbols",
+			mcp.WithDescription("Returns functions and methods in non-test files that no test file reaches via the call graph — the inverse of get_test_targets. Ranked by fan_in descending so the most-used untested symbols surface first. Use to prioritize where to add test coverage."),
+			mcp.WithNumber("limit", mcp.Description("Max entries returned (default: 50)")),
+			mcp.WithString("file_prefix", mcp.Description("Restrict to symbols whose file path starts with this prefix (e.g. 'internal/auth/')")),
+			mcp.WithNumber("min_fan_in", mcp.Description("Only flag symbols with at least this many callers; filters trivial helpers (default: 0)")),
+		),
+		s.handleGetUntestedSymbols,
+	)
+
+	s.mcpServer.AddTool(
 		mcp.NewTool("get_recent_changes",
 			mcp.WithDescription("Returns files and symbols that changed since the last call (watch mode only). Use to re-orient after the user edits files outside of Claude Code's view, without re-reading anything."),
 			mcp.WithString("since", mcp.Description("ISO 8601 timestamp (omit for all changes since index)")),

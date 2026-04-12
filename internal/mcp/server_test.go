@@ -92,6 +92,7 @@ func findAndCallHandler(srv *Server, name string, ctx context.Context, req mcpli
 		"smart_context":         srv.handleSmartContext,
 		"plan_turn":             srv.handlePlanTurn,
 		"get_repo_outline":      srv.handleGetRepoOutline,
+		"get_untested_symbols":  srv.handleGetUntestedSymbols,
 	}
 	h, ok := handlers[name]
 	if !ok {

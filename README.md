@@ -14,13 +14,13 @@ Built for AI coding agents (Claude Code, Kiro, Cursor, Windsurf, Copilot, Contin
 - **Knowledge graph** — every file, symbol, import, call chain, and type relationship in one queryable structure
 - **Multi-repo workspaces** — index multiple repositories into a single graph with cross-repo symbol resolution, project grouping, reference tags, and per-repo scoping
 - **33 languages** — Go, TypeScript, JavaScript, Python, Rust, Java, C#, Kotlin, Swift, Scala, PHP, Ruby, Elixir, C, C++, Dart, OCaml, Lua, Zig, Haskell, Clojure, Erlang, R, Bash/Zsh, SQL, Protobuf, Markdown, HTML, CSS, YAML, TOML, HCL/Terraform, Dockerfile
-- **51 MCP tools** — symbol lookup, call chains, blast radius, community detection, process discovery, contract detection, cycle detection, dead code analysis, scaffolding, inline editing, symbol renaming, multi-repo management, agent feedback loop, context export, and 18 agent-optimized tools
+- **43 MCP tools** — symbol lookup, call chains, blast radius, community/process discovery, contract detection, unified `analyze` (dead code, hotspots, cycles), scaffolding, inline editing, symbol renaming, multi-repo management, agent feedback loop, context export, and 18 agent-optimized tools
 - **Semantic search** — hybrid BM25 + vector search with RRF fusion. Built-in GloVe word vectors for offline use, or connect to Ollama/OpenAI for transformer-quality embeddings. Build tags for ONNX, GoMLX, and Hugot offline transformer backends
 - **Type-aware resolution** — infers receiver types from variable declarations, composite literals, and Go constructor conventions to disambiguate same-named methods across types
 - **On-disk persistence** — snapshots the graph on shutdown, restores on startup with incremental re-indexing of only changed files (~200ms vs 3-5s full re-index)
 - **Bridge Mode** — HTTP/JSON API exposing all MCP tools for IDE plugins, CI tools, and web UIs with CORS support and tool discovery endpoint
 - **Semantic enrichment** — pluggable SCIP, go/types, and LSP providers upgrade edge confidence from ~70-85% (tree-sitter) to 95-100% (compiler-verified). Additive — graceful degradation when external tools unavailable
-- **Agent feedback loop** — `record_feedback` + `query_feedback` tools let agents report which symbols were useful/missing. Cross-session persistence improves future `smart_context` quality via feedback-aware reranking
+- **Agent feedback loop** — unified `feedback` tool (`action: "record"` / `"query"`) lets agents report which symbols were useful/missing. Cross-session persistence improves future `smart_context` quality via feedback-aware reranking
 - **Context export** — `export_context` tool + `gortex context` CLI render graph context as portable markdown/JSON briefings for sharing outside MCP (Slack, PRs, docs, non-MCP AI tools)
 - **ETag conditional fetch** — content-hash based `if_none_match` on source-reading tools avoids re-transmitting unchanged symbols during iterative editing
 - **Token savings tracking** — per-call `tokens_saved` field on source-reading tools + session-level metrics in `graph_stats` (calls counted, tokens returned, tokens saved, efficiency ratio)
@@ -258,7 +258,6 @@ All query commands support `--format text|json|dot` (DOT output for Graphviz vis
 ### Coding Workflow
 | Tool | Description |
 |------|-------------|
-| `get_symbol_signature` | Just the signature, no body |
 | `get_symbol_source` | Source code of a single symbol (80% fewer tokens than Read). Returns `tokens_saved` per call |
 | `batch_symbols` | Multiple symbols with source/callers/callees in one call |
 | `find_import_path` | Correct import path for a symbol |
@@ -275,34 +274,27 @@ All query commands support `--format text|json|dot` (DOT output for Graphviz vis
 | `get_test_targets` | Maps changed symbols to test files and run commands |
 | `suggest_pattern` | Extracts code pattern from an example — source, registration, tests |
 | `export_context` | Portable markdown/JSON context briefing for sharing outside MCP |
-| `record_feedback` | Report which symbols were useful/missing — improves future context quality |
-| `query_feedback` | Aggregated feedback stats: most useful, most missed, accuracy metrics |
+| `feedback` | `action: "record"`: report useful/missing symbols. `action: "query"`: aggregated stats — most useful, most missed, accuracy metrics |
 
 ### Analysis
 | Tool | Description |
 |------|-------------|
-| `get_communities` | Functional clusters (Louvain community detection) |
-| `get_community` | Members and cohesion for one community |
-| `get_processes` | Discovered execution flows |
-| `get_process` | Step-by-step trace of an execution flow |
+| `get_communities` | Functional clusters (Louvain). Without `id`: list all. With `id`: members and cohesion for one community |
+| `get_processes` | Discovered execution flows. Without `id`: list all. With `id`: step-by-step trace |
 | `detect_changes` | Git diff mapped to affected symbols |
 | `index_repository` | Index or re-index a repository path |
-| `get_contracts` | List detected API contracts (HTTP, gRPC, GraphQL, topics, WebSocket, env, OpenAPI) |
-| `check_contracts` | Detect contract mismatches: orphan providers and orphan consumers |
+| `contracts` | API contracts. `action: "list"` (default): detected HTTP/gRPC/GraphQL/topics/WebSocket/env/OpenAPI. `action: "check"`: orphan providers/consumers |
 
 ### Proactive Safety
 | Tool | Description |
 |------|-------------|
 | `verify_change` | Check proposed signature changes against all callers and interface implementors |
 | `check_guards` | Evaluate project guard rules (`.gortex.yaml`) against changed symbols |
-| `would_create_cycle` | Check if adding a dependency would create a circular dependency |
 
 ### Code Quality
 | Tool | Description |
 |------|-------------|
-| `find_dead_code` | Symbols with zero incoming edges (excludes entry points, tests, exports) |
-| `find_hotspots` | Symbols ranked by fan-in, fan-out, and community boundary crossings |
-| `find_cycles` | Circular dependency detection via Tarjan's SCC, classified by severity |
+| `analyze` | Unified graph analysis. `kind: "dead_code"`: symbols with zero incoming edges. `kind: "hotspots"`: high fan-in/out symbols. `kind: "cycles"`: Tarjan's SCC cycle detection. `kind: "would_create_cycle"`: check if a new dependency would form a cycle |
 | `index_health` | Health score, parse failures, stale files, language coverage |
 | `get_symbol_history` | Symbols modified this session with counts; flags churning (3+ edits) |
 
@@ -401,8 +393,8 @@ Gortex detects API contracts across repos and matches providers to consumers:
 gortex bridge --index . --web
 
 # Via MCP tools
-get_contracts                    # list all detected contracts
-check_contracts                  # find mismatches and orphans
+contracts                        # list all detected contracts (default action)
+contracts {action: "check"}      # find mismatches and orphans
 ```
 
 | Contract Type | Detection | Provider | Consumer |
@@ -434,7 +426,7 @@ Each generated skill includes:
 - **Key files table** — files and their symbols
 - **Entry points** — main functions, handlers, controllers detected via process analysis
 - **Cross-community connections** — which other areas this community interacts with
-- **MCP tool invocations** — pre-written `get_community`, `smart_context`, `find_usages` calls
+- **MCP tool invocations** — pre-written `get_communities`, `smart_context`, `find_usages` calls
 
 Skills are written to `.claude/skills/generated/` and a routing table is inserted into CLAUDE.md between `<!-- gortex:skills:start/end -->` markers.
 

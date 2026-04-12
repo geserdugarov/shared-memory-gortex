@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"strings"
 
 	"github.com/mark3labs/mcp-go/mcp"
@@ -464,6 +465,31 @@ func (s *Server) handleIndexRepository(ctx context.Context, req mcp.CallToolRequ
 	if err != nil {
 		return mcp.NewToolResultError("path is required"), nil
 	}
+
+	// In multi-repo mode, route through multiIndexer so nodes get the correct
+	// RepoPrefix and byRepo stays consistent. Using the shared singleton
+	// indexer here produces unprefixed nodes that corrupt per-repo stats.
+	if s.multiIndexer != nil {
+		// Accept either a tracked prefix directly or a filesystem path.
+		prefix := s.resolveRepoPrefix(path)
+		if prefix == "" {
+			if abs, absErr := filepath.Abs(path); absErr == nil {
+				prefix = s.resolveRepoPrefix(abs)
+			}
+		}
+		if prefix == "" {
+			return mcp.NewToolResultError(fmt.Sprintf(
+				"path %q is not a tracked repository; use track_repository to add it",
+				path)), nil
+		}
+		result, err := s.multiIndexer.IndexRepo(prefix)
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		s.RunAnalysis()
+		return mcp.NewToolResultJSON(result)
+	}
+
 	result, err := s.indexer.IndexCtx(s.progressCtx(ctx, req), path)
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil

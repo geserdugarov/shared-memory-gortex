@@ -84,6 +84,12 @@ Gortex is running as an MCP server. You MUST use graph queries instead of file r
 | Manually tracking API routes/services | `contracts` (default `action: "list"`) — lists HTTP, gRPC, GraphQL, topic, WebSocket, env, OpenAPI |
 | Guessing if APIs match across repos   | `contracts` with `action: "check"` — detects orphan providers/consumers and mismatches |
 
+### Config Hygiene
+
+| Instead of...                         | You MUST use...                          |
+|---------------------------------------|------------------------------------------|
+| Eyeballing CLAUDE.md for stale refs   | `audit_agent_config` — graph-validates backticked symbols in CLAUDE.md / AGENTS.md / `.cursor/rules` / Copilot / Windsurf / Antigravity configs; flags stale refs, dead paths, and bloat |
+
 ### Multi-Repo Management
 
 | Instead of...                         | You MUST use...                          |

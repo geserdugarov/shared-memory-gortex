@@ -4,10 +4,14 @@ import (
 	"github.com/zzet/gortex/internal/graph"
 )
 
-// ConfirmEdge upgrades an edge's confidence to EXTRACTED and records the semantic source.
+// ConfirmEdge upgrades an edge's confidence to EXTRACTED and records the
+// semantic source. Origin is set to LSP-grade (lsp_dispatch for interface
+// implementations, lsp_resolved for everything else) since only compiler /
+// type-system providers call ConfirmEdge.
 func ConfirmEdge(e *graph.Edge, provider string) {
 	e.Confidence = 1.0
 	e.ConfidenceLabel = "EXTRACTED"
+	e.Origin = originForSemanticKind(e.Kind)
 	if e.Meta == nil {
 		e.Meta = make(map[string]any)
 	}
@@ -20,7 +24,8 @@ func RefuteEdge(g *graph.Graph, e *graph.Edge) bool {
 	return g.RemoveEdge(e.From, e.To, e.Kind)
 }
 
-// AddSemanticEdge adds a new edge discovered by semantic analysis.
+// AddSemanticEdge adds a new edge discovered by semantic analysis. Origin is
+// tagged LSP-grade (see ConfirmEdge).
 func AddSemanticEdge(g *graph.Graph, from, to string, kind graph.EdgeKind, filePath string, line int, provider string) *graph.Edge {
 	e := &graph.Edge{
 		From:            from,
@@ -30,12 +35,24 @@ func AddSemanticEdge(g *graph.Graph, from, to string, kind graph.EdgeKind, fileP
 		Line:            line,
 		Confidence:      1.0,
 		ConfidenceLabel: "EXTRACTED",
+		Origin:          originForSemanticKind(kind),
 		Meta: map[string]any{
 			"semantic_source": provider,
 		},
 	}
 	g.AddEdge(e)
 	return e
+}
+
+// originForSemanticKind maps edge kind to the appropriate LSP-grade tier.
+// Interface → implementation is a dispatch resolution (one step less direct
+// than a literal target match), so it gets lsp_dispatch; direct target
+// references get lsp_resolved.
+func originForSemanticKind(kind graph.EdgeKind) string {
+	if kind == graph.EdgeImplements {
+		return graph.OriginLSPDispatch
+	}
+	return graph.OriginLSPResolved
 }
 
 // EnrichNodeMeta sets semantic type information on a node.

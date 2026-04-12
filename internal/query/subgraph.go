@@ -18,9 +18,41 @@ type SubGraph struct {
 
 // QueryOptions controls traversal depth, result limits, and detail level.
 type QueryOptions struct {
-	Depth  int    `json:"depth"`
-	Limit  int    `json:"limit"`
-	Detail string `json:"detail"` // "brief" or "full"
+	Depth   int    `json:"depth"`
+	Limit   int    `json:"limit"`
+	Detail  string `json:"detail"`             // "brief" or "full"
+	MinTier string `json:"min_tier,omitempty"` // see graph.Origin* constants; "" = no filter
+}
+
+// FilterByMinTier drops edges whose Origin rank is below minTier.
+//
+// Nodes are left untouched — a hop that gets filtered can leave an
+// unreachable node in Nodes. That's acceptable for the current surface
+// area (agents filter by tier mainly for one-hop questions like "who
+// calls this?"), and pruning orphans would silently change the node set
+// when a caller might still want to see them. Callers that care can
+// post-prune themselves.
+//
+// Edges without Origin set fall back to graph.DefaultOriginFor (derived
+// from kind + confidence + semantic_source meta) so filters work on
+// edges produced before this field existed or by providers not yet
+// updated.
+func (sg *SubGraph) FilterByMinTier(minTier string) {
+	if minTier == "" || sg == nil {
+		return
+	}
+	kept := make([]*graph.Edge, 0, len(sg.Edges))
+	for _, e := range sg.Edges {
+		origin := e.Origin
+		if origin == "" {
+			src, _ := e.Meta["semantic_source"].(string)
+			origin = graph.DefaultOriginFor(e.Kind, e.Confidence, src)
+		}
+		if graph.MeetsMinTier(origin, minTier) {
+			kept = append(kept, e)
+		}
+	}
+	sg.Edges = kept
 }
 
 // ToDot returns a Graphviz DOT representation of the subgraph.

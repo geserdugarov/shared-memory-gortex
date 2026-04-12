@@ -12,6 +12,17 @@ import (
 	"github.com/zzet/gortex/internal/query"
 )
 
+// minTierParamDescription is the `min_tier` parameter description shared by
+// every edge-returning tool. Mentioning the tier vocabulary inline lets agents
+// pick an appropriate filter without consulting external docs.
+const minTierParamDescription = "Filter edges by minimum confidence tier. " +
+	"Values (highest to lowest): lsp_resolved (compiler-verified), " +
+	"lsp_dispatch (interface→impl via semantic provider), " +
+	"ast_resolved (tree-sitter direct match), " +
+	"ast_inferred (type heuristic), " +
+	"text_matched (name-only). Omit for no filter. " +
+	"Use lsp_resolved for high-stakes refactors where false positives are expensive."
+
 // isCompact checks if the compact flag is set in the request.
 func isCompact(req mcp.CallToolRequest) bool {
 	if v, ok := req.GetArguments()["compact"].(bool); ok {
@@ -247,10 +258,16 @@ func qualifiedName(n *graph.Node) string {
 	return n.Name
 }
 
-// enrichSubGraphEdges populates ConfidenceLabel on every edge in a SubGraph.
+// enrichSubGraphEdges populates ConfidenceLabel and Origin on every edge in
+// a SubGraph. Origin is backfilled from kind + confidence + semantic_source
+// meta when unset so clients see a tier on every edge.
 func enrichSubGraphEdges(sg *query.SubGraph) {
 	for _, e := range sg.Edges {
 		e.ConfidenceLabel = graph.ConfidenceLabelFor(e.Kind, e.Confidence)
+		if e.Origin == "" {
+			src, _ := e.Meta["semantic_source"].(string)
+			e.Origin = graph.DefaultOriginFor(e.Kind, e.Confidence, src)
+		}
 	}
 }
 
@@ -343,6 +360,7 @@ func (s *Server) registerCoreTools() {
 			mcp.WithNumber("limit", mcp.Description("Max nodes (default: 50)")),
 			mcp.WithBoolean("compact", mcp.Description("One-line-per-symbol text output (saves 50-70% tokens)")),
 			mcp.WithString("format", mcp.Description("Output format: json (default) or toon")),
+			mcp.WithString("min_tier", mcp.Description(minTierParamDescription)),
 		),
 		s.handleGetDependencies,
 	)
@@ -355,6 +373,7 @@ func (s *Server) registerCoreTools() {
 			mcp.WithNumber("limit", mcp.Description("Max nodes (default: 50)")),
 			mcp.WithBoolean("compact", mcp.Description("One-line-per-symbol text output (saves 50-70% tokens)")),
 			mcp.WithString("format", mcp.Description("Output format: json (default) or toon")),
+			mcp.WithString("min_tier", mcp.Description(minTierParamDescription)),
 		),
 		s.handleGetDependents,
 	)
@@ -370,6 +389,7 @@ func (s *Server) registerCoreTools() {
 			mcp.WithString("repo", mcp.Description("Filter results to a specific repository prefix")),
 			mcp.WithString("project", mcp.Description("Filter results to repositories in a specific project")),
 			mcp.WithString("ref", mcp.Description("Filter results to repositories with a specific reference tag")),
+			mcp.WithString("min_tier", mcp.Description(minTierParamDescription)),
 		),
 		s.handleGetCallChain,
 	)
@@ -382,6 +402,7 @@ func (s *Server) registerCoreTools() {
 			mcp.WithNumber("limit", mcp.Description("Max nodes (default: 50)")),
 			mcp.WithBoolean("compact", mcp.Description("One-line-per-symbol text output (saves 50-70% tokens)")),
 			mcp.WithString("format", mcp.Description("Output format: json (default) or toon")),
+			mcp.WithString("min_tier", mcp.Description(minTierParamDescription)),
 		),
 		s.handleGetCallers,
 	)
@@ -391,6 +412,7 @@ func (s *Server) registerCoreTools() {
 			mcp.WithDescription("Finds all concrete types that implement an interface. Use before changing an interface to identify all types that will be affected."),
 			mcp.WithString("id", mcp.Required(), mcp.Description("Interface node ID")),
 			mcp.WithString("format", mcp.Description("Output format: json (default) or toon")),
+			mcp.WithString("min_tier", mcp.Description(minTierParamDescription)),
 		),
 		s.handleFindImplementations,
 	)
@@ -405,6 +427,7 @@ func (s *Server) registerCoreTools() {
 			mcp.WithString("repo", mcp.Description("Filter results to a specific repository prefix")),
 			mcp.WithString("project", mcp.Description("Filter results to repositories in a specific project")),
 			mcp.WithString("ref", mcp.Description("Filter results to repositories with a specific reference tag")),
+			mcp.WithString("min_tier", mcp.Description(minTierParamDescription)),
 		),
 		s.handleFindUsages,
 	)
@@ -587,12 +610,15 @@ func (s *Server) handleGetDependencies(_ context.Context, req mcp.CallToolReques
 	if err != nil {
 		return mcp.NewToolResultError("id is required"), nil
 	}
+	minTier := req.GetString("min_tier", "")
 	opts := query.QueryOptions{
-		Depth:  req.GetInt("depth", 2),
-		Limit:  req.GetInt("limit", 50),
-		Detail: "brief",
+		Depth:   req.GetInt("depth", 2),
+		Limit:   req.GetInt("limit", 50),
+		Detail:  "brief",
+		MinTier: minTier,
 	}
 	sg := s.engine.GetDependencies(id, opts)
+	sg.FilterByMinTier(minTier)
 	enrichSubGraphEdges(sg)
 	return returnSubGraph(req, sg)
 }
@@ -602,12 +628,15 @@ func (s *Server) handleGetDependents(_ context.Context, req mcp.CallToolRequest)
 	if err != nil {
 		return mcp.NewToolResultError("id is required"), nil
 	}
+	minTier := req.GetString("min_tier", "")
 	opts := query.QueryOptions{
-		Depth:  req.GetInt("depth", 3),
-		Limit:  req.GetInt("limit", 50),
-		Detail: "brief",
+		Depth:   req.GetInt("depth", 3),
+		Limit:   req.GetInt("limit", 50),
+		Detail:  "brief",
+		MinTier: minTier,
 	}
 	sg := s.engine.GetDependents(id, opts)
+	sg.FilterByMinTier(minTier)
 	enrichSubGraphEdges(sg)
 	return returnSubGraph(req, sg)
 }
@@ -617,10 +646,12 @@ func (s *Server) handleGetCallChain(_ context.Context, req mcp.CallToolRequest) 
 	if err != nil {
 		return mcp.NewToolResultError("id is required"), nil
 	}
+	minTier := req.GetString("min_tier", "")
 	opts := query.QueryOptions{
-		Depth:  req.GetInt("depth", 4),
-		Limit:  req.GetInt("limit", 50),
-		Detail: "brief",
+		Depth:   req.GetInt("depth", 4),
+		Limit:   req.GetInt("limit", 50),
+		Detail:  "brief",
+		MinTier: minTier,
 	}
 	sg := s.engine.GetCallChain(id, opts)
 
@@ -630,6 +661,7 @@ func (s *Server) handleGetCallChain(_ context.Context, req mcp.CallToolRequest) 
 		return mcp.NewToolResultError(filterErr.Error()), nil
 	}
 	sg = filterSubGraph(sg, allowed)
+	sg.FilterByMinTier(minTier)
 	enrichSubGraphEdges(sg)
 	return returnSubGraph(req, sg)
 }
@@ -639,12 +671,15 @@ func (s *Server) handleGetCallers(_ context.Context, req mcp.CallToolRequest) (*
 	if err != nil {
 		return mcp.NewToolResultError("id is required"), nil
 	}
+	minTier := req.GetString("min_tier", "")
 	opts := query.QueryOptions{
-		Depth:  req.GetInt("depth", 2),
-		Limit:  req.GetInt("limit", 50),
-		Detail: "brief",
+		Depth:   req.GetInt("depth", 2),
+		Limit:   req.GetInt("limit", 50),
+		Detail:  "brief",
+		MinTier: minTier,
 	}
 	sg := s.engine.GetCallers(id, opts)
+	sg.FilterByMinTier(minTier)
 	enrichSubGraphEdges(sg)
 	return returnSubGraph(req, sg)
 }
@@ -654,7 +689,8 @@ func (s *Server) handleFindImplementations(_ context.Context, req mcp.CallToolRe
 	if err != nil {
 		return mcp.NewToolResultError("id is required"), nil
 	}
-	impls := s.engine.FindImplementations(id)
+	minTier := req.GetString("min_tier", "")
+	impls := s.engine.FindImplementationsMinTier(id, minTier)
 
 	if isTOON(req) {
 		result := struct {
@@ -684,6 +720,7 @@ func (s *Server) handleFindUsages(_ context.Context, req mcp.CallToolRequest) (*
 	if err != nil {
 		return mcp.NewToolResultError("id is required"), nil
 	}
+	minTier := req.GetString("min_tier", "")
 	sg := s.engine.FindUsages(id)
 
 	// Apply repo/project/ref filter.
@@ -692,6 +729,7 @@ func (s *Server) handleFindUsages(_ context.Context, req mcp.CallToolRequest) (*
 		return mcp.NewToolResultError(filterErr.Error()), nil
 	}
 	sg = filterSubGraph(sg, allowed)
+	sg.FilterByMinTier(minTier)
 	enrichSubGraphEdges(sg)
 	return returnSubGraph(req, sg)
 }

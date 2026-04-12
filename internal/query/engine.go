@@ -112,13 +112,32 @@ func (e *Engine) GetCallers(funcID string, opts QueryOptions) *SubGraph {
 
 // FindImplementations returns all types implementing an interface.
 func (e *Engine) FindImplementations(interfaceID string) []*graph.Node {
+	return e.FindImplementationsMinTier(interfaceID, "")
+}
+
+// FindImplementationsMinTier is FindImplementations filtered by the origin
+// tier of the implements-edge. Pass "" for no filter; pass
+// graph.OriginLSPDispatch (or higher) to restrict to compiler-verified
+// interface dispatches.
+func (e *Engine) FindImplementationsMinTier(interfaceID, minTier string) []*graph.Node {
 	edges := e.g.GetInEdges(interfaceID)
 	var impls []*graph.Node
 	for _, edge := range edges {
-		if edge.Kind == graph.EdgeImplements {
-			if n := e.g.GetNode(edge.From); n != nil {
-				impls = append(impls, n)
+		if edge.Kind != graph.EdgeImplements {
+			continue
+		}
+		if minTier != "" {
+			origin := edge.Origin
+			if origin == "" {
+				src, _ := edge.Meta["semantic_source"].(string)
+				origin = graph.DefaultOriginFor(edge.Kind, edge.Confidence, src)
 			}
+			if !graph.MeetsMinTier(origin, minTier) {
+				continue
+			}
+		}
+		if n := e.g.GetNode(edge.From); n != nil {
+			impls = append(impls, n)
 		}
 	}
 	return impls

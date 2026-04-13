@@ -37,13 +37,16 @@ type Totals struct {
 	CallsCounted   int64 `json:"calls_counted"`
 }
 
-// File is the on-disk schema.
+// File is the on-disk schema. Older files without `per_language` load
+// cleanly — JSON unmarshal leaves the missing field as a nil map and
+// the next write upgrades it.
 type File struct {
 	Version     int                `json:"version"`
 	FirstSeen   time.Time          `json:"first_seen"`
 	LastUpdated time.Time          `json:"last_updated"`
 	Totals      Totals             `json:"totals"`
 	PerRepo     map[string]*Totals `json:"per_repo,omitempty"`
+	PerLanguage map[string]*Totals `json:"per_language,omitempty"`
 }
 
 // Store holds the cumulative savings state and flushes to disk periodically.
@@ -56,12 +59,13 @@ type File struct {
 // delta, and writing back. A second process that flushed in between just
 // shifts our baseline up; nothing is lost.
 type Store struct {
-	mu      sync.Mutex
-	path    string
-	file    File
-	delta   Totals             // cumulative this-process contributions since last successful flush
+	mu       sync.Mutex
+	path     string
+	file     File
+	delta    Totals             // cumulative this-process contributions since last successful flush
 	perDelta map[string]*Totals // per-repo deltas, same semantics as delta
-	pending int                // observations since last flush
+	langDelta map[string]*Totals // per-language deltas
+	pending  int                // observations since last flush
 
 	// stop signals the optional periodic flusher to exit. Nil when no
 	// flusher is running.
@@ -85,10 +89,15 @@ func DefaultPath() string {
 // `<path>.corrupt-<ts>` and replaced with a fresh state so a bad write can't
 // permanently break metrics.
 func Open(path string) (*Store, error) {
-	s := &Store{path: path, perDelta: make(map[string]*Totals)}
+	s := &Store{
+		path:      path,
+		perDelta:  make(map[string]*Totals),
+		langDelta: make(map[string]*Totals),
+	}
 	s.file.Version = schemaVersion
 	s.file.FirstSeen = time.Now().UTC()
 	s.file.PerRepo = make(map[string]*Totals)
+	s.file.PerLanguage = make(map[string]*Totals)
 
 	if path == "" {
 		return s, nil
@@ -100,6 +109,11 @@ func Open(path string) (*Store, error) {
 	}
 	if loaded != nil {
 		s.file = *loaded
+		// Older files have no per_language section; fill in so callers
+		// don't need a nil check.
+		if s.file.PerLanguage == nil {
+			s.file.PerLanguage = make(map[string]*Totals)
+		}
 	}
 	return s, nil
 }
@@ -125,13 +139,17 @@ func readFile(path string) (*File, error) {
 	if loaded.PerRepo == nil {
 		loaded.PerRepo = make(map[string]*Totals)
 	}
+	if loaded.PerLanguage == nil {
+		loaded.PerLanguage = make(map[string]*Totals)
+	}
 	return &loaded, nil
 }
 
-// AddObservation increments the store by one source-reading tool call. When
-// repoPath is non-empty, the totals are also aggregated under that key for
-// per-project reporting. Writes to disk every flushEvery observations.
-func (s *Store) AddObservation(repoPath string, returned, saved int64) {
+// AddObservation increments the store by one source-reading tool call.
+// repoPath and language, when non-empty, also aggregate under per-repo
+// and per-language buckets respectively. Writes to disk every flushEvery
+// observations.
+func (s *Store) AddObservation(repoPath, language string, returned, saved int64) {
 	if s == nil {
 		return
 	}
@@ -151,25 +169,30 @@ func (s *Store) AddObservation(repoPath string, returned, saved int64) {
 	s.delta.TokensReturned += returned
 	s.delta.CallsCounted++
 
-	if repoPath != "" {
-		t := s.file.PerRepo[repoPath]
+	addBucket := func(bucket map[string]*Totals, deltaBucket map[string]*Totals, key string) {
+		if key == "" {
+			return
+		}
+		t := bucket[key]
 		if t == nil {
 			t = &Totals{}
-			s.file.PerRepo[repoPath] = t
+			bucket[key] = t
 		}
 		t.TokensSaved += saved
 		t.TokensReturned += returned
 		t.CallsCounted++
 
-		dt := s.perDelta[repoPath]
+		dt := deltaBucket[key]
 		if dt == nil {
 			dt = &Totals{}
-			s.perDelta[repoPath] = dt
+			deltaBucket[key] = dt
 		}
 		dt.TokensSaved += saved
 		dt.TokensReturned += returned
 		dt.CallsCounted++
 	}
+	addBucket(s.file.PerRepo, s.perDelta, repoPath)
+	addBucket(s.file.PerLanguage, s.langDelta, language)
 
 	s.pending++
 	if s.pending >= flushEvery {
@@ -270,12 +293,14 @@ func (s *Store) Reset() error {
 	defer s.mu.Unlock()
 
 	s.file = File{
-		Version:   schemaVersion,
-		FirstSeen: time.Now().UTC(),
-		PerRepo:   make(map[string]*Totals),
+		Version:     schemaVersion,
+		FirstSeen:   time.Now().UTC(),
+		PerRepo:     make(map[string]*Totals),
+		PerLanguage: make(map[string]*Totals),
 	}
 	s.delta = Totals{}
 	s.perDelta = make(map[string]*Totals)
+	s.langDelta = make(map[string]*Totals)
 	s.pending = 0
 
 	if s.path == "" {
@@ -320,28 +345,22 @@ func (s *Store) flushLocked() error {
 		// File missing (or was just backed up as corrupt). Start fresh
 		// from our in-memory baseline — s.file already includes both
 		// any value loaded at Open time and everything observed in this
-		// process, so don't re-add the delta on top. Deep-copy PerRepo
-		// so the merged copy doesn't alias s.file's map.
+		// process, so don't re-add the delta on top. Deep-copy maps so
+		// the merged copy doesn't alias s.file's maps.
 		fresh := s.file
-		fresh.PerRepo = make(map[string]*Totals, len(s.file.PerRepo))
-		for k, v := range s.file.PerRepo {
-			cp := *v
-			fresh.PerRepo[k] = &cp
-		}
+		fresh.PerRepo = copyTotalsMap(s.file.PerRepo)
+		fresh.PerLanguage = copyTotalsMap(s.file.PerLanguage)
 		merged = &fresh
 	} else {
 		mergeTotals(&merged.Totals, &s.delta)
 		if merged.PerRepo == nil {
 			merged.PerRepo = make(map[string]*Totals)
 		}
-		for repo, dt := range s.perDelta {
-			t := merged.PerRepo[repo]
-			if t == nil {
-				t = &Totals{}
-				merged.PerRepo[repo] = t
-			}
-			mergeTotals(t, dt)
+		if merged.PerLanguage == nil {
+			merged.PerLanguage = make(map[string]*Totals)
 		}
+		mergeBucketDeltas(merged.PerRepo, s.perDelta)
+		mergeBucketDeltas(merged.PerLanguage, s.langDelta)
 		if merged.FirstSeen.IsZero() || s.file.FirstSeen.Before(merged.FirstSeen) {
 			merged.FirstSeen = s.file.FirstSeen
 		}
@@ -378,8 +397,35 @@ func (s *Store) flushLocked() error {
 	s.file = *merged
 	s.delta = Totals{}
 	s.perDelta = make(map[string]*Totals)
+	s.langDelta = make(map[string]*Totals)
 	s.pending = 0
 	return nil
+}
+
+// copyTotalsMap returns a deep copy of a name → Totals map.
+func copyTotalsMap(src map[string]*Totals) map[string]*Totals {
+	if src == nil {
+		return make(map[string]*Totals)
+	}
+	dst := make(map[string]*Totals, len(src))
+	for k, v := range src {
+		cp := *v
+		dst[k] = &cp
+	}
+	return dst
+}
+
+// mergeBucketDeltas folds the per-process delta map into the merged map
+// (which represents the on-disk baseline + this process's contributions).
+func mergeBucketDeltas(merged, deltas map[string]*Totals) {
+	for k, dt := range deltas {
+		t := merged[k]
+		if t == nil {
+			t = &Totals{}
+			merged[k] = t
+		}
+		mergeTotals(t, dt)
+	}
 }
 
 func mergeTotals(dst, src *Totals) {

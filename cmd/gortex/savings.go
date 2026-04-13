@@ -79,6 +79,12 @@ func emitSavingsJSON(snap savings.File, path string) error {
 		"calls_counted":    snap.Totals.CallsCounted,
 		"cost_avoided_usd": savings.CostAvoidedAll(snap.Totals.TokensSaved),
 	}
+	if len(snap.PerRepo) > 0 {
+		out["per_repo"] = snap.PerRepo
+	}
+	if len(snap.PerLanguage) > 0 {
+		out["per_language"] = snap.PerLanguage
+	}
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")
 	return enc.Encode(out)
@@ -129,19 +135,34 @@ func emitSavingsText(snap savings.File, path string) {
 		fmt.Printf("  %-20s $%.4f\n", n, costs[n])
 	}
 
-	if len(snap.PerRepo) > 0 {
-		fmt.Println()
-		fmt.Println("Per-repo totals:")
-		repos := make([]string, 0, len(snap.PerRepo))
-		for r := range snap.PerRepo {
-			repos = append(repos, r)
+	printBucket("Per-repo totals", snap.PerRepo)
+	printBucket("Per-language totals", snap.PerLanguage)
+}
+
+// printBucket renders a sorted breakdown of name → Totals. Skipped when
+// the bucket is empty so older savings files (with no per_language data)
+// don't produce a noisy "Per-language totals: (none)" line.
+func printBucket(title string, bucket map[string]*savings.Totals) {
+	if len(bucket) == 0 {
+		return
+	}
+	fmt.Println()
+	fmt.Println(title + ":")
+	keys := make([]string, 0, len(bucket))
+	for k := range bucket {
+		keys = append(keys, k)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		// Heaviest first — agents care about where the savings come from.
+		if a, b := bucket[keys[i]].TokensSaved, bucket[keys[j]].TokensSaved; a != b {
+			return a > b
 		}
-		sort.Strings(repos)
-		for _, r := range repos {
-			t := snap.PerRepo[r]
-			fmt.Printf("  %s\n    tokens_saved=%s calls=%d\n",
-				r, humanInt(t.TokensSaved), t.CallsCounted)
-		}
+		return keys[i] < keys[j]
+	})
+	for _, k := range keys {
+		t := bucket[k]
+		fmt.Printf("  %-24s tokens_saved=%-12s calls=%d\n",
+			k, humanInt(t.TokensSaved), t.CallsCounted)
 	}
 }
 

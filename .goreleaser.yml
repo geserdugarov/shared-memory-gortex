@@ -107,11 +107,12 @@ homebrew_casks:
     # `gortex completion <shell>`. Cobra emits the right script for
     # each shell; goreleaser drops them in the standard Homebrew
     # completions directory so tab-complete works out of the box.
-    # No need to ship pre-generated scripts in the archive.
+    # `shell_parameter_format: cobra` makes goreleaser auto-append
+    # the `completion <shell>` subcommand — don't add it via args
+    # or it doubles up. Path is bare `gortex` because in a cask
+    # the binary lives at the staged-path root, not under bin/.
     generate_completions_from_executable:
-      executable: bin/gortex
-      args:
-        - completion
+      executable: gortex
       shell_parameter_format: cobra
     # Strip the macOS quarantine xattr so users don't hit Gatekeeper's
     # "cannot be opened because Apple cannot check it for malicious

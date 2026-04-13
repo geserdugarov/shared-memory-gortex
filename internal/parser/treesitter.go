@@ -10,6 +10,12 @@ import (
 
 const parseTimeout = 5 * time.Second
 
+// NB: a sync.Pool of *sitter.Parser was attempted for allocation
+// savings but the smacker/go-tree-sitter bindings surface cross-call
+// state (bogus "operation limit was hit" errors on reused parsers
+// even after Reset + SetLanguage). Net: allocate fresh per call
+// until upstream exposes a cleaner reset path.
+
 // CapturedNode holds information about a single captured tree-sitter node.
 type CapturedNode struct {
 	Text      string
@@ -27,6 +33,11 @@ type QueryResult struct {
 
 // ParseFile parses source bytes with the given language and returns the tree.
 // The caller must call tree.Close() when done.
+//
+// The *sitter.Parser is borrowed from a pool and returned after parse —
+// `sitter.Parser.Close()` is only called on pool eviction (implicit via
+// sync.Pool's GC sweep), not per file. This cuts allocation pressure
+// noticeably on large-repo indexing where ParseFile is hot.
 func ParseFile(src []byte, lang *sitter.Language) (*sitter.Tree, error) {
 	parser := sitter.NewParser()
 	defer parser.Close()

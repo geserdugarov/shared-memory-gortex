@@ -61,6 +61,15 @@ type IndexConfig struct {
 	Languages []string `mapstructure:"languages"`
 	Exclude   []string `mapstructure:"exclude"`
 	Workers   int      `mapstructure:"workers"`
+	// MaxFileSize skips files larger than this during indexing. Zero
+	// (the default) disables the cap — full coverage is preferred so
+	// generated code like `*.pb.go`, schema files, and large data
+	// constants stay queryable. Users with very heavy generated /
+	// minified files that dominate parse time can set a cap (e.g.
+	// 2 MiB) via `.gortex.yaml` to trade coverage for speed. A cap
+	// that drops real symbols silently is a worse default than a
+	// slightly slower full index.
+	MaxFileSize int64 `mapstructure:"max_file_size"`
 }
 
 type WatchConfig struct {
@@ -89,6 +98,8 @@ func Default() *Config {
 				"dist/**", "build/**", ".terraform/**",
 			},
 			Workers: runtime.NumCPU(),
+			// MaxFileSize: 0 = no cap. Opt-in knob for users who want
+			// to skip large generated/minified files.
 		},
 		Watch: WatchConfig{
 			Enabled:    false,

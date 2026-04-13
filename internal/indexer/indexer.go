@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"go.uber.org/zap"
@@ -278,8 +279,15 @@ func (idx *Indexer) IndexCtx(ctx context.Context, root string) (*IndexResult, er
 
 	reporter.Report("walking files", 0, 0)
 
-	// Collect files.
+	// Collect files. Files over IndexConfig.MaxFileSize are skipped
+	// during the walk — they're nearly always generated/minified code
+	// that dominates parse time without contributing useful signal.
+	// A single summary warning reports how many were skipped so the
+	// user knows when the cap is biting.
+	maxSize := idx.config.MaxFileSize
 	var files []string
+	var skippedLarge int
+	var skippedBytes int64
 	err = filepath.WalkDir(absRoot, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return nil
@@ -290,15 +298,30 @@ func (idx *Indexer) IndexCtx(ctx context.Context, root string) (*IndexResult, er
 			}
 			return nil
 		}
-		if _, ok := idx.registry.DetectLanguage(path); ok {
-			if !idx.shouldExclude(path, absRoot) {
-				files = append(files, path)
+		if _, ok := idx.registry.DetectLanguage(path); !ok {
+			return nil
+		}
+		if idx.shouldExclude(path, absRoot) {
+			return nil
+		}
+		if maxSize > 0 {
+			if info, statErr := d.Info(); statErr == nil && info.Size() > maxSize {
+				skippedLarge++
+				skippedBytes += info.Size()
+				return nil
 			}
 		}
+		files = append(files, path)
 		return nil
 	})
 	if err != nil {
 		return nil, err
+	}
+	if skippedLarge > 0 {
+		idx.logger.Info("indexer: skipped large files over MaxFileSize",
+			zap.Int("count", skippedLarge),
+			zap.Int64("total_bytes", skippedBytes),
+			zap.Int64("limit_bytes", maxSize))
 	}
 	reporter.Report("walking files", len(files), len(files))
 
@@ -308,27 +331,43 @@ func (idx *Indexer) IndexCtx(ctx context.Context, root string) (*IndexResult, er
 		workers = 1
 	}
 
-	type fileResult struct {
-		nodes []*graph.Node
-		edges []*graph.Edge
-		err   error
-		file  string
-	}
+	// Workers parse files, write the resulting nodes/edges to the
+	// sharded graph, and run per-file contract extractors on the same
+	// src bytes — all in one pass. Reusing src avoids the 10k+ disk
+	// re-reads the old "parse then extractContracts" flow did; running
+	// the contract extractors per-worker parallelises what used to be
+	// a serial post-pass; language-filtered dispatch skips extractors
+	// that can't match (HTTP on .css, OpenAPI on .ts, etc.).
+	const parseReportEvery = 50
+	totalFiles := len(files)
 
-	fileCh := make(chan string, len(files))
-	resultCh := make(chan fileResult, len(files))
+	_, contractExtractorsByLang := idx.buildPerFileContractExtractors()
+	contractReg := contracts.NewRegistry()
+	var contractMu sync.Mutex
+
+	fileCh := make(chan string, workers*4)
+	var errMu sync.Mutex
+	var errors []IndexError
+	var processed int64
+	var fileCount int64
 
 	var wg sync.WaitGroup
 	for range workers {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			var localContracts []contracts.Contract
 			for path := range fileCh {
-				fr := fileResult{file: path}
+				p := atomic.AddInt64(&processed, 1)
+				if p == 1 || p%parseReportEvery == 0 {
+					reporter.Report("parsing", int(p), totalFiles)
+				}
+
 				src, err := os.ReadFile(path)
 				if err != nil {
-					fr.err = err
-					resultCh <- fr
+					errMu.Lock()
+					errors = append(errors, IndexError{FilePath: path, Error: err.Error()})
+					errMu.Unlock()
 					continue
 				}
 
@@ -341,13 +380,70 @@ func (idx *Indexer) IndexCtx(ctx context.Context, root string) (*IndexResult, er
 
 				result, err := ext.Extract(relPath, src)
 				if err != nil {
-					fr.err = err
-					resultCh <- fr
+					errMu.Lock()
+					errors = append(errors, IndexError{FilePath: path, Error: err.Error()})
+					errMu.Unlock()
 					continue
 				}
-				fr.nodes = result.Nodes
-				fr.edges = result.Edges
-				resultCh <- fr
+
+				idx.applyRepoPrefix(result.Nodes, result.Edges)
+
+				// Find the file node (if the extractor produced one)
+				// and collect its outgoing edges — contract extractors
+				// take the file-scope edge set (imports, etc.), not
+				// every intra-file edge.
+				var fileNodeID, fileGraphPath string
+				for _, n := range result.Nodes {
+					if n.Kind == graph.KindFile {
+						fileNodeID = n.ID
+						fileGraphPath = n.FilePath
+						break
+					}
+				}
+				var fileScopeEdges []*graph.Edge
+				if fileNodeID != "" {
+					for _, e := range result.Edges {
+						if e.From == fileNodeID {
+							fileScopeEdges = append(fileScopeEdges, e)
+						}
+					}
+				}
+
+				for _, n := range result.Nodes {
+					idx.graph.AddNode(n)
+				}
+				for _, e := range result.Edges {
+					idx.graph.AddEdge(e)
+				}
+
+				if fileGraphPath != "" {
+					exts := contractExtractorsByLang[lang]
+					if len(exts) > 0 {
+						c := idx.runContractExtractorsForFile(
+							fileGraphPath, src, result.Nodes, fileScopeEdges, exts)
+						localContracts = append(localContracts, c...)
+
+						// Populate the per-file contract cache so a
+						// later IncrementalReindex can skip this file
+						// on a cache hit.
+						if info, statErr := os.Stat(path); statErr == nil {
+							idx.contractCacheMu.Lock()
+							idx.contractCache[fileGraphPath] = &contractCacheEntry{
+								mtimeNano: info.ModTime().UnixNano(),
+								contracts: c,
+							}
+							idx.contractCacheMu.Unlock()
+						}
+					}
+				}
+				atomic.AddInt64(&fileCount, 1)
+			}
+			if len(localContracts) > 0 {
+				contractMu.Lock()
+				for _, c := range localContracts {
+					contractReg.Add(c)
+				}
+				contractMu.Unlock()
 			}
 		}()
 	}
@@ -356,39 +452,10 @@ func (idx *Indexer) IndexCtx(ctx context.Context, root string) (*IndexResult, er
 		fileCh <- f
 	}
 	close(fileCh)
+	wg.Wait()
 
-	go func() {
-		wg.Wait()
-		close(resultCh)
-	}()
-
-	// parseReportEvery throttles progress emissions inside the parse loop.
-	// At 50 files/tick a 5000-file repo produces ~100 updates — enough for a
-	// smooth bar without flooding the notification channel.
-	const parseReportEvery = 50
-	var errors []IndexError
-	fileCount := 0
-	processed := 0
-	for fr := range resultCh {
-		processed++
-		if processed == 1 || processed%parseReportEvery == 0 {
-			reporter.Report("parsing", processed, len(files))
-		}
-		if fr.err != nil {
-			errors = append(errors, IndexError{FilePath: fr.file, Error: fr.err.Error()})
-			continue
-		}
-		fileCount++
-		idx.applyRepoPrefix(fr.nodes, fr.edges)
-		for _, n := range fr.nodes {
-			idx.graph.AddNode(n)
-		}
-		for _, e := range fr.edges {
-			idx.graph.AddEdge(e)
-		}
-	}
 	if processed > 0 {
-		reporter.Report("parsing", processed, len(files))
+		reporter.Report("parsing", int(processed), totalFiles)
 	}
 
 	// Populate fileMtimes for all detected files.
@@ -440,9 +507,13 @@ func (idx *Indexer) IndexCtx(ctx context.Context, root string) (*IndexResult, er
 	// Build search index.
 	idx.buildSearchIndex()
 
+	// Contracts were already extracted inline during parse (per file,
+	// per worker). Here we just finish up: run the go.mod extractor
+	// (not associated with any file node) and commit contract nodes /
+	// provides/consumes edges from the merged registry.
 	reporter.Report("extracting contracts", 0, 0)
-	// Extract API contracts (HTTP routes, gRPC services, etc.).
-	idx.extractContracts()
+	idx.extractGoModContracts(contractReg)
+	idx.commitContracts(contractReg)
 
 	// Auto-upgrade to Bleve if above threshold. Run in the background
 	// so the foreground IndexCtx returns immediately — populating
@@ -455,12 +526,12 @@ func (idx *Indexer) IndexCtx(ctx context.Context, root string) (*IndexResult, er
 		go idx.upgradeSearchToBleve()
 	}
 
-	reporter.Report("indexing complete", fileCount, len(files))
+	reporter.Report("indexing complete", int(fileCount), len(files))
 
 	return &IndexResult{
 		NodeCount:  idx.graph.NodeCount(),
 		EdgeCount:  idx.graph.EdgeCount(),
-		FileCount:  fileCount,
+		FileCount:  int(fileCount),
 		DurationMs: time.Since(start).Milliseconds(),
 		Errors:     errors,
 	}, nil
@@ -846,11 +917,14 @@ func (idx *Indexer) TotalDetected() int {
 	return idx.totalDetected
 }
 
-// extractContracts scans all file nodes in the graph and runs contract extractors
-// to detect API contracts (HTTP routes, gRPC services, GraphQL, topics, etc.).
-// Detected contracts are added as graph nodes with provides/consumes edges.
-func (idx *Indexer) extractContracts() {
-	reg := contracts.NewRegistry()
+// buildPerFileContractExtractors returns the set of extractors that
+// operate on a single source file (everything except GoModExtractor,
+// which runs once against go.mod at the repo root) plus a language →
+// [extractors] map so callers can skip extractors whose
+// SupportedLanguages() doesn't include a given file's language.
+// Building the language map once avoids doing the string-membership
+// check per file.
+func (idx *Indexer) buildPerFileContractExtractors() ([]contracts.Extractor, map[string][]contracts.Extractor) {
 	extractors := []contracts.Extractor{
 		&contracts.HTTPExtractor{},
 		&contracts.GRPCExtractor{},
@@ -859,8 +933,111 @@ func (idx *Indexer) extractContracts() {
 		&contracts.TopicExtractor{},
 		&contracts.WebSocketExtractor{},
 		&contracts.EnvVarExtractor{},
-		&contracts.GoModExtractor{TrackedRepos: idx.trackedRepoModules},
 	}
+	byLang := make(map[string][]contracts.Extractor)
+	for _, ex := range extractors {
+		for _, lang := range ex.SupportedLanguages() {
+			byLang[lang] = append(byLang[lang], ex)
+		}
+	}
+	return extractors, byLang
+}
+
+// runContractExtractorsForFile applies the given extractors to a single
+// file and returns the raw contracts (with RepoPrefix already set).
+// Called both inline from parse workers and from the full-walk
+// extractContracts path — they share the same per-file work.
+func (idx *Indexer) runContractExtractorsForFile(
+	graphPath string,
+	src []byte,
+	fileNodes []*graph.Node,
+	fileEdges []*graph.Edge,
+	exts []contracts.Extractor,
+) []contracts.Contract {
+	if len(exts) == 0 {
+		return nil
+	}
+	var out []contracts.Contract
+	for _, ex := range exts {
+		found := ex.Extract(graphPath, src, fileNodes, fileEdges)
+		for i := range found {
+			found[i].RepoPrefix = idx.repoPrefix
+		}
+		out = append(out, found...)
+	}
+	return out
+}
+
+// commitContracts writes contract nodes + provides/consumes edges for
+// every contract in reg, and sets idx.contractRegistry to reg. Called
+// once per index pass after all per-file contracts have been collected
+// (inline from parse workers) plus go.mod has been processed.
+func (idx *Indexer) commitContracts(reg *contracts.Registry) {
+	for _, c := range reg.All() {
+		contractNode := &graph.Node{
+			ID:       c.ID,
+			Kind:     graph.KindContract,
+			Name:     c.ID,
+			FilePath: c.FilePath,
+			Language: "contract",
+			Meta:     map[string]any{"type": string(c.Type), "role": string(c.Role)},
+		}
+		idx.graph.AddNode(contractNode)
+
+		edgeKind := graph.EdgeProvides
+		if c.Role == contracts.RoleConsumer {
+			edgeKind = graph.EdgeConsumes
+		}
+		if c.SymbolID != "" {
+			idx.graph.AddEdge(&graph.Edge{
+				From:     c.SymbolID,
+				To:       c.ID,
+				Kind:     edgeKind,
+				FilePath: c.FilePath,
+				Line:     c.Line,
+			})
+		}
+	}
+
+	idx.contractRegistry = reg
+	repo := idx.rootPath
+	if idx.repoPrefix != "" {
+		repo = idx.repoPrefix
+	}
+	idx.logger.Info("contracts extracted",
+		zap.String("repo", repo),
+		zap.Int("count", len(reg.All())))
+}
+
+// extractGoModContracts runs the go.mod-specific extractor once against
+// the repo root (go.mod isn't represented as a file node in the graph).
+// Results are added to reg. Safe to call when no go.mod exists.
+func (idx *Indexer) extractGoModContracts(reg *contracts.Registry) {
+	goModPath := filepath.Join(idx.rootPath, "go.mod")
+	goModSrc, err := os.ReadFile(goModPath)
+	if err != nil {
+		return
+	}
+	goModExtractor := &contracts.GoModExtractor{TrackedRepos: idx.trackedRepoModules}
+	goModFilePath := "go.mod"
+	if idx.repoPrefix != "" {
+		goModFilePath = idx.repoPrefix + "/go.mod"
+	}
+	found := goModExtractor.Extract(goModFilePath, goModSrc, nil, nil)
+	reg.AddAll(found, idx.repoPrefix)
+}
+
+// extractContracts scans all file nodes in the graph and runs contract
+// extractors to detect API contracts (HTTP routes, gRPC services,
+// GraphQL, topics, etc.). Detected contracts are added as graph nodes
+// with provides/consumes edges.
+//
+// This full-walk path is used by IncrementalReindex (where many files
+// are already cached). IndexCtx instead runs the per-file work inline
+// with parsing — see the worker loop — and skips this function.
+func (idx *Indexer) extractContracts() {
+	reg := contracts.NewRegistry()
+	_, byLang := idx.buildPerFileContractExtractors()
 
 	// Track which file nodes we saw this pass so we can prune stale
 	// cache entries afterwards (files that left the graph).
@@ -913,17 +1090,13 @@ func (idx *Indexer) extractContracts() {
 		fileNodes := idx.graph.GetFileNodes(fileNode.FilePath)
 		fileEdges := idx.graph.GetOutEdges(fileNode.ID)
 
-		var fileContracts []contracts.Contract
-		for _, ext := range extractors {
-			found := ext.Extract(fileNode.FilePath, src, fileNodes, fileEdges)
-			// Apply the repo prefix here (mirrors AddAll's behaviour) so
-			// the cached entries already carry the final field values
-			// and cache replay is a straight Add per contract.
-			for i := range found {
-				found[i].RepoPrefix = idx.repoPrefix
-			}
-			fileContracts = append(fileContracts, found...)
-		}
+		// Language-filtered dispatch: skip extractors that don't list
+		// this file's language in SupportedLanguages(). On big repos
+		// with lots of .css / .svg / .json etc. this cuts a lot of
+		// no-op extractor calls.
+		exts := byLang[fileNode.Language]
+		fileContracts := idx.runContractExtractorsForFile(
+			fileNode.FilePath, src, fileNodes, fileEdges, exts)
 		for _, c := range fileContracts {
 			reg.Add(c)
 		}
@@ -947,53 +1120,8 @@ func (idx *Indexer) extractContracts() {
 	}
 	idx.contractCacheMu.Unlock()
 
-	// Process go.mod directly (not in the graph as a file node).
-	goModPath := filepath.Join(idx.rootPath, "go.mod")
-	if goModSrc, err := os.ReadFile(goModPath); err == nil {
-		goModExtractor := &contracts.GoModExtractor{TrackedRepos: idx.trackedRepoModules}
-		goModFilePath := "go.mod"
-		if idx.repoPrefix != "" {
-			goModFilePath = idx.repoPrefix + "/go.mod"
-		}
-		found := goModExtractor.Extract(goModFilePath, goModSrc, nil, nil)
-		reg.AddAll(found, idx.repoPrefix)
-	}
-
-	// Add contract nodes and edges to graph.
-	for _, c := range reg.All() {
-		contractNode := &graph.Node{
-			ID:       c.ID,
-			Kind:     graph.KindContract,
-			Name:     c.ID,
-			FilePath: c.FilePath,
-			Language: "contract",
-			Meta:     map[string]any{"type": string(c.Type), "role": string(c.Role)},
-		}
-		idx.graph.AddNode(contractNode)
-
-		edgeKind := graph.EdgeProvides
-		if c.Role == contracts.RoleConsumer {
-			edgeKind = graph.EdgeConsumes
-		}
-		if c.SymbolID != "" {
-			idx.graph.AddEdge(&graph.Edge{
-				From:     c.SymbolID,
-				To:       c.ID,
-				Kind:     edgeKind,
-				FilePath: c.FilePath,
-				Line:     c.Line,
-			})
-		}
-	}
-
-	idx.contractRegistry = reg
-	repo := idx.rootPath
-	if idx.repoPrefix != "" {
-		repo = idx.repoPrefix
-	}
-	idx.logger.Info("contracts extracted",
-		zap.String("repo", repo),
-		zap.Int("count", len(reg.All())))
+	idx.extractGoModContracts(reg)
+	idx.commitContracts(reg)
 }
 
 // IsStale returns true if the file at relPath has been modified on disk since

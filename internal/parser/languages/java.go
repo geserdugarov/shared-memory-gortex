@@ -69,6 +69,21 @@ const (
 		type: (_) @fvar.type
 		declarator: (variable_declarator
 			name: (identifier) @fvar.name)) @fvar.def`
+
+	// Enums. Java enums are first-class classes with members — a
+	// typical codebase has dozens of them (Status, Role, EventType,
+	// etc.) and they're common navigation targets. Skipping them
+	// leaves enterprise Java graphs materially incomplete.
+	javaQEnum = `(enum_declaration
+		name: (identifier) @enum.name) @enum.def`
+
+	// Enum constants (members) — the right-hand-side values inside
+	// an enum body: `ACTIVE, INACTIVE, PENDING(5)` etc.
+	javaQEnumConstant = `(enum_declaration
+		name: (identifier) @enum.name
+		body: (enum_body
+			(enum_constant
+				name: (identifier) @enum.member) @enum.member.def))`
 )
 
 // JavaExtractor extracts Java source files.
@@ -119,6 +134,52 @@ func (e *JavaExtractor) Extract(filePath string, src []byte) (*parser.Extraction
 		})
 		result.Edges = append(result.Edges, &graph.Edge{
 			From: fileNode.ID, To: id, Kind: graph.EdgeDefines, FilePath: filePath, Line: def.StartLine + 1,
+		})
+	}
+
+	// Enums — declaration + each constant as a member. KindType
+	// matches how classes are stored; Meta carries "kind":"enum" so
+	// downstream consumers can still distinguish enums from classes.
+	matches, _ = parser.RunQuery(javaQEnum, e.lang, root, src)
+	for _, m := range matches {
+		name := m.Captures["enum.name"].Text
+		def := m.Captures["enum.def"]
+		id := filePath + "::" + name
+		if seen[id] {
+			continue
+		}
+		seen[id] = true
+		result.Nodes = append(result.Nodes, &graph.Node{
+			ID: id, Kind: graph.KindType, Name: name,
+			FilePath: filePath, StartLine: def.StartLine + 1, EndLine: def.EndLine + 1,
+			Language: "java",
+			Meta:     map[string]any{"kind": "enum"},
+		})
+		result.Edges = append(result.Edges, &graph.Edge{
+			From: fileNode.ID, To: id, Kind: graph.EdgeDefines,
+			FilePath: filePath, Line: def.StartLine + 1,
+		})
+	}
+
+	// Enum constants (members).
+	memberMatches, _ := parser.RunQuery(javaQEnumConstant, e.lang, root, src)
+	for _, m := range memberMatches {
+		enumName := m.Captures["enum.name"].Text
+		memberName := m.Captures["enum.member"].Text
+		memberDef := m.Captures["enum.member.def"]
+		enumID := filePath + "::" + enumName
+		memberID := enumID + "." + memberName
+		result.Nodes = append(result.Nodes, &graph.Node{
+			ID: memberID, Kind: graph.KindVariable, Name: memberName,
+			FilePath:  filePath,
+			StartLine: memberDef.StartLine + 1,
+			EndLine:   memberDef.EndLine + 1,
+			Language:  "java",
+			Meta:      map[string]any{"receiver": enumName, "kind": "enum_member"},
+		})
+		result.Edges = append(result.Edges, &graph.Edge{
+			From: memberID, To: enumID, Kind: graph.EdgeMemberOf,
+			FilePath: filePath, Line: memberDef.StartLine + 1,
 		})
 	}
 

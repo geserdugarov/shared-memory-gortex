@@ -43,6 +43,32 @@ func TestJavaExtractor_Interface(t *testing.T) {
 	assert.Equal(t, "Repository", ifaces[0].Name)
 }
 
+func TestJavaExtractor_Enum(t *testing.T) {
+	src := []byte(`public enum Status {
+    ACTIVE,
+    INACTIVE,
+    PENDING;
+}
+`)
+	e := NewJavaExtractor()
+	result, err := e.Extract("Status.java", src)
+	require.NoError(t, err)
+
+	types := nodesOfKind(result.Nodes, graph.KindType)
+	require.Len(t, types, 1)
+	assert.Equal(t, "Status", types[0].Name)
+	require.NotNil(t, types[0].Meta, "enum should carry Meta[\"kind\"]=\"enum\"")
+	assert.Equal(t, "enum", types[0].Meta["kind"])
+
+	members := map[string]bool{}
+	for _, n := range result.Nodes {
+		if n.Kind == graph.KindVariable && n.Meta != nil && n.Meta["kind"] == "enum_member" {
+			members[n.Name] = true
+		}
+	}
+	assert.Equal(t, map[string]bool{"ACTIVE": true, "INACTIVE": true, "PENDING": true}, members)
+}
+
 func TestJavaExtractor_MethodMemberOf(t *testing.T) {
 	src := []byte(`public class UserService {
     private String name;

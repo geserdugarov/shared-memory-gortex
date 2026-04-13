@@ -123,6 +123,30 @@ func TestKotlinExtractor_Interface(t *testing.T) {
 	assert.Equal(t, "Repository", ifaces[0].Name)
 }
 
+func TestKotlinExtractor_EnumClass(t *testing.T) {
+	src := []byte(`enum class Direction {
+    NORTH, SOUTH, EAST, WEST
+}
+`)
+	e := NewKotlinExtractor()
+	result, err := e.Extract("Direction.kt", src)
+	require.NoError(t, err)
+
+	types := nodesOfKind(result.Nodes, graph.KindType)
+	require.Len(t, types, 1)
+	assert.Equal(t, "Direction", types[0].Name)
+	require.NotNil(t, types[0].Meta, "enum should carry Meta[\"kind\"]=\"enum\"")
+	assert.Equal(t, "enum", types[0].Meta["kind"])
+
+	entries := map[string]bool{}
+	for _, n := range result.Nodes {
+		if n.Kind == graph.KindVariable && n.Meta != nil && n.Meta["kind"] == "enum_entry" {
+			entries[n.Name] = true
+		}
+	}
+	assert.Equal(t, map[string]bool{"NORTH": true, "SOUTH": true, "EAST": true, "WEST": true}, entries)
+}
+
 func TestKotlinExtractor_TopLevelFunction(t *testing.T) {
 	src := []byte(`fun greet(name: String): String {
     println(name)

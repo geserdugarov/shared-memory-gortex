@@ -19,6 +19,25 @@ const (
 	rsQEnum = `(enum_item
 		name: (type_identifier) @type.name) @type.def`
 
+	// Rust enum variants — each arm of a sum type. Variants are
+	// first-class constructors and routine navigation targets
+	// (`MyEnum::Foo` resolves to the variant), so they deserve nodes
+	// with member_of edges back to the enum.
+	rsQEnumVariant = `(enum_item
+		name: (type_identifier) @enum.name
+		body: (enum_variant_list
+			(enum_variant
+				name: (identifier) @variant.name) @variant.def))`
+
+	// Struct fields — `pub field_name: Type` inside a struct_item.
+	// Missing these is the Rust equivalent of missing class
+	// properties in TypeScript: routine search targets.
+	rsQStructField = `(struct_item
+		name: (type_identifier) @struct.name
+		body: (field_declaration_list
+			(field_declaration
+				name: (field_identifier) @field.name) @field.def))`
+
 	rsQTrait = `(trait_item
 		name: (type_identifier) @trait.name) @trait.def`
 
@@ -188,9 +207,54 @@ func (e *RustExtractor) Extract(filePath string, src []byte) (*parser.Extraction
 			ID: id, Kind: graph.KindType, Name: name,
 			FilePath: filePath, StartLine: def.StartLine + 1, EndLine: def.EndLine + 1,
 			Language: "rust",
+			Meta:     map[string]any{"kind": "enum"},
 		})
 		result.Edges = append(result.Edges, &graph.Edge{
 			From: fileNode.ID, To: id, Kind: graph.EdgeDefines, FilePath: filePath, Line: def.StartLine + 1,
+		})
+	}
+
+	// Enum variants — each arm of a sum type becomes a member node.
+	variantMatches, _ := parser.RunQuery(rsQEnumVariant, e.lang, root, src)
+	for _, m := range variantMatches {
+		enumName := m.Captures["enum.name"].Text
+		variantName := m.Captures["variant.name"].Text
+		variantDef := m.Captures["variant.def"]
+		enumID := filePath + "::" + enumName
+		variantID := enumID + "." + variantName
+		result.Nodes = append(result.Nodes, &graph.Node{
+			ID: variantID, Kind: graph.KindVariable, Name: variantName,
+			FilePath:  filePath,
+			StartLine: variantDef.StartLine + 1,
+			EndLine:   variantDef.EndLine + 1,
+			Language:  "rust",
+			Meta:      map[string]any{"receiver": enumName, "kind": "enum_variant"},
+		})
+		result.Edges = append(result.Edges, &graph.Edge{
+			From: variantID, To: enumID, Kind: graph.EdgeMemberOf,
+			FilePath: filePath, Line: variantDef.StartLine + 1,
+		})
+	}
+
+	// Struct fields — pub / private named fields inside a struct_item.
+	fieldMatches, _ := parser.RunQuery(rsQStructField, e.lang, root, src)
+	for _, m := range fieldMatches {
+		structName := m.Captures["struct.name"].Text
+		fieldName := m.Captures["field.name"].Text
+		fieldDef := m.Captures["field.def"]
+		structID := filePath + "::" + structName
+		fieldID := structID + "." + fieldName
+		result.Nodes = append(result.Nodes, &graph.Node{
+			ID: fieldID, Kind: graph.KindVariable, Name: fieldName,
+			FilePath:  filePath,
+			StartLine: fieldDef.StartLine + 1,
+			EndLine:   fieldDef.EndLine + 1,
+			Language:  "rust",
+			Meta:      map[string]any{"receiver": structName, "kind": "struct_field"},
+		})
+		result.Edges = append(result.Edges, &graph.Edge{
+			From: fieldID, To: structID, Kind: graph.EdgeMemberOf,
+			FilePath: filePath, Line: fieldDef.StartLine + 1,
 		})
 	}
 

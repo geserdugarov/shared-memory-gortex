@@ -85,6 +85,72 @@ export const MAX_RETRIES = 3;
 	assert.GreaterOrEqual(t, len(vars), 2)
 }
 
+func TestTSExtractor_Enum(t *testing.T) {
+	src := []byte(`export enum KeybindingWeight {
+    EditorCore = 0,
+    EditorContrib = 100,
+    WorkbenchContrib = 200,
+    BuiltinExtension = 300,
+    ExternalExtension = 400
+}
+
+enum Simple {
+    A,
+    B,
+    C
+}
+`)
+	e := NewTypeScriptExtractor()
+	result, err := e.Extract("weights.ts", src)
+	require.NoError(t, err)
+
+	// Enums come through as KindType with Meta["kind"]="enum".
+	enumNames := map[string]bool{}
+	for _, n := range result.Nodes {
+		if n.Kind == graph.KindType && n.Meta != nil && n.Meta["kind"] == "enum" {
+			enumNames[n.Name] = true
+		}
+	}
+	assert.Equal(t, map[string]bool{"KeybindingWeight": true, "Simple": true}, enumNames)
+
+	// Members are KindVariable with Meta["kind"]="enum_member".
+	memberCount := 0
+	byReceiver := map[string]int{}
+	for _, n := range result.Nodes {
+		if n.Kind == graph.KindVariable && n.Meta != nil && n.Meta["kind"] == "enum_member" {
+			memberCount++
+			if recv, ok := n.Meta["receiver"].(string); ok {
+				byReceiver[recv]++
+			}
+		}
+	}
+	assert.Equal(t, 8, memberCount) // 5 + 3
+	assert.Equal(t, 5, byReceiver["KeybindingWeight"])
+	assert.Equal(t, 3, byReceiver["Simple"])
+}
+
+func TestTSExtractor_ClassProperties(t *testing.T) {
+	src := []byte(`class Server {
+    public readonly port: number = 8080;
+    private _connections: number = 0;
+    protected logger: Logger;
+
+    start() {}
+}
+`)
+	e := NewTypeScriptExtractor()
+	result, err := e.Extract("server.ts", src)
+	require.NoError(t, err)
+
+	props := map[string]bool{}
+	for _, n := range result.Nodes {
+		if n.Kind == graph.KindVariable && n.Meta != nil && n.Meta["kind"] == "class_property" {
+			props[n.Name] = true
+		}
+	}
+	assert.Equal(t, map[string]bool{"port": true, "_connections": true, "logger": true}, props)
+}
+
 func TestTSExtractor_InterfaceMethods(t *testing.T) {
 	src := []byte(`interface Repository {
     findById(id: string): User;

@@ -54,6 +54,21 @@ const (
 	tsQExport = `(export_statement
 		(function_declaration
 			name: (identifier) @func.name)) @func.def`
+
+	// Enums and their members. Tree-sitter-typescript represents an
+	// enum body as `enum_body` containing either bare
+	// `property_identifier` values or `enum_assignment` nodes with a
+	// name field. We capture both via the parent enum_declaration so
+	// a single query walks both patterns.
+	tsQEnum = `(enum_declaration
+		name: (identifier) @enum.name) @enum.def`
+
+	// Class property (field) declarations — `readonly foo: string`,
+	// `private _bar = 42`, etc. These are typed, visible members that
+	// agents should be able to search for. Distinct from method
+	// definitions (already handled by tsQMethod).
+	tsQClassProperty = `(public_field_definition
+		name: (property_identifier) @prop.name) @prop.def`
 )
 
 // TypeScriptExtractor extracts TypeScript/JavaScript source files.
@@ -98,6 +113,9 @@ func (e *TypeScriptExtractor) Extract(filePath string, src []byte) (*parser.Extr
 
 	// Interfaces.
 	e.extractInterfaces(root, src, filePath, fileNode.ID, result)
+
+	// Enums (declaration + members).
+	e.extractEnums(root, src, filePath, fileNode.ID, result)
 
 	// Type aliases.
 	e.extractTypeAliases(root, src, filePath, fileNode.ID, result)
@@ -168,6 +186,109 @@ func (e *TypeScriptExtractor) extractClasses(root *sitter.Node, src []byte, file
 
 		// Methods inside the class.
 		e.extractMethods(def.Node, src, filePath, id, result)
+
+		// Fields / properties inside the class. Without this,
+		// class_body's public_field_definition children are
+		// invisible to search; a typical VSCode class (10-30
+		// fields) loses most of its surface area in the graph.
+		e.extractClassProperties(def.Node, src, filePath, id, result)
+	}
+}
+
+// extractEnums adds enum declarations (as KindType) plus each member
+// (as KindVariable with a member_of edge back to the enum). Enums are
+// first-class value namespaces in TypeScript: `KeybindingWeight.EditorCore`
+// resolves to a member, so users should be able to search for both the
+// enum and its cases.
+func (e *TypeScriptExtractor) extractEnums(root *sitter.Node, src []byte, filePath, fileID string, result *parser.ExtractionResult) {
+	matches, _ := parser.RunQuery(tsQEnum, e.lang, root, src)
+	for _, m := range matches {
+		name := m.Captures["enum.name"].Text
+		def := m.Captures["enum.def"]
+		id := filePath + "::" + name
+
+		result.Nodes = append(result.Nodes, &graph.Node{
+			ID: id, Kind: graph.KindType, Name: name,
+			FilePath: filePath, StartLine: def.StartLine + 1, EndLine: def.EndLine + 1,
+			Language: "typescript",
+			Meta:     map[string]any{"kind": "enum"},
+		})
+		result.Edges = append(result.Edges, &graph.Edge{
+			From: fileID, To: id, Kind: graph.EdgeDefines,
+			FilePath: filePath, Line: def.StartLine + 1,
+		})
+
+		// Walk the enum body for member names. The grammar yields
+		// enum_body → (property_identifier | enum_assignment) children.
+		// Handle both so `FOO` and `FOO = 1` style members both land.
+		if def.Node == nil {
+			continue
+		}
+		for i := 0; i < int(def.Node.ChildCount()); i++ {
+			child := def.Node.Child(i)
+			if child == nil || child.Type() != "enum_body" {
+				continue
+			}
+			for j := 0; j < int(child.ChildCount()); j++ {
+				mem := child.Child(j)
+				if mem == nil {
+					continue
+				}
+				var memberName string
+				var memberNode *sitter.Node
+				switch mem.Type() {
+				case "property_identifier":
+					memberName = mem.Content(src)
+					memberNode = mem
+				case "enum_assignment":
+					nameNode := mem.ChildByFieldName("name")
+					if nameNode != nil {
+						memberName = nameNode.Content(src)
+						memberNode = mem
+					}
+				}
+				if memberName == "" || memberNode == nil {
+					continue
+				}
+				memberID := id + "." + memberName
+				result.Nodes = append(result.Nodes, &graph.Node{
+					ID: memberID, Kind: graph.KindVariable, Name: memberName,
+					FilePath:  filePath,
+					StartLine: int(memberNode.StartPoint().Row) + 1,
+					EndLine:   int(memberNode.EndPoint().Row) + 1,
+					Language:  "typescript",
+					Meta:      map[string]any{"receiver": name, "kind": "enum_member"},
+				})
+				result.Edges = append(result.Edges, &graph.Edge{
+					From: memberID, To: id, Kind: graph.EdgeMemberOf,
+					FilePath: filePath, Line: int(memberNode.StartPoint().Row) + 1,
+				})
+			}
+		}
+	}
+}
+
+// extractClassProperties walks a class_body for public_field_definition
+// nodes and adds them as KindVariable with member_of edges to the class.
+// TS classes routinely carry 10-30 typed fields; missing them bleeds a
+// lot of useful graph surface area.
+func (e *TypeScriptExtractor) extractClassProperties(classNode *sitter.Node, src []byte, filePath, classID string, result *parser.ExtractionResult) {
+	className := classID[strings.LastIndex(classID, "::")+2:]
+	matches, _ := parser.RunQuery(tsQClassProperty, e.lang, classNode, src)
+	for _, m := range matches {
+		name := m.Captures["prop.name"].Text
+		def := m.Captures["prop.def"]
+		id := filePath + "::" + className + "." + name
+		result.Nodes = append(result.Nodes, &graph.Node{
+			ID: id, Kind: graph.KindVariable, Name: name,
+			FilePath: filePath, StartLine: def.StartLine + 1, EndLine: def.EndLine + 1,
+			Language: "typescript",
+			Meta:     map[string]any{"receiver": className, "kind": "class_property"},
+		})
+		result.Edges = append(result.Edges, &graph.Edge{
+			From: id, To: classID, Kind: graph.EdgeMemberOf,
+			FilePath: filePath, Line: def.StartLine + 1,
+		})
 	}
 }
 

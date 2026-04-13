@@ -16,8 +16,15 @@ const (
 	swQStruct = `(struct_declaration
 		name: (type_identifier) @type.name) @type.def`
 
-	swQEnum = `(enum_declaration
-		name: (type_identifier) @type.name) @type.def`
+	// tree-sitter-swift represents enums as class_declaration whose
+	// body is an enum_class_body (regular classes use class_body).
+	// The body shape alone is enough to distinguish enums; the `enum`
+	// keyword is an anonymous token and awkward to match in a query,
+	// so we use enum_class_body as the discriminator.
+	swQEnum = `(class_declaration
+		name: (type_identifier) @type.name
+		body: (enum_class_body) @type.body) @type.def`
+
 
 	swQProtocol = `(protocol_declaration
 		name: (type_identifier) @proto.name) @proto.def`
@@ -160,24 +167,84 @@ func (e *SwiftExtractor) Extract(filePath string, src []byte) (*parser.Extractio
 		})
 	}
 
-	// Enums.
+	// Enums (declaration + cases). The class_declaration that backs
+	// classes, structs, and enums all go through swQClass / swQStruct
+	// above as KindType nodes. Running swQEnum in addition lets us
+	// mark the Meta "kind" and walk the enum_class_body for cases.
 	matches, _ = parser.RunQuery(swQEnum, e.lang, root, src)
 	for _, m := range matches {
 		name := m.Captures["type.name"].Text
 		def := m.Captures["type.def"]
+		body := m.Captures["type.body"]
 		id := filePath + "::" + name
-		if seen[id] {
+		if !seen[id] {
+			seen[id] = true
+			result.Nodes = append(result.Nodes, &graph.Node{
+				ID: id, Kind: graph.KindType, Name: name,
+				FilePath: filePath, StartLine: def.StartLine + 1, EndLine: def.EndLine + 1,
+				Language: "swift",
+				Meta:     map[string]any{"kind": "enum"},
+			})
+			result.Edges = append(result.Edges, &graph.Edge{
+				From: fileNode.ID, To: id, Kind: graph.EdgeDefines, FilePath: filePath, Line: def.StartLine + 1,
+			})
+		} else {
+			// Already added via swQClass (Swift enums are
+			// class_declaration). Stamp Meta["kind"]="enum" so
+			// downstream consumers can still distinguish enums from
+			// regular classes without depending on parse order.
+			for _, n := range result.Nodes {
+				if n.ID == id {
+					if n.Meta == nil {
+						n.Meta = make(map[string]any)
+					}
+					n.Meta["kind"] = "enum"
+					break
+				}
+			}
+		}
+
+		// Cases — walk the enum body's enum_entry children directly
+		// rather than via a tree-sitter query, because cases with
+		// associated values contain nested simple_identifier labels
+		// (`case labeled(x: Int)` has `x` as a simple_identifier)
+		// that a naive query would pick up as false-positive case
+		// names. The *first* simple_identifier child of each
+		// enum_entry is the case name; everything after that is
+		// associated-value labels or type names.
+		if body.Node == nil {
 			continue
 		}
-		seen[id] = true
-		result.Nodes = append(result.Nodes, &graph.Node{
-			ID: id, Kind: graph.KindType, Name: name,
-			FilePath: filePath, StartLine: def.StartLine + 1, EndLine: def.EndLine + 1,
-			Language: "swift",
-		})
-		result.Edges = append(result.Edges, &graph.Edge{
-			From: fileNode.ID, To: id, Kind: graph.EdgeDefines, FilePath: filePath, Line: def.StartLine + 1,
-		})
+		for i := 0; i < int(body.Node.ChildCount()); i++ {
+			entry := body.Node.Child(i)
+			if entry == nil || entry.Type() != "enum_entry" {
+				continue
+			}
+			var caseName string
+			for j := 0; j < int(entry.ChildCount()); j++ {
+				ch := entry.Child(j)
+				if ch != nil && ch.Type() == "simple_identifier" {
+					caseName = ch.Content(src)
+					break
+				}
+			}
+			if caseName == "" {
+				continue
+			}
+			caseID := id + "." + caseName
+			result.Nodes = append(result.Nodes, &graph.Node{
+				ID: caseID, Kind: graph.KindVariable, Name: caseName,
+				FilePath:  filePath,
+				StartLine: int(entry.StartPoint().Row) + 1,
+				EndLine:   int(entry.EndPoint().Row) + 1,
+				Language:  "swift",
+				Meta:      map[string]any{"receiver": name, "kind": "enum_case"},
+			})
+			result.Edges = append(result.Edges, &graph.Edge{
+				From: caseID, To: id, Kind: graph.EdgeMemberOf,
+				FilePath: filePath, Line: int(entry.StartPoint().Row) + 1,
+			})
+		}
 	}
 
 	// Protocol method specs (collect before creating protocol nodes).

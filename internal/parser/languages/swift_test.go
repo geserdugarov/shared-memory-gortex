@@ -111,6 +111,39 @@ func TestSwiftExtractor_Enum(t *testing.T) {
 	types := nodesOfKind(result.Nodes, graph.KindType)
 	require.Len(t, types, 1)
 	assert.Equal(t, "Direction", types[0].Name)
+	assert.Equal(t, "enum", types[0].Meta["kind"])
+
+	// Each case becomes a KindVariable member with a member_of edge.
+	caseNames := map[string]bool{}
+	for _, n := range result.Nodes {
+		if n.Kind == graph.KindVariable && n.Meta != nil && n.Meta["kind"] == "enum_case" {
+			caseNames[n.Name] = true
+		}
+	}
+	assert.Equal(t, map[string]bool{"north": true, "south": true, "east": true, "west": true}, caseNames)
+}
+
+func TestSwiftExtractor_EnumAssociatedValues(t *testing.T) {
+	// Cases with associated values used to false-match label
+	// identifiers (`x` in `case labeled(x: Int)`) — confirm only the
+	// case name itself is captured.
+	src := []byte(`enum Result {
+    case ok
+    case err(code: Int, message: String)
+    case payload(Data)
+}
+`)
+	e := NewSwiftExtractor()
+	result, err := e.Extract("result.swift", src)
+	require.NoError(t, err)
+
+	caseNames := map[string]bool{}
+	for _, n := range result.Nodes {
+		if n.Kind == graph.KindVariable && n.Meta != nil && n.Meta["kind"] == "enum_case" {
+			caseNames[n.Name] = true
+		}
+	}
+	assert.Equal(t, map[string]bool{"ok": true, "err": true, "payload": true}, caseNames)
 }
 
 func TestSwiftExtractor_FreeFunction(t *testing.T) {

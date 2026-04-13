@@ -38,6 +38,52 @@ func TestRsExtractor_Struct(t *testing.T) {
 	assert.Equal(t, "Config", types[0].Name)
 }
 
+func TestRsExtractor_EnumVariants(t *testing.T) {
+	src := []byte(`enum Shape {
+    Circle,
+    Rectangle(f64, f64),
+    Labeled { name: String },
+}
+`)
+	e := NewRustExtractor()
+	result, err := e.Extract("shape.rs", src)
+	require.NoError(t, err)
+
+	// Enum marked with Meta["kind"]="enum".
+	types := nodesOfKind(result.Nodes, graph.KindType)
+	require.Len(t, types, 1)
+	assert.Equal(t, "Shape", types[0].Name)
+	assert.Equal(t, "enum", types[0].Meta["kind"])
+
+	variants := map[string]bool{}
+	for _, n := range result.Nodes {
+		if n.Kind == graph.KindVariable && n.Meta != nil && n.Meta["kind"] == "enum_variant" {
+			variants[n.Name] = true
+		}
+	}
+	assert.Equal(t, map[string]bool{"Circle": true, "Rectangle": true, "Labeled": true}, variants)
+}
+
+func TestRsExtractor_StructFields(t *testing.T) {
+	src := []byte(`pub struct User {
+    pub id: u64,
+    pub name: String,
+    email: String,
+}
+`)
+	e := NewRustExtractor()
+	result, err := e.Extract("user.rs", src)
+	require.NoError(t, err)
+
+	fields := map[string]bool{}
+	for _, n := range result.Nodes {
+		if n.Kind == graph.KindVariable && n.Meta != nil && n.Meta["kind"] == "struct_field" {
+			fields[n.Name] = true
+		}
+	}
+	assert.Equal(t, map[string]bool{"id": true, "name": true, "email": true}, fields)
+}
+
 func TestRsExtractor_Trait(t *testing.T) {
 	src := []byte(`trait Repository {
     fn find_by_id(&self, id: &str) -> Option<User>;
@@ -74,8 +120,10 @@ impl Server {
 	methods := nodesOfKind(result.Nodes, graph.KindMethod)
 	assert.Len(t, methods, 2) // new, start
 
+	// memberEdges now include the struct field (`port`) alongside the
+	// two impl methods — 3 total, all pointing at Server.
 	memberEdges := edgesOfKind(result.Edges, graph.EdgeMemberOf)
-	assert.Len(t, memberEdges, 2)
+	assert.Len(t, memberEdges, 3)
 	for _, e := range memberEdges {
 		assert.Equal(t, "server.rs::Server", e.To)
 	}

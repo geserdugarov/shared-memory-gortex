@@ -49,6 +49,7 @@ const (
 		(variable_declaration
 			(simple_identifier) @tprop.name
 			(user_type) @tprop.type)) @tprop.def`
+
 )
 
 // KotlinExtractor extracts Kotlin source files.
@@ -389,19 +390,28 @@ func (e *KotlinExtractor) extractClassesAndInterfaces(
 			return
 		}
 
-		// Determine if this is an interface by checking for "interface" keyword.
+		// Determine if this is an interface by checking for the
+		// "interface" keyword, or an enum by locating an
+		// enum_class_body as the body (only enums have one; regular
+		// classes and interfaces use class_body).
 		isInterface := false
+		var enumBody *sitter.Node
 		for i := 0; i < int(node.ChildCount()); i++ {
 			child := node.Child(i)
-			if child.Type() == "interface" {
+			switch child.Type() {
+			case "interface":
 				isInterface = true
-				break
+			case "enum_class_body":
+				enumBody = child
 			}
 		}
 
 		kind := graph.KindType
+		meta := map[string]any(nil)
 		if isInterface {
 			kind = graph.KindInterface
+		} else if enumBody != nil {
+			meta = map[string]any{"kind": "enum"}
 		}
 
 		seen[id] = true
@@ -411,10 +421,47 @@ func (e *KotlinExtractor) extractClassesAndInterfaces(
 			ID: id, Kind: kind, Name: name,
 			FilePath: filePath, StartLine: startLine, EndLine: endLine,
 			Language: "kotlin",
+			Meta:     meta,
 		})
 		result.Edges = append(result.Edges, &graph.Edge{
 			From: fileNode.ID, To: id, Kind: graph.EdgeDefines, FilePath: filePath, Line: startLine,
 		})
+
+		// Enum entries — `NORTH, SOUTH, EAST, WEST` — walk the
+		// enum_class_body's enum_entry children. Each enum_entry has
+		// a single simple_identifier naming the case.
+		if enumBody != nil {
+			for i := 0; i < int(enumBody.ChildCount()); i++ {
+				entry := enumBody.Child(i)
+				if entry == nil || entry.Type() != "enum_entry" {
+					continue
+				}
+				var entryName string
+				for j := 0; j < int(entry.ChildCount()); j++ {
+					ch := entry.Child(j)
+					if ch != nil && ch.Type() == "simple_identifier" {
+						entryName = ch.Content(src)
+						break
+					}
+				}
+				if entryName == "" {
+					continue
+				}
+				entryID := id + "." + entryName
+				result.Nodes = append(result.Nodes, &graph.Node{
+					ID: entryID, Kind: graph.KindVariable, Name: entryName,
+					FilePath:  filePath,
+					StartLine: int(entry.StartPoint().Row) + 1,
+					EndLine:   int(entry.EndPoint().Row) + 1,
+					Language:  "kotlin",
+					Meta:      map[string]any{"receiver": name, "kind": "enum_entry"},
+				})
+				result.Edges = append(result.Edges, &graph.Edge{
+					From: entryID, To: id, Kind: graph.EdgeMemberOf,
+					FilePath: filePath, Line: int(entry.StartPoint().Row) + 1,
+				})
+			}
+		}
 	})
 }
 

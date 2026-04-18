@@ -135,7 +135,11 @@ func objcBuildSelector(raw string) string {
 	if !strings.Contains(raw, ":") {
 		// Take the first identifier.
 		for i, r := range raw {
-			if !(r == '_' || (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9' && i > 0)) {
+			isIdent := r == '_' ||
+				(r >= 'a' && r <= 'z') ||
+				(r >= 'A' && r <= 'Z') ||
+				(r >= '0' && r <= '9' && i > 0)
+			if !isIdent {
 				return raw[:i]
 			}
 		}

@@ -32,7 +32,6 @@ func TestInitDryRunJSONReportShape(t *testing.T) {
 	repo := t.TempDir()
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	chdir(t, repo)
 
 	initYes = true
 	initDryRun = true
@@ -104,7 +103,6 @@ func TestInitAgentsFilterRejectsUnknownName(t *testing.T) {
 
 	repo := t.TempDir()
 	t.Setenv("HOME", t.TempDir())
-	chdir(t, repo)
 
 	initYes = true
 	initDryRun = true
@@ -128,16 +126,3 @@ func TestInitAgentsFilterRejectsUnknownName(t *testing.T) {
 	}
 }
 
-// chdir cd's into dir and registers a Cleanup that restores the
-// original cwd. Needed because runInit resolves "." against cwd.
-func chdir(t *testing.T, dir string) {
-	t.Helper()
-	orig, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chdir(dir); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.Chdir(orig) })
-}

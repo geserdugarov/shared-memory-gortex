@@ -108,7 +108,8 @@ func TestEnrichRead_LargeLimit_NotNarrow(t *testing.T) {
 }
 
 func TestEnrichGrep_Guidance(t *testing.T) {
-	// Port 0 means bridge won't respond — should still return guidance.
+	// No daemon reachable → should return soft guidance, not deny.
+	stubProbe(t, nil, errDaemonUnreachable)
 	result := enrichGrep(map[string]any{"pattern": "handleFindUsages"}, 0)
 	if result.context == "" {
 		t.Fatal("expected guidance for grep, got empty")

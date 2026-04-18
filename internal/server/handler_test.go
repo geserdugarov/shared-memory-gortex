@@ -174,3 +174,74 @@ func TestCallToolHelper(t *testing.T) {
 	result = h.CallTool(context.Background(), "nonexistent", nil)
 	assert.Empty(t, result)
 }
+
+func TestV1GraphEndpoint_FullDump(t *testing.T) {
+	h := newTestHandler(t)
+	req := httptest.NewRequest(http.MethodGet, "/v1/graph", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+
+	var resp GraphResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	assert.Len(t, resp.Nodes, 2)
+	assert.Equal(t, 2, resp.Stats.TotalNodes)
+	// Heavy fields stripped.
+	for _, n := range resp.Nodes {
+		assert.Empty(t, n.QualName)
+		assert.Zero(t, n.EndLine)
+	}
+}
+
+func TestV1GraphEndpoint_RepoFilter(t *testing.T) {
+	g := graph.New()
+	g.AddNode(&graph.Node{
+		ID: "frontend::App", Kind: graph.KindFunction, Name: "App",
+		FilePath: "src/app.ts", Language: "typescript", RepoPrefix: "frontend",
+	})
+	g.AddNode(&graph.Node{
+		ID: "backend::Server", Kind: graph.KindFunction, Name: "Server",
+		FilePath: "cmd/main.go", Language: "go", RepoPrefix: "backend",
+	})
+	srv := mcpserver.NewMCPServer("gortex-test", "0.0.1-test",
+		mcpserver.WithToolCapabilities(false),
+	)
+	h := NewHandler(srv, g, "0.0.1-test", zap.NewNop())
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/graph?repo=frontend", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+
+	var resp GraphResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	require.Len(t, resp.Nodes, 1)
+	assert.Equal(t, "frontend::App", resp.Nodes[0].ID)
+	// Filtered dump: stats are zeroed; counts come from the nodes array.
+	assert.Equal(t, 0, resp.Stats.TotalNodes)
+}
+
+func TestV1GraphEndpoint_ProjectWithoutConfigManager(t *testing.T) {
+	h := newTestHandler(t)
+	req := httptest.NewRequest(http.MethodGet, "/v1/graph?project=my-saas", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	var body map[string]string
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&body))
+	assert.Contains(t, body["message"], "multi-repo config")
+}
+
+func TestV1EventsEndpoint_NoHub(t *testing.T) {
+	h := newTestHandler(t)
+	req := httptest.NewRequest(http.MethodGet, "/v1/events", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, "text/event-stream", rec.Header().Get("Content-Type"))
+	assert.Contains(t, rec.Body.String(), "watch mode not active")
+}

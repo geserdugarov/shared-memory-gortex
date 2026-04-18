@@ -28,8 +28,7 @@ import (
 	"github.com/zzet/gortex/internal/semantic/lsp"
 	"github.com/zzet/gortex/internal/semantic/scip"
 	"github.com/zzet/gortex/internal/server"
-	"github.com/zzet/gortex/internal/web"
-	"github.com/zzet/gortex/internal/web/hub"
+	"github.com/zzet/gortex/internal/server/hub"
 )
 
 var (
@@ -37,7 +36,6 @@ var (
 	mcpTransport  string
 	mcpPort       int
 	mcpWatch      bool
-	mcpWeb        bool
 	mcpServerAPI  bool
 	mcpCORSOrigin string
 	mcpDebounce   int
@@ -64,9 +62,8 @@ var mcpCmd = &cobra.Command{
 func init() {
 	mcpCmd.Flags().StringVar(&mcpIndex, "index", "", "repository path to index on startup")
 	mcpCmd.Flags().StringVar(&mcpTransport, "transport", "stdio", "transport: stdio")
-	mcpCmd.Flags().IntVar(&mcpPort, "port", 8765, "port for HTTP transport")
+	mcpCmd.Flags().IntVar(&mcpPort, "port", 8765, "port for HTTP server API when --server is set")
 	mcpCmd.Flags().BoolVar(&mcpWatch, "watch", false, "keep graph in sync with filesystem changes")
-	mcpCmd.Flags().BoolVar(&mcpWeb, "web", false, "start web visualization UI")
 	mcpCmd.Flags().IntVar(&mcpDebounce, "debounce", 150, "debounce delay in ms")
 	mcpCmd.Flags().BoolVar(&mcpServerAPI, "server", false, "start HTTP server API alongside MCP stdio")
 	mcpCmd.Flags().StringVar(&mcpCORSOrigin, "cors-origin", "*", "allowed CORS origin for server API")
@@ -403,28 +400,6 @@ func runMCP(cmd *cobra.Command, args []string) error {
 
 			srv.WatchForReanalysis(eventHub, 500)
 			fmt.Fprintf(os.Stderr, "[gortex] watch mode active\n")
-
-			// Start web visualization server (only if --web flag is set).
-			if mcpWeb {
-				webSrv := web.NewServer(g, eng, eventHub, logger)
-				go func() {
-					webAddr := fmt.Sprintf(":%d", mcpPort)
-					fmt.Fprintf(os.Stderr, "[gortex] web UI at http://localhost:%d\n", mcpPort)
-					if err := webSrv.Start(webAddr); err != nil && err != http.ErrServerClosed {
-						fmt.Fprintf(os.Stderr, "[gortex] web server error: %v\n", err)
-					}
-				}()
-			}
-		} else if mcpWeb {
-			// Web without watch — no event hub needed.
-			webSrv := web.NewServer(g, eng, nil, logger)
-			go func() {
-				webAddr := fmt.Sprintf(":%d", mcpPort)
-				fmt.Fprintf(os.Stderr, "[gortex] web UI at http://localhost:%d\n", mcpPort)
-				if err := webSrv.Start(webAddr); err != nil && err != http.ErrServerClosed {
-					fmt.Fprintf(os.Stderr, "[gortex] web server error: %v\n", err)
-				}
-			}()
 		}
 
 		// Run initial analysis.

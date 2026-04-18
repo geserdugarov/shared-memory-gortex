@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"path/filepath"
 	"runtime/debug"
 	"sort"
 	"strings"
@@ -16,19 +17,26 @@ import (
 
 	"github.com/mark3labs/mcp-go/mcp"
 	mcpserver "github.com/mark3labs/mcp-go/server"
+	"github.com/zzet/gortex/internal/config"
 	"github.com/zzet/gortex/internal/graph"
+	"github.com/zzet/gortex/internal/server/hub"
 	"go.uber.org/zap"
 )
 
 // Handler wraps an MCP server's tool dispatch as an HTTP handler.
-// It exposes /health, /tools, /tool/{tool_name}, and /stats endpoints.
+// It exposes /health, /tools, /tool/{tool_name}, and /stats plus the
+// UI-facing /v1/graph (full brief-graph dump) and /v1/events (SSE
+// stream of graph-change events) when the corresponding dependencies
+// are wired via SetEventHub / SetConfigManager.
 type Handler struct {
-	mcpServer *mcpserver.MCPServer
-	graph     *graph.Graph
-	version   string
-	logger    *zap.Logger
-	mux       *http.ServeMux
-	startTime time.Time
+	mcpServer     *mcpserver.MCPServer
+	graph         *graph.Graph
+	version       string
+	logger        *zap.Logger
+	mux           *http.ServeMux
+	startTime     time.Time
+	eventHub      *hub.Hub               // nil when watch mode is off
+	configManager *config.ConfigManager // nil in single-repo mode
 }
 
 // NewHandler creates an HTTP handler that dispatches to MCP tools.
@@ -52,6 +60,16 @@ func (h *Handler) Mux() *http.ServeMux { return h.mux }
 // Graph returns the graph instance for sub-handlers that need direct access.
 func (h *Handler) Graph() *graph.Graph { return h.graph }
 
+// SetEventHub wires the watch-mode event hub so /v1/events can stream
+// graph-change events to subscribers. When nil, /v1/events responds
+// with a single keepalive frame and closes.
+func (h *Handler) SetEventHub(h2 *hub.Hub) { h.eventHub = h2 }
+
+// SetConfigManager wires the multi-repo config so /v1/graph can scope
+// its dump by ?project=<name>. Without it, only ?repo=<name> filtering
+// is available.
+func (h *Handler) SetConfigManager(cm *config.ConfigManager) { h.configManager = cm }
+
 // ServeHTTP implements http.Handler with panic recovery middleware.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	defer func() {
@@ -74,6 +92,8 @@ func (h *Handler) registerRoutes() {
 	h.mux.HandleFunc("GET /tools", h.handleListTools)
 	h.mux.HandleFunc("POST /tool/", h.handleToolCall)
 	h.mux.HandleFunc("GET /stats", h.handleStats)
+	h.mux.HandleFunc("GET /v1/graph", h.handleGetGraph)
+	h.mux.HandleFunc("GET /v1/events", h.handleEvents)
 }
 
 // --- /health ---
@@ -299,4 +319,156 @@ func WriteJSONError(w http.ResponseWriter, status int, message string) {
 		"error":   http.StatusText(status),
 		"message": message,
 	})
+}
+
+// --- /v1/graph ---
+
+// GraphResponse is the full brief-graph dump returned by /v1/graph.
+// Nodes carry only the fields needed for force-directed rendering;
+// heavy fields (Meta, QualName, EndLine) are stripped.
+type GraphResponse struct {
+	Nodes []*graph.Node    `json:"nodes"`
+	Edges []*graph.Edge    `json:"edges"`
+	Stats graph.GraphStats `json:"stats"`
+}
+
+func (h *Handler) handleGetGraph(w http.ResponseWriter, r *http.Request) {
+	project := strings.TrimSpace(r.URL.Query().Get("project"))
+	repo := strings.TrimSpace(r.URL.Query().Get("repo"))
+
+	allowedPrefixes, err := h.resolveRepoFilter(project, repo)
+	if err != nil {
+		WriteJSONError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	nodes := h.graph.AllNodes()
+	edges := h.graph.AllEdges()
+
+	briefNodes := make([]*graph.Node, 0, len(nodes))
+	keptIDs := make(map[string]struct{}, len(nodes))
+	for _, n := range nodes {
+		if allowedPrefixes != nil {
+			if _, ok := allowedPrefixes[n.RepoPrefix]; !ok {
+				continue
+			}
+		}
+		briefNodes = append(briefNodes, &graph.Node{
+			ID:         n.ID,
+			Kind:       n.Kind,
+			Name:       n.Name,
+			FilePath:   n.FilePath,
+			StartLine:  n.StartLine,
+			Language:   n.Language,
+			RepoPrefix: n.RepoPrefix,
+		})
+		keptIDs[n.ID] = struct{}{}
+	}
+
+	var filteredEdges []*graph.Edge
+	if allowedPrefixes == nil {
+		filteredEdges = edges
+	} else {
+		filteredEdges = make([]*graph.Edge, 0, len(edges))
+		for _, e := range edges {
+			if _, ok := keptIDs[e.From]; !ok {
+				continue
+			}
+			if _, ok := keptIDs[e.To]; !ok {
+				continue
+			}
+			filteredEdges = append(filteredEdges, e)
+		}
+	}
+
+	// When unfiltered, report full graph stats; otherwise return zero
+	// stats — the UI can derive counts from the nodes/edges arrays.
+	var stats graph.GraphStats
+	if allowedPrefixes == nil {
+		stats = h.graph.Stats()
+	}
+
+	WriteJSON(w, http.StatusOK, GraphResponse{
+		Nodes: briefNodes,
+		Edges: filteredEdges,
+		Stats: stats,
+	})
+}
+
+// resolveRepoFilter returns a set of allowed RepoPrefix values based on
+// the ?project / ?repo query parameters. Returns nil when no filter
+// was requested (meaning "return everything").
+func (h *Handler) resolveRepoFilter(project, repo string) (map[string]struct{}, error) {
+	if project == "" && repo == "" {
+		return nil, nil
+	}
+	allowed := make(map[string]struct{})
+	if project != "" {
+		if h.configManager == nil {
+			return nil, fmt.Errorf("?project= requires multi-repo config, none loaded")
+		}
+		repos, err := h.configManager.Global().ResolveRepos(project)
+		if err != nil {
+			return nil, err
+		}
+		for _, entry := range repos {
+			allowed[filepath.Base(entry.Path)] = struct{}{}
+		}
+	}
+	if repo != "" {
+		allowed[repo] = struct{}{}
+	}
+	return allowed, nil
+}
+
+// --- /v1/events (SSE) ---
+
+func (h *Handler) handleEvents(w http.ResponseWriter, r *http.Request) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "streaming not supported", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+
+	// Without a hub (watch mode off), emit a single comment frame and
+	// close so clients can distinguish "no events ever" from "stream
+	// dropped mid-session".
+	if h.eventHub == nil {
+		_, _ = fmt.Fprintf(w, ": watch mode not active\n\n")
+		flusher.Flush()
+		return
+	}
+
+	flusher.Flush()
+
+	subID, ch := h.eventHub.Subscribe()
+	defer h.eventHub.Unsubscribe(subID)
+
+	keepalive := time.NewTicker(15 * time.Second)
+	defer keepalive.Stop()
+
+	ctx := r.Context()
+	for {
+		select {
+		case ev, ok := <-ch:
+			if !ok {
+				return
+			}
+			data, _ := json.Marshal(ev)
+			_, _ = fmt.Fprintf(w, "event: graph_change\nid: %d\ndata: %s\n\n",
+				ev.Timestamp.UnixMilli(), string(data))
+			flusher.Flush()
+
+		case <-keepalive.C:
+			_, _ = fmt.Fprintf(w, ": keepalive\n\n")
+			flusher.Flush()
+
+		case <-ctx.Done():
+			return
+		}
+	}
 }

@@ -27,15 +27,13 @@ import (
 	"github.com/zzet/gortex/internal/semantic/lsp"
 	"github.com/zzet/gortex/internal/semantic/scip"
 	"github.com/zzet/gortex/internal/server"
-	"github.com/zzet/gortex/internal/web"
-	"github.com/zzet/gortex/internal/web/hub"
+	"github.com/zzet/gortex/internal/server/hub"
 )
 
 var (
 	serverPort       int
 	serverIndex      string
 	serverCORSOrigin string
-	serverWeb        bool
 	serverWatch      bool
 	serverTrack      []string
 	serverProject    string
@@ -52,7 +50,7 @@ var (
 var serverCmd = &cobra.Command{
 	Use:   "server",
 	Short: "Start the HTTP server API for external integrations",
-	Long:  "Exposes Gortex MCP tools as an HTTP/JSON API. Endpoints: /health, /tools, /tool/{name}, /stats. Optionally serves the web UI on the same port.",
+	Long:  "Exposes Gortex MCP tools as an HTTP/JSON API. Endpoints: /health, /tools, /tool/{name}, /stats, /v1/graph, /v1/events. The UI is a separate Next.js frontend (see web/) that talks to this server over HTTP.",
 	RunE:  runServer,
 }
 
@@ -60,7 +58,6 @@ func init() {
 	serverCmd.Flags().IntVar(&serverPort, "port", 4747, "HTTP port to listen on")
 	serverCmd.Flags().StringVar(&serverIndex, "index", "", "repository path to index on startup")
 	serverCmd.Flags().StringVar(&serverCORSOrigin, "cors-origin", "*", "allowed CORS origin (use '*' for any)")
-	serverCmd.Flags().BoolVar(&serverWeb, "web", false, "serve web visualization UI on the same port")
 	serverCmd.Flags().BoolVar(&serverWatch, "watch", false, "keep graph in sync with filesystem changes")
 	serverCmd.Flags().StringSliceVar(&serverTrack, "track", nil, "additional repository paths to track")
 	serverCmd.Flags().StringVar(&serverProject, "project", "", "active project name")
@@ -228,85 +225,41 @@ func runServer(_ *cobra.Command, _ []string) error {
 
 	// Build the HTTP handler — start serving immediately, index in background.
 	serverHandler := server.NewHandler(srv.MCPServer(), g, version, logger)
+	if cm != nil {
+		serverHandler.SetConfigManager(cm)
+	}
 
-	var handler http.Handler
-	if serverWeb {
-		// Compose server API + web UI on the same port.
-		topMux := http.NewServeMux()
-
-		// Server API routes.
-		topMux.Handle("/health", serverHandler)
-		topMux.Handle("/tools", serverHandler)
-		topMux.Handle("/tool/", serverHandler)
-		topMux.Handle("/stats", serverHandler)
-
-		// Web UI.
-		var eventHub *hub.Hub
-		if serverWatch {
-			wcfg := cfg.Watch
-			wcfg.Enabled = true
-			watcher, err := indexer.NewWatcher(idx, wcfg, logger)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "[gortex] server: watcher setup failed: %v\n", err)
-			} else {
-				watchPaths := wcfg.Paths
-				if len(watchPaths) == 0 && serverIndex != "" {
-					watchPaths = []string{serverIndex}
-				}
-				if len(watchPaths) == 0 {
-					watchPaths = []string{"."}
-				}
-				if err := watcher.Start(watchPaths); err != nil {
-					fmt.Fprintf(os.Stderr, "[gortex] server: watcher start failed: %v\n", err)
-				} else {
-					srv.SetWatcher(watcher)
-					eventHub = hub.New()
-					go eventHub.Run(watcher.Events())
-					srv.WatchForReanalysis(eventHub, 500)
-					fmt.Fprintf(os.Stderr, "[gortex] server: watch mode active\n")
-				}
+	// Watch mode: set up the event hub so /v1/events has a source.
+	if serverWatch {
+		wcfg := cfg.Watch
+		wcfg.Enabled = true
+		watcher, err := indexer.NewWatcher(idx, wcfg, logger)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[gortex] server: watcher setup failed: %v\n", err)
+		} else {
+			watchPaths := wcfg.Paths
+			if len(watchPaths) == 0 && serverIndex != "" {
+				watchPaths = []string{serverIndex}
 			}
-		}
-
-		webSrv := web.NewServer(g, eng, eventHub, logger)
-		topMux.Handle("/", webSrv.Handler())
-
-		handler = topMux
-		fmt.Fprintf(os.Stderr, "[gortex] server: web UI enabled\n")
-	} else {
-		handler = serverHandler
-
-		// Watch mode without web UI.
-		if serverWatch {
-			wcfg := cfg.Watch
-			wcfg.Enabled = true
-			watcher, err := indexer.NewWatcher(idx, wcfg, logger)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "[gortex] server: watcher setup failed: %v\n", err)
+			if len(watchPaths) == 0 {
+				watchPaths = []string{"."}
+			}
+			if err := watcher.Start(watchPaths); err != nil {
+				fmt.Fprintf(os.Stderr, "[gortex] server: watcher start failed: %v\n", err)
 			} else {
-				watchPaths := wcfg.Paths
-				if len(watchPaths) == 0 && serverIndex != "" {
-					watchPaths = []string{serverIndex}
-				}
-				if len(watchPaths) == 0 {
-					watchPaths = []string{"."}
-				}
-				if err := watcher.Start(watchPaths); err != nil {
-					fmt.Fprintf(os.Stderr, "[gortex] server: watcher start failed: %v\n", err)
-				} else {
-					srv.SetWatcher(watcher)
-					eventHub := hub.New()
-					go eventHub.Run(watcher.Events())
-					srv.WatchForReanalysis(eventHub, 500)
-					fmt.Fprintf(os.Stderr, "[gortex] server: watch mode active\n")
-				}
+				srv.SetWatcher(watcher)
+				eventHub := hub.New()
+				go eventHub.Run(watcher.Events())
+				srv.WatchForReanalysis(eventHub, 500)
+				serverHandler.SetEventHub(eventHub)
+				fmt.Fprintf(os.Stderr, "[gortex] server: watch mode active\n")
 			}
 		}
 	}
 
 	// Wrap with CORS.
 	corsOpts := server.CORSOptions{AllowOrigins: []string{serverCORSOrigin}}
-	handler = server.WithCORS(handler, corsOpts)
+	handler := server.WithCORS(serverHandler, corsOpts)
 
 	addr := fmt.Sprintf(":%d", serverPort)
 	httpServer := &http.Server{

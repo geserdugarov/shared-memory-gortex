@@ -19,7 +19,7 @@ import (
 	"github.com/zzet/gortex/internal/query"
 	"github.com/zzet/gortex/internal/savings"
 	"github.com/zzet/gortex/internal/semantic"
-	"github.com/zzet/gortex/internal/web/hub"
+	"github.com/zzet/gortex/internal/server/hub"
 )
 
 // Version is set at build time.

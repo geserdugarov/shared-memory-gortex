@@ -24,10 +24,18 @@ import (
 )
 
 // Handler wraps an MCP server's tool dispatch as an HTTP handler.
-// It exposes /health, /tools, /tool/{tool_name}, and /stats plus the
-// UI-facing /v1/graph (full brief-graph dump) and /v1/events (SSE
-// stream of graph-change events) when the corresponding dependencies
-// are wired via SetEventHub / SetConfigManager.
+// All routes live under /v1/*:
+//
+//	GET  /v1/health       status + node/edge counts + uptime
+//	GET  /v1/tools        list of available MCP tools
+//	POST /v1/tools/{name} invoke a tool with JSON arguments
+//	GET  /v1/stats        graph stats by kind/language
+//	GET  /v1/graph        full brief-graph dump (nodes+edges+stats)
+//	GET  /v1/events       SSE stream of graph-change events
+//
+// /v1/graph scoping (?project/?repo) and /v1/events streaming require
+// a ConfigManager and an event hub respectively, wired via
+// SetConfigManager / SetEventHub after construction.
 type Handler struct {
 	mcpServer     *mcpserver.MCPServer
 	graph         *graph.Graph
@@ -88,10 +96,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) registerRoutes() {
-	h.mux.HandleFunc("GET /health", h.handleHealth)
-	h.mux.HandleFunc("GET /tools", h.handleListTools)
-	h.mux.HandleFunc("POST /tool/", h.handleToolCall)
-	h.mux.HandleFunc("GET /stats", h.handleStats)
+	h.mux.HandleFunc("GET /v1/health", h.handleHealth)
+	h.mux.HandleFunc("GET /v1/tools", h.handleListTools)
+	h.mux.HandleFunc("POST /v1/tools/", h.handleToolCall)
+	h.mux.HandleFunc("GET /v1/stats", h.handleStats)
 	h.mux.HandleFunc("GET /v1/graph", h.handleGetGraph)
 	h.mux.HandleFunc("GET /v1/events", h.handleEvents)
 }
@@ -161,7 +169,7 @@ type ToolContent struct {
 }
 
 func (h *Handler) handleToolCall(w http.ResponseWriter, r *http.Request) {
-	toolName := strings.TrimPrefix(r.URL.Path, "/tool/")
+	toolName := strings.TrimPrefix(r.URL.Path, "/v1/tools/")
 	if toolName == "" {
 		WriteJSONError(w, http.StatusBadRequest, "missing tool name in path")
 		return

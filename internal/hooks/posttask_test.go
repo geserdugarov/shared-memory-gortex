@@ -33,7 +33,7 @@ func TestRunPostTask_NoBridge(t *testing.T) {
 }
 
 func TestRunPostTask_NoChanges_Silent(t *testing.T) {
-	srv := newFakeBridge(map[string]string{
+	srv := newFakeServer(map[string]string{
 		"detect_changes": `{"changed_files":[],"changed_symbols":[],"risk":"NONE","summary":"no indexed symbols affected"}`,
 	})
 	defer srv.Close()
@@ -55,7 +55,7 @@ func TestRunPostTask_RendersDiagnostics(t *testing.T) {
 		"risk":"MEDIUM",
 		"summary":"2 symbols touched"
 	}`
-	srv := newFakeBridge(map[string]string{
+	srv := newFakeServer(map[string]string{
 		"detect_changes":   changedJSON,
 		"get_test_targets": "internal/foo_test.go::TestFoo\ninternal/bar_test.go::TestBar",
 		"check_guards":     "boundary my-rule cross-layer import violates ui→db\n",
@@ -107,7 +107,7 @@ func TestRunPostTask_DeadCodeFiltersToChanged(t *testing.T) {
 		"changed_symbols":[{"id":"foo.go::Foo","name":"Foo","kind":"function"}],
 		"risk":"LOW","summary":"1 symbol"
 	}`
-	srv := newFakeBridge(map[string]string{
+	srv := newFakeServer(map[string]string{
 		"detect_changes":   changedJSON,
 		"get_test_targets": "",
 		"check_guards":     "",
@@ -128,7 +128,7 @@ func TestRunPostTask_DeadCodeFiltersToChanged(t *testing.T) {
 }
 
 func TestDispatch_RoutesStop(t *testing.T) {
-	srv := newFakeBridge(map[string]string{
+	srv := newFakeServer(map[string]string{
 		"detect_changes": `{"changed_files":["a.go"],"changed_symbols":[{"id":"a.go::A","name":"A","kind":"function"}],"risk":"LOW","summary":"1"}`,
 	})
 	defer srv.Close()

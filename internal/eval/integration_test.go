@@ -74,7 +74,7 @@ func TestEvalServerLifecycle(t *testing.T) {
 
 	// --- Step 1: Health check ---
 	t.Run("health_check", func(t *testing.T) {
-		resp, err := client.Get(ts.URL + "/health")
+		resp, err := client.Get(ts.URL + "/v1/health")
 		require.NoError(t, err)
 		defer func() { _ = resp.Body.Close() }()
 
@@ -96,7 +96,7 @@ func TestEvalServerLifecycle(t *testing.T) {
 	t.Run("tool_call_echo", func(t *testing.T) {
 		body := `{"arguments":{"message":"integration test"}}`
 		resp, err := client.Post(
-			ts.URL+"/tool/echo",
+			ts.URL+"/v1/tools/echo",
 			"application/json",
 			strings.NewReader(body),
 		)
@@ -116,7 +116,7 @@ func TestEvalServerLifecycle(t *testing.T) {
 
 	// --- Step 3: Stats endpoint ---
 	t.Run("stats", func(t *testing.T) {
-		resp, err := client.Get(ts.URL + "/stats")
+		resp, err := client.Get(ts.URL + "/v1/stats")
 		require.NoError(t, err)
 		defer func() { _ = resp.Body.Close() }()
 
@@ -135,7 +135,7 @@ func TestEvalServerLifecycle(t *testing.T) {
 	t.Run("unknown_tool_404", func(t *testing.T) {
 		body := `{"arguments":{}}`
 		resp, err := client.Post(
-			ts.URL+"/tool/nonexistent",
+			ts.URL+"/v1/tools/nonexistent",
 			"application/json",
 			strings.NewReader(body),
 		)

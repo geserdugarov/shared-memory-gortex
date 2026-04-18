@@ -60,7 +60,7 @@ func runPreCompact(data []byte, port int) {
 // buildPreCompactBriefing queries the bridge and renders a markdown briefing.
 // Returns empty string when the bridge is unreachable or returns no data.
 func buildPreCompactBriefing(port int) string {
-	stats := callBridgeTool(port, "graph_stats", nil)
+	stats := callServerTool(port, "graph_stats", nil)
 	if stats == "" {
 		// No bridge => nothing useful to say; let compaction proceed silently.
 		return ""
@@ -133,7 +133,7 @@ func renderStatsSummary(raw string) string {
 
 // renderSymbolHistory lists the top modified symbols (compact text).
 func renderSymbolHistory(port int) string {
-	raw := callBridgeTool(port, "get_symbol_history", map[string]any{"compact": true})
+	raw := callServerTool(port, "get_symbol_history", map[string]any{"compact": true})
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return ""
@@ -143,7 +143,7 @@ func renderSymbolHistory(port int) string {
 
 // renderHotspots returns the top hotspots from the analyze tool.
 func renderHotspots(port int) string {
-	raw := callBridgeTool(port, "analyze", map[string]any{
+	raw := callServerTool(port, "analyze", map[string]any{
 		"kind":    "hotspots",
 		"compact": true,
 	})
@@ -156,7 +156,7 @@ func renderHotspots(port int) string {
 
 // renderFeedback returns the most-useful symbols from past sessions.
 func renderFeedback(port int) string {
-	raw := callBridgeTool(port, "feedback", map[string]any{
+	raw := callServerTool(port, "feedback", map[string]any{
 		"action":  "query",
 		"top_n":   5,
 		"compact": true,
@@ -177,11 +177,11 @@ func cappedLines(s string, max int) string {
 	return strings.Join(lines, "\n") + "\n"
 }
 
-// callBridgeTool issues a POST /tool/{name} against the bridge and returns the
-// text content from the first response block. Returns empty string on any
-// error (bridge unreachable, non-200, missing content) so callers can degrade
+// callServerTool issues a POST /v1/tools/{name} against the server and returns
+// the text content from the first response block. Returns empty string on any
+// error (server unreachable, non-200, missing content) so callers can degrade
 // silently.
-func callBridgeTool(port int, name string, args map[string]any) string {
+func callServerTool(port int, name string, args map[string]any) string {
 	if args == nil {
 		args = map[string]any{}
 	}
@@ -191,7 +191,7 @@ func callBridgeTool(port int, name string, args map[string]any) string {
 	}
 
 	client := &http.Client{Timeout: 2 * time.Second}
-	url := fmt.Sprintf("http://localhost:%d/tool/%s", port, name)
+	url := fmt.Sprintf("http://localhost:%d/v1/tools/%s", port, name)
 	resp, err := client.Post(url, "application/json", bytes.NewReader(body))
 	if err != nil {
 		return ""

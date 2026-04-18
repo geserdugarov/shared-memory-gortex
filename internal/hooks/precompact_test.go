@@ -32,7 +32,7 @@ func TestRunPreCompact_NoBridge(t *testing.T) {
 }
 
 func TestRunPreCompact_RendersBriefing(t *testing.T) {
-	srv := newFakeBridge(map[string]string{
+	srv := newFakeServer(map[string]string{
 		"graph_stats": `{"total_nodes":4500,"total_edges":47000,"by_language":{"go":3000,"typescript":400,"markdown":500}}`,
 		"get_symbol_history": "method Server.handleBatchEdit internal/mcp/tools_enhancements.go:1200 (edits=3, CHURNING)\n" +
 			"function renderContextMarkdown internal/mcp/tools_enhancements.go:1790 (edits=1)",
@@ -79,7 +79,7 @@ func TestRunPreCompact_RendersBriefing(t *testing.T) {
 }
 
 func TestDispatch_RoutesPreCompact(t *testing.T) {
-	srv := newFakeBridge(map[string]string{
+	srv := newFakeServer(map[string]string{
 		"graph_stats": `{"total_nodes":1,"total_edges":0,"by_language":{"go":1}}`,
 	})
 	defer srv.Close()
@@ -128,15 +128,16 @@ func TestDispatch_UnknownEventSilent(t *testing.T) {
 
 // ---- helpers ----
 
-// newFakeBridge returns a test HTTP server that mimics /tool/{name} responses.
-// `toolResponses` maps tool name to the raw `text` field of the first content block.
-func newFakeBridge(toolResponses map[string]string) *httptest.Server {
+// newFakeServer returns a test HTTP server that mimics /v1/tools/{name}
+// responses. `toolResponses` maps tool name to the raw `text` field of the
+// first content block.
+func newFakeServer(toolResponses map[string]string) *httptest.Server {
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !strings.HasPrefix(r.URL.Path, "/tool/") {
+		if !strings.HasPrefix(r.URL.Path, "/v1/tools/") {
 			http.NotFound(w, r)
 			return
 		}
-		name := strings.TrimPrefix(r.URL.Path, "/tool/")
+		name := strings.TrimPrefix(r.URL.Path, "/v1/tools/")
 		text, ok := toolResponses[name]
 		if !ok {
 			http.NotFound(w, r)

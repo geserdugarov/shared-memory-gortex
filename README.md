@@ -544,15 +544,17 @@ gortex server --index /path/to/repo --web --port 4747
 gortex mcp --index /path/to/repo --server --port 8765
 ```
 
-**Endpoints:**
+**Endpoints (all under `/v1/`):**
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/health` | GET | Status, node/edge counts, uptime |
-| `/tools` | GET | List all available tools with descriptions |
-| `/tool/{name}` | POST | Invoke any MCP tool with JSON arguments |
-| `/stats` | GET | Graph statistics by kind and language |
+| `/v1/health` | GET | Status, node/edge counts, uptime |
+| `/v1/tools` | GET | List all available tools with descriptions |
+| `/v1/tools/{name}` | POST | Invoke any MCP tool with JSON arguments |
+| `/v1/stats` | GET | Graph statistics by kind and language |
+| `/v1/graph` | GET | Full brief-graph dump (nodes + edges + stats); accepts `?project=` and/or `?repo=` for scoping |
+| `/v1/events` | GET | SSE stream of graph-change events (requires `--watch`) |
 
-CORS is enabled by default (`--cors-origin '*'`). The server can serve the web UI on the same port with `--web`.
+CORS is enabled by default (`--cors-origin '*'`). The Next.js frontend in `web/` is the intended UI — it runs separately (`cd web && npm run dev`) and talks to the server over `/v1/*`.
 
 ## Cross-Repo API Contracts
 

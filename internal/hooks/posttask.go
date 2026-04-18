@@ -60,7 +60,7 @@ func runPostTask(data []byte, port int) {
 // returns a compact markdown summary. Returns empty string when there's
 // nothing to report or the bridge is unreachable.
 func buildPostTaskBriefing(port int) string {
-	raw := callBridgeTool(port, "detect_changes", map[string]any{
+	raw := callServerTool(port, "detect_changes", map[string]any{
 		"scope": "unstaged",
 	})
 	if raw == "" {
@@ -132,7 +132,7 @@ func buildPostTaskBriefing(port int) string {
 
 // renderTestTargets asks the bridge for test files that exercise the changed symbols.
 func renderTestTargets(port int, idsCSV string) string {
-	raw := callBridgeTool(port, "get_test_targets", map[string]any{
+	raw := callServerTool(port, "get_test_targets", map[string]any{
 		"ids":     idsCSV,
 		"compact": true,
 	})
@@ -145,7 +145,7 @@ func renderTestTargets(port int, idsCSV string) string {
 
 // renderGuardViolations asks the bridge for .gortex.yaml guard rule violations.
 func renderGuardViolations(port int, idsCSV string) string {
-	raw := callBridgeTool(port, "check_guards", map[string]any{
+	raw := callServerTool(port, "check_guards", map[string]any{
 		"ids":     idsCSV,
 		"compact": true,
 	})
@@ -160,7 +160,7 @@ func renderGuardViolations(port int, idsCSV string) string {
 // with the currently-changed symbols (i.e. "did this task leave anything
 // orphaned"). Emits nothing when the intersection is empty.
 func renderDeadCodeHits(port int, ids []string) string {
-	raw := callBridgeTool(port, "analyze", map[string]any{
+	raw := callServerTool(port, "analyze", map[string]any{
 		"kind":    "dead_code",
 		"compact": true,
 	})
@@ -200,7 +200,7 @@ func renderDeadCodeHits(port int, ids []string) string {
 // renderContractMismatches runs the contracts check and returns a short list
 // of orphan providers/consumers. Empty when all contracts are matched.
 func renderContractMismatches(port int) string {
-	raw := callBridgeTool(port, "contracts", map[string]any{
+	raw := callServerTool(port, "contracts", map[string]any{
 		"action":  "check",
 		"compact": true,
 	})

@@ -12,18 +12,19 @@ import (
 	"go.uber.org/zap"
 )
 
-// Handler extends server.Handler with eval-specific endpoints (/augment).
-// It inherits /health, /tools, /tool/{name}, and /stats from the base handler.
+// Handler extends server.Handler with eval-specific endpoints.
+// It inherits every /v1/* route from the base handler and adds
+// POST /v1/augment for the eval augment pipeline.
 type Handler struct {
 	*server.Handler
 }
 
 // NewHandler creates an eval HTTP handler that dispatches to MCP tools.
-// It provides all bridge endpoints plus the eval-specific /augment endpoint.
+// It provides all server /v1/* endpoints plus POST /v1/augment.
 func NewHandler(mcpServer *mcpserver.MCPServer, g *graph.Graph, version string, logger *zap.Logger) *Handler {
 	base := server.NewHandler(mcpServer, g, version, logger)
 	h := &Handler{Handler: base}
-	base.Mux().HandleFunc("POST /augment", h.handleAugment)
+	base.Mux().HandleFunc("POST /v1/augment", h.handleAugment)
 	return h
 }
 

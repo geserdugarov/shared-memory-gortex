@@ -53,7 +53,7 @@ func newTestHandler(t *testing.T) *Handler {
 
 func TestHealthEndpoint(t *testing.T) {
 	h := newTestHandler(t)
-	req := httptest.NewRequest(http.MethodGet, "/health", nil)
+	req := httptest.NewRequest(http.MethodGet, "/v1/health", nil)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 
@@ -70,7 +70,7 @@ func TestHealthEndpoint(t *testing.T) {
 
 func TestListToolsEndpoint(t *testing.T) {
 	h := newTestHandler(t)
-	req := httptest.NewRequest(http.MethodGet, "/tools", nil)
+	req := httptest.NewRequest(http.MethodGet, "/v1/tools", nil)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 
@@ -85,7 +85,7 @@ func TestListToolsEndpoint(t *testing.T) {
 
 func TestStatsEndpoint(t *testing.T) {
 	h := newTestHandler(t)
-	req := httptest.NewRequest(http.MethodGet, "/stats", nil)
+	req := httptest.NewRequest(http.MethodGet, "/v1/stats", nil)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 
@@ -100,7 +100,7 @@ func TestStatsEndpoint(t *testing.T) {
 func TestToolCallValid(t *testing.T) {
 	h := newTestHandler(t)
 	body := `{"arguments":{"message":"hello world"}}`
-	req := httptest.NewRequest(http.MethodPost, "/tool/echo", strings.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/v1/tools/echo", strings.NewReader(body))
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 
@@ -115,7 +115,7 @@ func TestToolCallValid(t *testing.T) {
 
 func TestToolCallUnknownTool(t *testing.T) {
 	h := newTestHandler(t)
-	req := httptest.NewRequest(http.MethodPost, "/tool/nonexistent", strings.NewReader("{}"))
+	req := httptest.NewRequest(http.MethodPost, "/v1/tools/nonexistent", strings.NewReader("{}"))
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 
@@ -131,7 +131,7 @@ func TestToolCallUnknownTool(t *testing.T) {
 
 func TestToolCallMalformedJSON(t *testing.T) {
 	h := newTestHandler(t)
-	req := httptest.NewRequest(http.MethodPost, "/tool/echo", strings.NewReader("{bad"))
+	req := httptest.NewRequest(http.MethodPost, "/v1/tools/echo", strings.NewReader("{bad"))
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 
@@ -140,7 +140,7 @@ func TestToolCallMalformedJSON(t *testing.T) {
 
 func TestToolCallEmptyName(t *testing.T) {
 	h := newTestHandler(t)
-	req := httptest.NewRequest(http.MethodPost, "/tool/", strings.NewReader("{}"))
+	req := httptest.NewRequest(http.MethodPost, "/v1/tools/", strings.NewReader("{}"))
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 
@@ -160,7 +160,7 @@ func TestPanicRecovery(t *testing.T) {
 	)
 	h := NewHandler(srv, g, "0.0.1-test", zap.NewNop())
 
-	req := httptest.NewRequest(http.MethodPost, "/tool/panic_tool", strings.NewReader("{}"))
+	req := httptest.NewRequest(http.MethodPost, "/v1/tools/panic_tool", strings.NewReader("{}"))
 	rec := httptest.NewRecorder()
 	assert.NotPanics(t, func() { h.ServeHTTP(rec, req) })
 	assert.Equal(t, http.StatusInternalServerError, rec.Code)

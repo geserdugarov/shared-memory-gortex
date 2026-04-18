@@ -14,7 +14,7 @@ func TestCORS_Wildcard(t *testing.T) {
 	})
 	h := WithCORS(inner, CORSOptions{})
 
-	req := httptest.NewRequest(http.MethodGet, "/health", nil)
+	req := httptest.NewRequest(http.MethodGet, "/v1/health", nil)
 	req.Header.Set("Origin", "http://localhost:3000")
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -30,7 +30,7 @@ func TestCORS_SpecificOrigin(t *testing.T) {
 	h := WithCORS(inner, CORSOptions{AllowOrigins: []string{"http://localhost:3000", "http://example.com"}})
 
 	// Matching origin.
-	req := httptest.NewRequest(http.MethodGet, "/health", nil)
+	req := httptest.NewRequest(http.MethodGet, "/v1/health", nil)
 	req.Header.Set("Origin", "http://localhost:3000")
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -39,7 +39,7 @@ func TestCORS_SpecificOrigin(t *testing.T) {
 	assert.Equal(t, "Origin", rec.Header().Get("Vary"))
 
 	// Non-matching origin.
-	req = httptest.NewRequest(http.MethodGet, "/health", nil)
+	req = httptest.NewRequest(http.MethodGet, "/v1/health", nil)
 	req.Header.Set("Origin", "http://evil.com")
 	rec = httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -54,7 +54,7 @@ func TestCORS_Preflight(t *testing.T) {
 	})
 	h := WithCORS(inner, CORSOptions{})
 
-	req := httptest.NewRequest(http.MethodOptions, "/tool/echo", nil)
+	req := httptest.NewRequest(http.MethodOptions, "/v1/tools/echo", nil)
 	req.Header.Set("Origin", "http://localhost:3000")
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -70,7 +70,7 @@ func TestCORS_NoOriginHeader(t *testing.T) {
 	})
 	h := WithCORS(inner, CORSOptions{})
 
-	req := httptest.NewRequest(http.MethodGet, "/health", nil)
+	req := httptest.NewRequest(http.MethodGet, "/v1/health", nil)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 

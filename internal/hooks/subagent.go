@@ -31,7 +31,7 @@ func enrichTask(toolInput map[string]any, port int) enrichResult {
 		task = task[:maxTaskLen]
 	}
 
-	stats := callBridgeTool(port, "graph_stats", nil)
+	stats := callServerTool(port, "graph_stats", nil)
 	if stats == "" {
 		// Bridge unreachable — silent.
 		return enrichResult{}
@@ -89,7 +89,7 @@ const gortexToolGuidance = "### Use Gortex MCP tools instead of Read/Grep/Glob\n
 // renderTaskContext calls smart_context with the subagent task text and
 // returns a compacted body. Falls back to empty on any error.
 func renderTaskContext(port int, task string) string {
-	raw := callBridgeTool(port, "smart_context", map[string]any{
+	raw := callServerTool(port, "smart_context", map[string]any{
 		"task":    task,
 		"compact": true,
 	})

@@ -27,7 +27,7 @@ func TestEnrichTask_EmptyTask_Silent(t *testing.T) {
 }
 
 func TestEnrichTask_Briefing(t *testing.T) {
-	srv := newFakeBridge(map[string]string{
+	srv := newFakeServer(map[string]string{
 		"graph_stats":        `{"total_nodes":610,"total_edges":3519,"by_language":{"go":500,"markdown":50,"yaml":10}}`,
 		"smart_context":      "function enrichRead internal/hooks/pretooluse.go:106\nfunction runPreCompact internal/hooks/precompact.go:33",
 		"get_symbol_history": "method Server.handleHook internal/mcp/tools.go:2000 (edits=2)",
@@ -78,7 +78,7 @@ func TestEnrichTask_Briefing(t *testing.T) {
 // not be able to reach a state where they receive stats but no guidance to
 // use graph tools over Read/Grep.
 func TestEnrichTask_AlwaysIncludesToolGuidance(t *testing.T) {
-	srv := newFakeBridge(map[string]string{
+	srv := newFakeServer(map[string]string{
 		"graph_stats": `{"total_nodes":1,"total_edges":0,"by_language":{"go":1}}`,
 	})
 	defer srv.Close()
@@ -99,7 +99,7 @@ func TestEnrichTask_AlwaysIncludesToolGuidance(t *testing.T) {
 func TestEnrichTask_OnlyStats_StillBriefs(t *testing.T) {
 	// smart_context and get_symbol_history may return nothing early in a session;
 	// as long as graph_stats works we should still emit orientation.
-	srv := newFakeBridge(map[string]string{
+	srv := newFakeServer(map[string]string{
 		"graph_stats": `{"total_nodes":100,"total_edges":200,"by_language":{"go":100}}`,
 	})
 	defer srv.Close()
@@ -118,7 +118,7 @@ func TestEnrichTask_OnlyStats_StillBriefs(t *testing.T) {
 }
 
 func TestPreToolUse_RoutesTask(t *testing.T) {
-	srv := newFakeBridge(map[string]string{
+	srv := newFakeServer(map[string]string{
 		"graph_stats":   `{"total_nodes":1,"total_edges":0,"by_language":{"go":1}}`,
 		"smart_context": "function foo internal/foo.go:1",
 	})

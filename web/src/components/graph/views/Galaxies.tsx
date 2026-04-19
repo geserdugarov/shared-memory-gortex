@@ -1,13 +1,17 @@
 'use client'
 
 import { useMemo } from 'react'
-import { Canvas, type ThreeEvent, useThree } from '@react-three/fiber'
+import { Canvas, type ThreeEvent } from '@react-three/fiber'
 import { OrbitControls, Html } from '@react-three/drei'
 import * as THREE from 'three'
 import { useInspector } from '@/lib/inspector'
 import type { GraphData, GortexNode } from '@/lib/types'
 import type { Repo } from '@/lib/schema'
 import { computeDegree, groupByRepo, stableSortByDegreeDesc, seededRng } from './layout'
+import {
+  EmptyState, LineSegs, PointsCloud, RaycastThreshold,
+  hashStr, normalizeCssColor, type LineSeg,
+} from './three-common'
 
 const MAX_PER_REPO = 80
 const MAX_EDGES = 500
@@ -43,7 +47,7 @@ export function ThreeDGalaxies({
     const empty = {
       coolNodes: [] as GNode[],
       hotNodes: [] as GNode[],
-      edges: [] as Array<{ a: THREE.Vector3; b: THREE.Vector3; color: THREE.Color }>,
+      edges: [] as LineSeg[],
       galaxies: [] as GalaxyCenter[],
     }
     if (!graph) return empty
@@ -55,7 +59,7 @@ export function ThreeDGalaxies({
 
     const galaxies: GalaxyCenter[] = visibleRepos.map((rep, idx) => {
       const a = (idx / Math.max(1, visibleRepos.length)) * Math.PI * 2
-      const yOff = ((hash(rep.id) % 1000) / 1000 - 0.5) * 2.5
+      const yOff = ((hashStr(rep.id) % 1000) / 1000 - 0.5) * 2.5
       return {
         repo: rep,
         center: new THREE.Vector3(
@@ -70,7 +74,7 @@ export function ThreeDGalaxies({
     const hotNodes: GNode[] = []
     const index = new Map<string, GNode>()
     galaxies.forEach(({ repo, center }) => {
-      const rng = seededRng(hash(repo.id) + 59)
+      const rng = seededRng(hashStr(repo.id) + 59)
       const bucket = buckets.get(repo.id) ?? []
       const sorted = stableSortByDegreeDesc(bucket, degree).slice(0, MAX_PER_REPO)
       const maxDeg = Math.max(1, ...sorted.map((n) => degree.get(n.id) ?? 0))
@@ -99,7 +103,7 @@ export function ThreeDGalaxies({
 
     const pink = new THREE.Color(HOT_COLOR)
     const accent = new THREE.Color(ACCENT_COLOR)
-    const edges: Array<{ a: THREE.Vector3; b: THREE.Vector3; color: THREE.Color }> = []
+    const edges: LineSeg[] = []
     for (const e of graph.edges) {
       const a = index.get(e.from)
       const b = index.get(e.to)
@@ -130,15 +134,7 @@ export function ThreeDGalaxies({
   }
 
   if (!graph || (coolNodes.length === 0 && hotNodes.length === 0)) {
-    return (
-      <div style={{
-        display: 'flex', alignItems: 'center', justifyContent: 'center',
-        width: '100%', height: '100%', color: 'var(--fg-3)',
-        fontFamily: 'JetBrains Mono', fontSize: 12,
-      }}>
-        No graph data — run `gortex index .` to populate.
-      </div>
-    )
+    return <EmptyState message="No graph data — run `gortex index .` to populate." />
   }
 
   return (
@@ -160,7 +156,7 @@ export function ThreeDGalaxies({
         </mesh>
       ))}
 
-      <Edges edges={edges} />
+      <LineSegs segments={edges} opacity={0.45} />
       <PointsCloud nodes={coolNodes} size={POINT_SIZE} onClick={pick(coolNodes)} />
       <PointsCloud nodes={hotNodes}  size={HOT_POINT_SIZE} onClick={pick(hotNodes)} forceColor={HOT_COLOR} />
 
@@ -191,110 +187,4 @@ export function ThreeDGalaxies({
       <OrbitControls enablePan enableZoom enableRotate makeDefault />
     </Canvas>
   )
-}
-
-function RaycastThreshold({ threshold }: { threshold: number }) {
-  const { raycaster } = useThree()
-  raycaster.params.Points = { threshold }
-  return null
-}
-
-function PointsCloud({
-  nodes, size, onClick, forceColor,
-}: {
-  nodes: GNode[]
-  size: number
-  onClick: (e: ThreeEvent<MouseEvent>) => void
-  forceColor?: string
-}) {
-  const geom = useMemo(() => {
-    const g = new THREE.BufferGeometry()
-    if (nodes.length === 0) return g
-    const positions = new Float32Array(nodes.length * 3)
-    const colors = new Float32Array(nodes.length * 3)
-    const override = forceColor ? new THREE.Color(forceColor) : null
-    nodes.forEach((n, i) => {
-      positions[i * 3] = n.pos.x
-      positions[i * 3 + 1] = n.pos.y
-      positions[i * 3 + 2] = n.pos.z
-      const c = override ?? n.color
-      colors[i * 3] = c.r
-      colors[i * 3 + 1] = c.g
-      colors[i * 3 + 2] = c.b
-    })
-    g.setAttribute('position', new THREE.BufferAttribute(positions, 3))
-    g.setAttribute('color', new THREE.BufferAttribute(colors, 3))
-    return g
-  }, [nodes, forceColor])
-
-  if (nodes.length === 0) return null
-  return (
-    <points onClick={onClick}>
-      <primitive object={geom} attach="geometry" />
-      <pointsMaterial
-        vertexColors
-        size={size}
-        sizeAttenuation
-        transparent
-        opacity={0.95}
-        depthWrite={false}
-      />
-    </points>
-  )
-}
-
-function Edges({ edges }: { edges: Array<{ a: THREE.Vector3; b: THREE.Vector3; color: THREE.Color }> }) {
-  const geom = useMemo(() => {
-    const g = new THREE.BufferGeometry()
-    if (edges.length === 0) return g
-    const positions = new Float32Array(edges.length * 6)
-    const colors = new Float32Array(edges.length * 6)
-    edges.forEach((e, i) => {
-      positions[i * 6] = e.a.x
-      positions[i * 6 + 1] = e.a.y
-      positions[i * 6 + 2] = e.a.z
-      positions[i * 6 + 3] = e.b.x
-      positions[i * 6 + 4] = e.b.y
-      positions[i * 6 + 5] = e.b.z
-      colors[i * 6] = e.color.r
-      colors[i * 6 + 1] = e.color.g
-      colors[i * 6 + 2] = e.color.b
-      colors[i * 6 + 3] = e.color.r
-      colors[i * 6 + 4] = e.color.g
-      colors[i * 6 + 5] = e.color.b
-    })
-    g.setAttribute('position', new THREE.BufferAttribute(positions, 3))
-    g.setAttribute('color', new THREE.BufferAttribute(colors, 3))
-    return g
-  }, [edges])
-
-  if (edges.length === 0) return null
-  return (
-    <lineSegments>
-      <primitive object={geom} attach="geometry" />
-      <lineBasicMaterial vertexColors transparent opacity={0.45} depthWrite={false} />
-    </lineSegments>
-  )
-}
-
-function hash(s: string): number {
-  let h = 2166136261 >>> 0
-  for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619) >>> 0 }
-  return h
-}
-
-// THREE.Color does not parse CSS color-4 (oklch/oklab/color()). Bounce the
-// value through a canvas 2d context so the browser normalises it to
-// #rrggbb or rgba(...) before we hand it to three.
-let _cssColorCtx: CanvasRenderingContext2D | null = null
-function normalizeCssColor(raw: string, fallback = '#9ece6a'): string {
-  if (typeof document === 'undefined') return fallback
-  if (!_cssColorCtx) _cssColorCtx = document.createElement('canvas').getContext('2d')
-  if (!_cssColorCtx) return fallback
-  _cssColorCtx.fillStyle = '#000'
-  const before = _cssColorCtx.fillStyle
-  _cssColorCtx.fillStyle = raw
-  const after = _cssColorCtx.fillStyle
-  if (typeof after !== 'string' || after === before) return fallback
-  return after
 }

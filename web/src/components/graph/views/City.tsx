@@ -9,7 +9,7 @@ import type { GraphData, GortexNode } from '@/lib/types'
 import type { Repo } from '@/lib/schema'
 import { computeDegree, groupByRepo, stableSortByDegreeDesc } from './layout'
 import {
-  EmptyState, LineSegs, normalizeCssColor, type LineSeg,
+  EmptyState, LineSegs, TopLabels, normalizeCssColor, type LineSeg,
 } from './three-common'
 
 const MAX_REPOS = 12
@@ -25,6 +25,7 @@ const MAX_HEIGHT = 3.0
 const FOOTPRINT_FILL = 0.7
 const HOT_COLOR = '#f7768e'
 const MAX_SKYBRIDGES = 80
+const TOP_LABEL_COUNT = 20
 
 type Building = {
   pos: THREE.Vector3       // centre of the base
@@ -32,6 +33,7 @@ type Building = {
   size: THREE.Vector3      // (width, height, depth)
   color: THREE.Color
   hot: boolean
+  degree: number
   repo: string
   node: GortexNode
 }
@@ -44,19 +46,21 @@ type District = {
 }
 
 export function ThreeDCity({
-  graph, repos, filterRepos,
+  graph, repos, filterRepos, filterKinds,
 }: {
   graph: GraphData | null
   repos: Repo[]
   filterRepos: Set<string>
+  filterKinds: Set<string>
 }) {
   const setSym = useInspector((s) => s.setSym)
 
-  const { districts, buildings, skybridges } = useMemo(() => {
+  const { districts, buildings, skybridges, topLabels } = useMemo(() => {
     const empty = {
       districts: [] as District[],
       buildings: [] as Building[],
       skybridges: [] as LineSeg[],
+      topLabels: [] as Building[],
     }
     if (!graph) return empty
     const degree = computeDegree(graph.nodes, graph.edges)
@@ -91,7 +95,10 @@ export function ThreeDCity({
     const fpD = cellD * FOOTPRINT_FILL
 
     districts.forEach(({ rep, cx, cz, color }) => {
-      const sorted = stableSortByDegreeDesc(buckets.get(rep.id) ?? [], degree).slice(0, BLD_CAP)
+      const bucket = (buckets.get(rep.id) ?? []).filter(
+        (n) => !filterKinds.size || filterKinds.has(n.kind),
+      )
+      const sorted = stableSortByDegreeDesc(bucket, degree).slice(0, BLD_CAP)
       const maxDeg = Math.max(1, ...sorted.map((n) => degree.get(n.id) ?? 0))
       const repoColor = new THREE.Color(color)
       sorted.forEach((n, k) => {
@@ -109,6 +116,7 @@ export function ThreeDCity({
           size: new THREE.Vector3(fpW, h, fpD),
           color: repoColor.clone(),
           hot,
+          degree: deg,
           repo: rep.id,
           node: n,
         }
@@ -128,8 +136,11 @@ export function ThreeDCity({
       if (skybridges.length >= MAX_SKYBRIDGES) break
     }
 
-    return { districts, buildings, skybridges }
-  }, [graph, repos, filterRepos])
+    const topLabels = [...buildings]
+      .sort((a, b) => b.degree - a.degree)
+      .slice(0, TOP_LABEL_COUNT)
+    return { districts, buildings, skybridges, topLabels }
+  }, [graph, repos, filterRepos, filterKinds])
 
   if (!graph || districts.length === 0) {
     return <EmptyState message="No graph data — run `gortex index .` to populate." />
@@ -205,6 +216,14 @@ export function ThreeDCity({
           </div>
         </Html>
       ))}
+
+      <TopLabels
+        items={topLabels.map((b) => ({
+          id: b.node.id,
+          name: b.node.name,
+          pos: new THREE.Vector3(b.top.x, b.top.y + 0.18, b.top.z),
+        }))}
+      />
 
       <OrbitControls enablePan enableZoom enableRotate makeDefault target={[0, 1, 0]} />
     </Canvas>

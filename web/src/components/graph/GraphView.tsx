@@ -15,14 +15,18 @@ function RepoFilterPanel({
   repos,
   kinds,
   filtered,
+  filterKinds,
   onToggle,
   onOnly,
+  onToggleKind,
 }: {
   repos: Repo[]
   kinds: KindCount[]
   filtered: Set<string>
+  filterKinds: Set<string>
   onToggle: (id: string) => void
   onOnly: (id: string) => void
+  onToggleKind: (kind: string) => void
 }) {
   return (
     <div>
@@ -62,7 +66,12 @@ function RepoFilterPanel({
       <div className="vstack" style={{ gap: 4 }}>
         {kinds.map((k) => (
           <label key={k.name} className="hstack" style={{ gap: 8, padding: '3px 0', fontSize: 11.5 }}>
-            <input type="checkbox" defaultChecked />
+            <input
+              type="checkbox"
+              checked={filterKinds.has(k.name)}
+              onChange={() => onToggleKind(k.name)}
+              aria-label={`Toggle kind ${k.name}`}
+            />
             <span className={`swatch sw-${k.name}`} />
             <span className="mono" style={{ flex: 1 }}>{k.name}</span>
             <span className="mono faint" style={{ fontSize: 10.5 }}>{k.count.toLocaleString()}</span>
@@ -94,12 +103,21 @@ export function GraphView() {
   const { data: graph, loading: graphLoading, error: graphError } = useGraph()
   const [mode, setMode] = useState<Mode>('constellation')
   const [filtered, setFiltered] = useState<Set<string>>(new Set())
+  const [filterKinds, setFilterKinds] = useState<Set<string>>(new Set())
 
   useEffect(() => {
     if (repos && filtered.size === 0) {
       setFiltered(new Set(repos.map((r) => r.id)))
     }
   }, [repos, filtered.size])
+
+  // Default kinds: everything except `file`. File nodes inflate the graph
+  // without adding useful topology, so they start off; user can opt in.
+  useEffect(() => {
+    if (dash?.kinds && filterKinds.size === 0) {
+      setFilterKinds(new Set(dash.kinds.filter((k) => k.name !== 'file').map((k) => k.name)))
+    }
+  }, [dash?.kinds, filterKinds.size])
 
   const toggle = (id: string) => {
     const n = new Set(filtered)
@@ -108,6 +126,12 @@ export function GraphView() {
     setFiltered(n)
   }
   const only = (id: string) => setFiltered(new Set([id]))
+  const toggleKind = (kind: string) => {
+    const n = new Set(filterKinds)
+    if (n.has(kind)) n.delete(kind)
+    else n.add(kind)
+    setFilterKinds(n)
+  }
 
   const repoList = repos ?? []
   const visibleRepos = repoList.filter((r) => !filtered.size || filtered.has(r.id))
@@ -132,7 +156,15 @@ export function GraphView() {
       )}
       <div className="graph-wrap">
         <div className="graph-side">
-          <RepoFilterPanel repos={repoList} kinds={kinds} filtered={filtered} onToggle={toggle} onOnly={only} />
+          <RepoFilterPanel
+            repos={repoList}
+            kinds={kinds}
+            filtered={filtered}
+            filterKinds={filterKinds}
+            onToggle={toggle}
+            onOnly={only}
+            onToggleKind={toggleKind}
+          />
         </div>
         <div className="graph-canvas">
           <div className="graph-toolbar">
@@ -147,8 +179,18 @@ export function GraphView() {
           </div>
 
           <div style={{ width: '100%', height: '100%' }}>
-            {mode === 'constellation' && <GraphConstellation graph={graph} repos={repoList} filterRepos={filtered} />}
-            {mode === '3d' && <Graph3D graph={graph} repos={repoList} filterRepos={filtered} />}
+            {mode === 'constellation' && (
+              <GraphConstellation
+                graph={graph} repos={repoList}
+                filterRepos={filtered} filterKinds={filterKinds}
+              />
+            )}
+            {mode === '3d' && (
+              <Graph3D
+                graph={graph} repos={repoList}
+                filterRepos={filtered} filterKinds={filterKinds}
+              />
+            )}
           </div>
 
           <div className="legend-box">

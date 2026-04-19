@@ -9,7 +9,7 @@ import type { GraphData, GortexNode } from '@/lib/types'
 import type { Repo } from '@/lib/schema'
 import { computeDegree, groupByRepo, stableSortByDegreeDesc, seededRng } from './layout'
 import {
-  EmptyState, LineSegs, PointsCloud, RaycastThreshold,
+  EmptyState, LineSegs, PointsCloud, RaycastThreshold, TopLabels,
   hashStr, normalizeCssColor, type LineSeg,
 } from './three-common'
 
@@ -17,17 +17,20 @@ const MAX_PER_REPO = 80
 const MAX_EDGES = 500
 const SCENE_RADIUS = 6
 const GALAXY_RADIUS = 2.2
-const POINT_SIZE = 0.085
-const HOT_POINT_SIZE = 0.14
+// World-space point size = BASE + K·log2(deg+1), attenuated by camera.
+const POINT_SIZE_BASE = 0.05
+const POINT_SIZE_K = 0.025
 const HOT_COLOR = '#f7768e'
 const ACCENT_COLOR = '#9ece6a'
-const PICK_THRESHOLD = 0.08
+const PICK_THRESHOLD = 0.09
+const TOP_LABEL_COUNT = 20
 
 type GNode = {
   pos: THREE.Vector3
   color: THREE.Color
   repo: string
   hot: boolean
+  degree: number
   id: string
   node: GortexNode
 }
@@ -35,20 +38,22 @@ type GNode = {
 type GalaxyCenter = { repo: Repo; center: THREE.Vector3 }
 
 export function ThreeDGalaxies({
-  graph, repos, filterRepos,
+  graph, repos, filterRepos, filterKinds,
 }: {
   graph: GraphData | null
   repos: Repo[]
   filterRepos: Set<string>
+  filterKinds: Set<string>
 }) {
   const setSym = useInspector((s) => s.setSym)
 
-  const { coolNodes, hotNodes, edges, galaxies } = useMemo(() => {
+  const { coolNodes, hotNodes, edges, galaxies, topLabels } = useMemo(() => {
     const empty = {
       coolNodes: [] as GNode[],
       hotNodes: [] as GNode[],
       edges: [] as LineSeg[],
       galaxies: [] as GalaxyCenter[],
+      topLabels: [] as GNode[],
     }
     if (!graph) return empty
     const degree = computeDegree(graph.nodes, graph.edges)
@@ -75,7 +80,9 @@ export function ThreeDGalaxies({
     const index = new Map<string, GNode>()
     galaxies.forEach(({ repo, center }) => {
       const rng = seededRng(hashStr(repo.id) + 59)
-      const bucket = buckets.get(repo.id) ?? []
+      const bucket = (buckets.get(repo.id) ?? []).filter(
+        (n) => !filterKinds.size || filterKinds.has(n.kind),
+      )
       const sorted = stableSortByDegreeDesc(bucket, degree).slice(0, MAX_PER_REPO)
       const maxDeg = Math.max(1, ...sorted.map((n) => degree.get(n.id) ?? 0))
       const col = new THREE.Color(normalizeCssColor(repo.color))
@@ -93,6 +100,7 @@ export function ThreeDGalaxies({
           color: col.clone(),
           repo: repo.id,
           hot: deg >= Math.max(8, maxDeg * 0.7),
+          degree: deg,
           id: n.id,
           node: n,
         }
@@ -114,8 +122,11 @@ export function ThreeDGalaxies({
       edges.push({ a: a.pos, b: b.pos, color })
       if (edges.length >= MAX_EDGES) break
     }
-    return { coolNodes, hotNodes, edges, galaxies }
-  }, [graph, repos, filterRepos])
+    const topLabels = [...coolNodes, ...hotNodes]
+      .sort((a, b) => b.degree - a.degree)
+      .slice(0, TOP_LABEL_COUNT)
+    return { coolNodes, hotNodes, edges, galaxies, topLabels }
+  }, [graph, repos, filterRepos, filterKinds])
 
   const pick = (list: GNode[]) => (e: ThreeEvent<MouseEvent>) => {
     e.stopPropagation()
@@ -157,8 +168,17 @@ export function ThreeDGalaxies({
       ))}
 
       <LineSegs segments={edges} opacity={0.45} />
-      <PointsCloud nodes={coolNodes} size={POINT_SIZE} onClick={pick(coolNodes)} />
-      <PointsCloud nodes={hotNodes}  size={HOT_POINT_SIZE} onClick={pick(hotNodes)} forceColor={HOT_COLOR} />
+      <PointsCloud
+        nodes={coolNodes}
+        sizes={(i) => sizeForDegree(coolNodes[i].degree)}
+        onClick={pick(coolNodes)}
+      />
+      <PointsCloud
+        nodes={hotNodes}
+        sizes={(i) => sizeForDegree(hotNodes[i].degree)}
+        onClick={pick(hotNodes)}
+        forceColor={HOT_COLOR}
+      />
 
       {galaxies.map((g) => (
         <Html
@@ -184,7 +204,19 @@ export function ThreeDGalaxies({
         </Html>
       ))}
 
+      <TopLabels
+        items={topLabels.map((n) => ({
+          id: n.id,
+          name: n.node.name,
+          pos: new THREE.Vector3(n.pos.x, n.pos.y + 0.12 + sizeForDegree(n.degree), n.pos.z),
+        }))}
+      />
+
       <OrbitControls enablePan enableZoom enableRotate makeDefault />
     </Canvas>
   )
+}
+
+function sizeForDegree(deg: number): number {
+  return POINT_SIZE_BASE + POINT_SIZE_K * Math.log2(deg + 1)
 }

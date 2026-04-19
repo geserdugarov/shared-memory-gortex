@@ -17,11 +17,12 @@ const MODES: { id: ThreeDMode; label: string; hint: string }[] = [
 ]
 
 export function Graph3D({
-  graph, repos, filterRepos,
+  graph, repos, filterRepos, filterKinds,
 }: {
   graph: GraphData | null
   repos: Repo[]
   filterRepos: Set<string>
+  filterKinds: Set<string>
 }) {
   const [sub, setSub] = useState<ThreeDMode>('galaxies')
 
@@ -56,9 +57,9 @@ export function Graph3D({
         <div className="threeD-picker-hint">{mode.hint}</div>
       </div>
       <div style={{ width: '100%', height: '100%' }}>
-        {sub === 'strata'   && <ThreeDStrata   graph={graph} repos={repos} filterRepos={filterRepos} />}
-        {sub === 'galaxies' && <ThreeDGalaxies graph={graph} repos={repos} filterRepos={filterRepos} />}
-        {sub === 'city'     && <ThreeDCity     graph={graph} repos={repos} filterRepos={filterRepos} />}
+        {sub === 'strata'   && <ThreeDStrata   graph={graph} repos={repos} filterRepos={filterRepos} filterKinds={filterKinds} />}
+        {sub === 'galaxies' && <ThreeDGalaxies graph={graph} repos={repos} filterRepos={filterRepos} filterKinds={filterKinds} />}
+        {sub === 'city'     && <ThreeDCity     graph={graph} repos={repos} filterRepos={filterRepos} filterKinds={filterKinds} />}
       </div>
     </div>
   )

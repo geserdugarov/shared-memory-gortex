@@ -9,7 +9,7 @@ import type { GraphData, GortexNode } from '@/lib/types'
 import type { Repo } from '@/lib/schema'
 import { computeDegree, groupByRepo, stableSortByDegreeDesc, seededRng } from './layout'
 import {
-  EmptyState, LineSegs, PointsCloud, RaycastThreshold,
+  EmptyState, LineSegs, PointsCloud, RaycastThreshold, TopLabels,
   hashStr, normalizeCssColor, type LineSeg,
 } from './three-common'
 
@@ -21,17 +21,20 @@ const PLANE_X = 12
 const PLANE_Z = 6
 const PLANE_SEP = 2.6
 const NODE_LIFT = 0.06
-const POINT_SIZE = 0.11
-const HOT_POINT_SIZE = 0.17
+// World-space point size = BASE + K·log2(deg+1), attenuated by camera.
+const POINT_SIZE_BASE = 0.07
+const POINT_SIZE_K = 0.03
 const HOT_COLOR = '#f7768e'
 const ACCENT_COLOR = '#9ece6a'
 const PICK_THRESHOLD = 0.1
+const TOP_LABEL_COUNT = 24
 
 type SNode = {
   pos: THREE.Vector3
   color: THREE.Color
   repo: string
   hot: boolean
+  degree: number
   id: string
   node: GortexNode
 }
@@ -39,21 +42,23 @@ type SNode = {
 type PlaneLayout = { rep: Repo; y: number; color: string }
 
 export function ThreeDStrata({
-  graph, repos, filterRepos,
+  graph, repos, filterRepos, filterKinds,
 }: {
   graph: GraphData | null
   repos: Repo[]
   filterRepos: Set<string>
+  filterKinds: Set<string>
 }) {
   const setSym = useInspector((s) => s.setSym)
 
-  const { planes, coolNodes, hotNodes, hotEdges, coldEdges } = useMemo(() => {
+  const { planes, coolNodes, hotNodes, hotEdges, coldEdges, topLabels } = useMemo(() => {
     const empty = {
       planes: [] as PlaneLayout[],
       coolNodes: [] as SNode[],
       hotNodes: [] as SNode[],
       hotEdges: [] as LineSeg[],
       coldEdges: [] as LineSeg[],
+      topLabels: [] as SNode[],
     }
     if (!graph) return empty
     const degree = computeDegree(graph.nodes, graph.edges)
@@ -76,7 +81,10 @@ export function ThreeDStrata({
 
     planes.forEach(({ rep, y, color }) => {
       const rng = seededRng(hashStr(rep.id) + 31)
-      const sorted = stableSortByDegreeDesc(buckets.get(rep.id) ?? [], degree).slice(0, MAX_PER_PLANE)
+      const bucket = (buckets.get(rep.id) ?? []).filter(
+        (n) => !filterKinds.size || filterKinds.has(n.kind),
+      )
+      const sorted = stableSortByDegreeDesc(bucket, degree).slice(0, MAX_PER_PLANE)
       const maxDeg = Math.max(1, ...sorted.map((n) => degree.get(n.id) ?? 0))
       const col = new THREE.Color(color)
       for (const n of sorted) {
@@ -89,6 +97,7 @@ export function ThreeDStrata({
           color: col.clone(),
           repo: rep.id,
           hot,
+          degree: deg,
           id: n.id,
           node: n,
         }
@@ -113,8 +122,11 @@ export function ThreeDStrata({
       ;(e.kind === 'calls' ? hotEdges : coldEdges).push(seg)
       if (hotEdges.length + coldEdges.length >= MAX_CROSS_EDGES) break
     }
-    return { planes, coolNodes, hotNodes, hotEdges, coldEdges }
-  }, [graph, repos, filterRepos])
+    const topLabels = [...coolNodes, ...hotNodes]
+      .sort((a, b) => b.degree - a.degree)
+      .slice(0, TOP_LABEL_COUNT)
+    return { planes, coolNodes, hotNodes, hotEdges, coldEdges, topLabels }
+  }, [graph, repos, filterRepos, filterKinds])
 
   const planeEdgesGeom = useMemo(() => new THREE.EdgesGeometry(
     new THREE.PlaneGeometry(PLANE_X, PLANE_Z).rotateX(-Math.PI / 2),
@@ -170,8 +182,17 @@ export function ThreeDStrata({
       <LineSegs segments={coldEdges} opacity={0.28} />
       <LineSegs segments={hotEdges} opacity={0.85} />
 
-      <PointsCloud nodes={coolNodes} size={POINT_SIZE} onClick={pick(coolNodes)} />
-      <PointsCloud nodes={hotNodes}  size={HOT_POINT_SIZE} onClick={pick(hotNodes)} forceColor={HOT_COLOR} />
+      <PointsCloud
+        nodes={coolNodes}
+        sizes={(i) => sizeForDegree(coolNodes[i].degree)}
+        onClick={pick(coolNodes)}
+      />
+      <PointsCloud
+        nodes={hotNodes}
+        sizes={(i) => sizeForDegree(hotNodes[i].degree)}
+        onClick={pick(hotNodes)}
+        forceColor={HOT_COLOR}
+      />
 
       {planes.map(({ rep, y, color }) => (
         <Html
@@ -203,7 +224,19 @@ export function ThreeDStrata({
         </Html>
       ))}
 
+      <TopLabels
+        items={topLabels.map((n) => ({
+          id: n.id,
+          name: n.node.name,
+          pos: new THREE.Vector3(n.pos.x, n.pos.y + 0.1 + sizeForDegree(n.degree), n.pos.z),
+        }))}
+      />
+
       <OrbitControls enablePan enableZoom enableRotate makeDefault />
     </Canvas>
   )
+}
+
+function sizeForDegree(deg: number): number {
+  return POINT_SIZE_BASE + POINT_SIZE_K * Math.log2(deg + 1)
 }

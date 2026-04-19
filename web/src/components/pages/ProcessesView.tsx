@@ -259,20 +259,37 @@ export function ProcessesView() {
                   <div key={sid + ':' + i}>
                     {crosses}
                     <div
-                      className="flow-step"
                       style={{
+                        display: 'grid',
+                        gridTemplateColumns: '28px 1fr',
+                        alignItems: 'start',
+                        gap: 10,
+                        padding: '6px 8px',
+                        borderBottom: '1px dashed var(--line-1)',
                         background: isSel ? 'var(--accent-soft)' : 'transparent',
                         borderRadius: 4,
                         cursor: 'pointer',
-                        padding: '6px 8px',
                       }}
                       onClick={() => setStepIdx(i)}
                     >
-                      <div className="idx">
-                        <span className="no">{i + 1}</span>
-                      </div>
-                      <div className="body">
-                        <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                      <span
+                        className="mono"
+                        style={{
+                          display: 'inline-grid',
+                          placeItems: 'center',
+                          width: 20,
+                          height: 20,
+                          borderRadius: 50,
+                          background: 'var(--bg-3)',
+                          color: 'var(--fg-0)',
+                          fontSize: 10.5,
+                          marginTop: 2,
+                        }}
+                      >
+                        {i + 1}
+                      </span>
+                      <div style={{ minWidth: 0 }}>
+                        <div className="hstack" style={{ gap: 6, flexWrap: 'wrap' }}>
                           {cur.repo && (
                             <span
                               className="repo-tag"
@@ -281,12 +298,20 @@ export function ProcessesView() {
                               {cur.repo}
                             </span>
                           )}
-                          <span className="mono" style={{ fontSize: 11.5, color: 'var(--fg-0)' }}>
+                          <span className="mono" style={{ fontSize: 11.5, color: 'var(--fg-0)', wordBreak: 'break-word' }}>
                             {cur.symbol}
                           </span>
                         </div>
                         {cur.path && (
-                          <div className="mono faint" style={{ fontSize: 10.5, marginTop: 2, wordBreak: 'break-all' }}>
+                          <div
+                            className="mono faint"
+                            style={{
+                              fontSize: 10.5,
+                              marginTop: 2,
+                              overflowWrap: 'anywhere',
+                              lineHeight: 1.4,
+                            }}
+                          >
                             {cur.path}
                           </div>
                         )}

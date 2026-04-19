@@ -68,6 +68,69 @@ func TestResolveAll_Unresolvable(t *testing.T) {
 	assert.Equal(t, 1, stats.Unresolved)
 }
 
+// Stdlib classification: Go stdlib paths have no dot in the first
+// segment ("fmt", "encoding/json"), and extern:: edges for them get a
+// `stdlib::` prefix after resolution.
+func TestResolveAll_ExternStdlib(t *testing.T) {
+	g := graph.New()
+	g.AddNode(&graph.Node{ID: "a.go", Kind: graph.KindFile, Name: "a.go", FilePath: "a.go", Language: "go"})
+	g.AddNode(&graph.Node{ID: "a.go::Caller", Kind: graph.KindFunction, Name: "Caller", FilePath: "a.go", Language: "go"})
+
+	callEdge := &graph.Edge{
+		From: "a.go::Caller", To: "unresolved::extern::encoding/json::NewEncoder",
+		Kind: graph.EdgeCalls, FilePath: "a.go", Line: 5,
+	}
+	g.AddEdge(callEdge)
+
+	r := New(g)
+	stats := r.ResolveAll()
+
+	assert.Equal(t, 1, stats.External)
+	assert.Equal(t, "stdlib::encoding/json::NewEncoder", callEdge.To)
+}
+
+// Third-party module paths always carry a dot in the first segment
+// (github.com/..., golang.org/...) and resolve to a `dep::` stub.
+func TestResolveAll_ExternDep(t *testing.T) {
+	g := graph.New()
+	g.AddNode(&graph.Node{ID: "a.go", Kind: graph.KindFile, Name: "a.go", FilePath: "a.go", Language: "go"})
+	g.AddNode(&graph.Node{ID: "a.go::Caller", Kind: graph.KindFunction, Name: "Caller", FilePath: "a.go", Language: "go"})
+
+	callEdge := &graph.Edge{
+		From: "a.go::Caller", To: "unresolved::extern::github.com/pkg/errors::Wrap",
+		Kind: graph.EdgeCalls, FilePath: "a.go", Line: 5,
+	}
+	g.AddEdge(callEdge)
+
+	r := New(g)
+	stats := r.ResolveAll()
+
+	assert.Equal(t, 1, stats.External)
+	assert.Equal(t, "dep::github.com/pkg/errors::Wrap", callEdge.To)
+}
+
+// When the referenced symbol is actually indexed (e.g. another repo in
+// a multi-repo setup), the extern edge rewires to the real node.
+func TestResolveAll_ExternResolvesToIndexedSymbol(t *testing.T) {
+	g := graph.New()
+	g.AddNode(&graph.Node{ID: "consumer/main.go", Kind: graph.KindFile, Name: "main.go", FilePath: "consumer/main.go", Language: "go"})
+	g.AddNode(&graph.Node{ID: "consumer/main.go::Caller", Kind: graph.KindFunction, Name: "Caller", FilePath: "consumer/main.go", Language: "go"})
+	g.AddNode(&graph.Node{ID: "mylib/pkg/pkg.go", Kind: graph.KindFile, Name: "pkg.go", FilePath: "mylib/pkg/pkg.go", Language: "go"})
+	g.AddNode(&graph.Node{ID: "mylib/pkg/pkg.go::DoThing", Kind: graph.KindFunction, Name: "DoThing", FilePath: "mylib/pkg/pkg.go", Language: "go"})
+
+	callEdge := &graph.Edge{
+		From: "consumer/main.go::Caller", To: "unresolved::extern::mylib/pkg::DoThing",
+		Kind: graph.EdgeCalls, FilePath: "consumer/main.go", Line: 5,
+	}
+	g.AddEdge(callEdge)
+
+	r := New(g)
+	stats := r.ResolveAll()
+
+	assert.Equal(t, 1, stats.Resolved)
+	assert.Equal(t, "mylib/pkg/pkg.go::DoThing", callEdge.To)
+}
+
 func TestInferImplements(t *testing.T) {
 	g := graph.New()
 

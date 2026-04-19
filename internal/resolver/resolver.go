@@ -134,6 +134,11 @@ func (r *Resolver) resolveEdge(e *graph.Edge, stats *ResolveStats) {
 	switch {
 	case strings.HasPrefix(target, "import::"):
 		r.resolveImport(e, strings.TrimPrefix(target, "import::"), stats)
+	case strings.HasPrefix(target, "extern::"):
+		// Package-qualified call (json.NewEncoder): the parser attached
+		// the full import path + symbol so we don't have to guess a
+		// receiver type.
+		r.resolveExtern(e, strings.TrimPrefix(target, "extern::"), stats)
 	case strings.HasPrefix(target, "*."):
 		// Method call or method-value reference (e.g. h.handleHealth)
 		r.resolveMethodCall(e, strings.TrimPrefix(target, "*."), stats)
@@ -151,6 +156,77 @@ func (r *Resolver) resolveEdge(e *graph.Edge, stats *ResolveStats) {
 	if e.To != oldTo {
 		r.graph.ReindexEdge(e, oldTo)
 	}
+}
+
+// resolveExtern handles "extern::<importPath>::<symbol>" targets produced
+// by the parser when a selector call's receiver matches an import alias.
+//
+// Resolution order:
+//  1. Look for <symbol> defined in a file whose dir matches the import
+//     path — this catches cross-repo calls into another indexed tree
+//     (e.g. service A calls service B's exported function).
+//  2. Otherwise, keep the package-qualified target so the UI can render
+//     "crosses web → encoding/json" instead of a bare em-dash. The
+//     prefix chosen encodes whether the path looks stdlib-like (no dot
+//     in first segment, for Go) vs a module path (dotted or vendored).
+//
+// Nothing is created as a graph node — these are bookkeeping strings,
+// same as the existing "external::<path>" stubs for unresolved imports.
+func (r *Resolver) resolveExtern(e *graph.Edge, spec string, stats *ResolveStats) {
+	sep := strings.LastIndex(spec, "::")
+	if sep < 0 {
+		// Malformed — treat as unresolved so we don't leak the
+		// "unresolved::extern::" prefix into the graph.
+		e.To = "external::" + spec
+		stats.External++
+		return
+	}
+	importPath := spec[:sep]
+	symbol := spec[sep+2:]
+
+	// Pass 1: does the symbol live in a file under this import path?
+	// Reuse dirIndex populated by buildDirIndexes — no extra scan.
+	callerRepo := r.callerRepoPrefix(e)
+	candidates := r.graph.FindNodesByName(symbol)
+	for _, c := range candidates {
+		if c.Kind != graph.KindFunction && c.Kind != graph.KindMethod && c.Kind != graph.KindType && c.Kind != graph.KindInterface {
+			continue
+		}
+		dir := filepath.Dir(c.FilePath)
+		if strings.HasSuffix(dir, "/"+lastPathComponent(importPath)) || dir == importPath || strings.HasSuffix(dir, importPath) {
+			e.To = c.ID
+			if callerRepo != "" && c.RepoPrefix != "" && c.RepoPrefix != callerRepo {
+				e.CrossRepo = true
+			}
+			stats.Resolved++
+			return
+		}
+	}
+
+	// Pass 2: classify the import path. "stdlib::" when the path looks
+	// like a Go stdlib package (no dot in the first segment and not a
+	// known module vendor prefix). "dep::" otherwise. Callers can treat
+	// both as external for edge-walk purposes.
+	prefix := "dep::"
+	if isStdlibLike(importPath) {
+		prefix = "stdlib::"
+	}
+	e.To = prefix + importPath + "::" + symbol
+	stats.External++
+}
+
+// isStdlibLike reports whether the import path looks like a Go stdlib
+// package. Heuristic: the first path segment must have no dot (module
+// paths like github.com/foo, golang.org/x, etc. always dot the first
+// segment). Vetted against the list of real stdlib roots used by
+// go/build — any new single-word non-stdlib package (very rare) is
+// mis-classified as stdlib, which is cosmetic only.
+func isStdlibLike(importPath string) bool {
+	first := importPath
+	if i := strings.Index(importPath, "/"); i >= 0 {
+		first = importPath[:i]
+	}
+	return first != "" && !strings.Contains(first, ".")
 }
 
 func (r *Resolver) resolveImport(e *graph.Edge, importPath string, stats *ResolveStats) {

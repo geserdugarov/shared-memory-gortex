@@ -12,15 +12,55 @@ import { scopeOf, type CodeScope } from '@/lib/utils'
 // scrolling a single list past a few hundred rows is useless.
 const STEP_LIMIT = 200
 
-function parseStepId(id: string): { repo: string; path: string; symbol: string } {
+// crossLabel formats the other side of a repo-hop arrow. First-party
+// steps show the repo name; externs show "stdlib (encoding/json)" so
+// the user sees both the bucket and which package was called.
+function crossLabel(s: StepInfo): string {
+  if (s.kind === 'stdlib') return s.path ? `stdlib (${s.path})` : 'stdlib'
+  if (s.kind === 'dep') return s.path ? `dep (${s.path})` : 'dep'
+  if (s.kind === 'external') return s.path ? `external (${s.path})` : 'external'
+  if (s.kind === 'unresolved') return 'unresolved'
+  return s.repo || '—'
+}
+
+type StepInfo = {
+  repo: string
+  path: string
+  symbol: string
+  // kind reflects where the target lives. 'firstParty' is indexed code
+  // in one of the tracked repos; the rest are resolver-emitted stubs
+  // (see internal/resolver/resolver.go — resolveImport / resolveExtern).
+  kind: 'firstParty' | 'stdlib' | 'dep' | 'external' | 'unresolved'
+}
+
+function parseStepId(id: string): StepInfo {
+  // Prefixes emitted by the resolver for externs — no real file to read.
+  if (id.startsWith('stdlib::') || id.startsWith('dep::')) {
+    const rest = id.slice(id.indexOf('::') + 2)
+    const sym = rest.lastIndexOf('::')
+    const path = sym >= 0 ? rest.slice(0, sym) : rest
+    const symbol = sym >= 0 ? rest.slice(sym + 2) : ''
+    return { repo: id.startsWith('stdlib::') ? 'stdlib' : 'dep', path, symbol, kind: id.startsWith('stdlib::') ? 'stdlib' : 'dep' }
+  }
+  if (id.startsWith('external::')) {
+    const rest = id.slice('external::'.length)
+    const sym = rest.lastIndexOf('::')
+    const path = sym >= 0 ? rest.slice(0, sym) : rest
+    const symbol = sym >= 0 ? rest.slice(sym + 2) : ''
+    return { repo: 'external', path, symbol, kind: 'external' }
+  }
+  if (id.startsWith('unresolved::')) {
+    const sym = id.slice('unresolved::'.length).replace(/^\*\./, '')
+    return { repo: '', path: '', symbol: sym, kind: 'unresolved' }
+  }
   const sepIdx = id.indexOf('::')
   const pathPart = sepIdx >= 0 ? id.slice(0, sepIdx) : id
   const symbol = sepIdx >= 0 ? id.slice(sepIdx + 2) : id
   const slashIdx = pathPart.indexOf('/')
   if (slashIdx >= 0) {
-    return { repo: pathPart.slice(0, slashIdx), path: pathPart.slice(slashIdx + 1), symbol }
+    return { repo: pathPart.slice(0, slashIdx), path: pathPart.slice(slashIdx + 1), symbol, kind: 'firstParty' }
   }
-  return { repo: '', path: pathPart, symbol }
+  return { repo: '', path: pathPart, symbol, kind: 'firstParty' }
 }
 
 export function ProcessesView() {
@@ -58,8 +98,12 @@ export function ProcessesView() {
   const { data: detail, loading: detailLoading } = useProcessDetail(sel)
   const steps = useMemo(() => (detail?.steps ?? []).slice(0, STEP_LIMIT), [detail])
   const selectedStepId = steps[stepIdx] ?? null
-  const { data: source, loading: sourceLoading } = useSymbolSource(selectedStepId)
-  const { data: node } = useSymbol(selectedStepId)
+  const selectedInfo = selectedStepId ? parseStepId(selectedStepId) : null
+  // Externs (stdlib::, dep::, external::, unresolved::) have no on-disk
+  // source and no graph node — skip the round-trip.
+  const fetchableId = selectedInfo && selectedInfo.kind === 'firstParty' ? selectedStepId : null
+  const { data: source, loading: sourceLoading } = useSymbolSource(fetchableId)
+  const { data: node } = useSymbol(fetchableId)
 
   // Mirror the selected step into the global Inspector right-pane so
   // clicking a flow step lights up callers/callees alongside the
@@ -251,10 +295,21 @@ export function ProcessesView() {
                 const prev = i > 0 ? parseStepId(steps[i - 1]) : null
                 const crosses = prev && prev.repo !== cur.repo ? (
                   <div className="repo-hop" style={{ margin: '4px 0 2px' }}>
-                    <Icon name="arrowr" size={10} /> crosses {prev.repo || '—'} → {cur.repo || '—'}
+                    <Icon name="arrowr" size={10} /> crosses {crossLabel(prev)} → {crossLabel(cur)}
                   </div>
                 ) : null
                 const isSel = stepIdx === i
+                const repoBadge = cur.kind === 'stdlib'
+                  ? { label: 'stdlib', color: 'var(--violet)' }
+                  : cur.kind === 'dep'
+                  ? { label: 'dep', color: 'var(--warn)' }
+                  : cur.kind === 'external'
+                  ? { label: 'external', color: 'var(--fg-3)' }
+                  : cur.kind === 'unresolved'
+                  ? { label: 'unresolved', color: 'var(--fg-3)' }
+                  : cur.repo
+                  ? { label: cur.repo, color: repoColor(cur.repo) }
+                  : null
                 return (
                   <div key={sid + ':' + i}>
                     {crosses}
@@ -290,12 +345,12 @@ export function ProcessesView() {
                       </span>
                       <div style={{ minWidth: 0 }}>
                         <div className="hstack" style={{ gap: 6, flexWrap: 'wrap' }}>
-                          {cur.repo && (
+                          {repoBadge && (
                             <span
                               className="repo-tag"
-                              style={{ borderLeft: `2px solid ${repoColor(cur.repo)}`, paddingLeft: 4 }}
+                              style={{ borderLeft: `2px solid ${repoBadge.color}`, paddingLeft: 4 }}
                             >
-                              {cur.repo}
+                              {repoBadge.label}
                             </span>
                           )}
                           <span className="mono" style={{ fontSize: 11.5, color: 'var(--fg-0)', wordBreak: 'break-word' }}>
@@ -373,17 +428,46 @@ export function ProcessesView() {
               {!selectedStepId && (
                 <div className="faint" style={{ fontSize: 12 }}>Select a step to view its source.</div>
               )}
-              {selectedStepId && sourceLoading && (
-                <div className="faint" style={{ fontSize: 12 }}>Loading source…</div>
-              )}
-              {selectedStepId && !sourceLoading && !source && (
-                <div className="faint" style={{ fontSize: 12 }}>
-                  Source not available for this node.
-                </div>
-              )}
-              {selectedStepId && !sourceLoading && source && (
-                <pre className="code" style={{ margin: 0, whiteSpace: 'pre', overflow: 'auto' }}>{source}</pre>
-              )}
+              {selectedStepId && (() => {
+                const info = parseStepId(selectedStepId)
+                if (info.kind === 'stdlib' || info.kind === 'dep' || info.kind === 'external') {
+                  return (
+                    <div className="faint" style={{ fontSize: 12, lineHeight: 1.6 }}>
+                      <div>
+                        This call lands in{' '}
+                        <span className="mono" style={{ color: 'var(--fg-1)' }}>
+                          {info.kind}{info.path ? ` · ${info.path}` : ''}
+                        </span>
+                        .
+                      </div>
+                      <div style={{ marginTop: 6 }}>
+                        Gortex doesn&apos;t index package-manager trees by default, so there is
+                        no on-disk source to show. See the roadmap item A21 (semantic
+                        stdlib/dep enrichment) for authoritative resolution.
+                      </div>
+                    </div>
+                  )
+                }
+                if (info.kind === 'unresolved') {
+                  return (
+                    <div className="faint" style={{ fontSize: 12 }}>
+                      Unresolved call — the parser couldn&apos;t attribute this symbol to an
+                      import. Often a language built-in or a dynamically bound reference.
+                    </div>
+                  )
+                }
+                if (sourceLoading) {
+                  return <div className="faint" style={{ fontSize: 12 }}>Loading source…</div>
+                }
+                if (!source) {
+                  return (
+                    <div className="faint" style={{ fontSize: 12 }}>
+                      Source not available for this node.
+                    </div>
+                  )
+                }
+                return <pre className="code" style={{ margin: 0, whiteSpace: 'pre', overflow: 'auto' }}>{source}</pre>
+              })()}
             </div>
           </div>
         </div>

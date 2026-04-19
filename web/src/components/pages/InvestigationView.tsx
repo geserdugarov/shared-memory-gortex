@@ -9,18 +9,44 @@ import {
 } from '@/lib/hooks'
 import { useInspector } from '@/lib/inspector'
 
-// Splits a node ID of the form "<repoPrefix>/<path>::<symbol>" into its
-// parts so we can render a step without extra round-trips. Symbol-only
-// IDs (e.g. "unresolved::OSTRACE") end up with an empty repo and path.
-function parseStepId(id: string): { repo: string; path: string; symbol: string } {
+type StepInfo = {
+  repo: string
+  path: string
+  symbol: string
+  kind: 'firstParty' | 'stdlib' | 'dep' | 'external' | 'unresolved'
+}
+
+// Splits a node ID into its parts. Handles first-party IDs
+// ("<repo>/<path>::<sym>") as well as resolver-emitted externs
+// ("stdlib::encoding/json::NewEncoder" / "dep::github.com/..::Wrap" /
+// "external::<path>") so the UI can badge cross-boundary calls.
+function parseStepId(id: string): StepInfo {
+  if (id.startsWith('stdlib::') || id.startsWith('dep::')) {
+    const rest = id.slice(id.indexOf('::') + 2)
+    const sym = rest.lastIndexOf('::')
+    const path = sym >= 0 ? rest.slice(0, sym) : rest
+    const symbol = sym >= 0 ? rest.slice(sym + 2) : ''
+    return { repo: id.startsWith('stdlib::') ? 'stdlib' : 'dep', path, symbol, kind: id.startsWith('stdlib::') ? 'stdlib' : 'dep' }
+  }
+  if (id.startsWith('external::')) {
+    const rest = id.slice('external::'.length)
+    const sym = rest.lastIndexOf('::')
+    const path = sym >= 0 ? rest.slice(0, sym) : rest
+    const symbol = sym >= 0 ? rest.slice(sym + 2) : ''
+    return { repo: 'external', path, symbol, kind: 'external' }
+  }
+  if (id.startsWith('unresolved::')) {
+    const sym = id.slice('unresolved::'.length).replace(/^\*\./, '')
+    return { repo: '', path: '', symbol: sym, kind: 'unresolved' }
+  }
   const symIdx = id.indexOf('::')
   const pathPart = symIdx >= 0 ? id.slice(0, symIdx) : id
   const symbol = symIdx >= 0 ? id.slice(symIdx + 2) : id
   const slashIdx = pathPart.indexOf('/')
   if (slashIdx >= 0) {
-    return { repo: pathPart.slice(0, slashIdx), path: pathPart.slice(slashIdx + 1), symbol }
+    return { repo: pathPart.slice(0, slashIdx), path: pathPart.slice(slashIdx + 1), symbol, kind: 'firstParty' }
   }
-  return { repo: '', path: pathPart, symbol }
+  return { repo: '', path: pathPart, symbol, kind: 'firstParty' }
 }
 
 // Hard cap on how many flow steps we render. Some flows (e.g. sqlite)

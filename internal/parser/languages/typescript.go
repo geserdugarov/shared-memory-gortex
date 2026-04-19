@@ -120,14 +120,15 @@ func (e *TypeScriptExtractor) Extract(filePath string, src []byte) (*parser.Extr
 	// Type aliases.
 	e.extractTypeAliases(root, src, filePath, fileNode.ID, result)
 
-	// Imports.
-	e.extractImports(root, src, filePath, fileNode.ID, result)
+	// Imports. Returned alias→path map threads into extractCalls so
+	// selector calls like `json.parse` attribute to the owning module.
+	imports := e.extractImports(root, src, filePath, fileNode.ID, result)
 
 	// Build type environment for receiver type inference.
 	tenv := e.buildTypeEnv(root, src)
 
-	// Call sites (with type env).
-	e.extractCalls(root, src, filePath, result, tenv)
+	// Call sites (with type env + imports).
+	e.extractCalls(root, src, filePath, result, tenv, imports)
 
 	// Variables.
 	e.extractVariables(root, src, filePath, fileNode.ID, result)
@@ -360,7 +361,18 @@ func (e *TypeScriptExtractor) extractTypeAliases(root *sitter.Node, src []byte, 
 	}
 }
 
-func (e *TypeScriptExtractor) extractImports(root *sitter.Node, src []byte, filePath, fileID string, result *parser.ExtractionResult) {
+// extractImports emits one EdgeImports per import_statement and returns
+// a per-file alias→importPath map. We only record aliases that appear
+// as receivers in selector calls downstream:
+//
+//   import foo from 'mod'          → foo → mod   (default)
+//   import * as foo from 'mod'     → foo → mod   (namespace)
+//   import { a, b as c } from 'x'  → not tracked (called as bare identifier)
+//
+// Named imports are intentionally skipped — `a(x)` is already a plain
+// call matched by tsQCall and doesn't go through the selector-call path.
+func (e *TypeScriptExtractor) extractImports(root *sitter.Node, src []byte, filePath, fileID string, result *parser.ExtractionResult) map[string]string {
+	imports := map[string]string{}
 	matches, _ := parser.RunQuery(tsQImport, e.lang, root, src)
 	for _, m := range matches {
 		path := m.Captures["import.path"]
@@ -369,7 +381,34 @@ func (e *TypeScriptExtractor) extractImports(root *sitter.Node, src []byte, file
 			From: fileID, To: "unresolved::import::" + importPath,
 			Kind: graph.EdgeImports, FilePath: filePath, Line: path.StartLine + 1,
 		})
+		// Walk the import_statement node to find aliases. tsQImport
+		// captures the whole statement as `import.def` so we already
+		// have the AST node.
+		defCap, ok := m.Captures["import.def"]
+		if !ok || defCap.Node == nil {
+			continue
+		}
+		for i := 0; i < int(defCap.Node.NamedChildCount()); i++ {
+			child := defCap.Node.NamedChild(i)
+			if child.Type() != "import_clause" {
+				continue
+			}
+			for j := 0; j < int(child.NamedChildCount()); j++ {
+				c := child.NamedChild(j)
+				switch c.Type() {
+				case "identifier": // default import: `import Foo from ...`
+					imports[c.Content(src)] = importPath
+				case "namespace_import": // `import * as Foo from ...`
+					for k := 0; k < int(c.NamedChildCount()); k++ {
+						if id := c.NamedChild(k); id.Type() == "identifier" {
+							imports[id.Content(src)] = importPath
+						}
+					}
+				}
+			}
+		}
 	}
+	return imports
 }
 
 func (e *TypeScriptExtractor) extractVariables(root *sitter.Node, src []byte, filePath, fileID string, result *parser.ExtractionResult) {
@@ -449,7 +488,7 @@ func extractTSInterfaceMethods(ifaceNode *sitter.Node, src []byte) []string {
 	return methods
 }
 
-func (e *TypeScriptExtractor) extractCalls(root *sitter.Node, src []byte, filePath string, result *parser.ExtractionResult, tenv typeEnv) {
+func (e *TypeScriptExtractor) extractCalls(root *sitter.Node, src []byte, filePath string, result *parser.ExtractionResult, tenv typeEnv, imports map[string]string) {
 	funcRanges := buildFuncRanges(result)
 
 	matches, _ := parser.RunQuery(tsQCall, e.lang, root, src)
@@ -473,6 +512,16 @@ func (e *TypeScriptExtractor) extractCalls(root *sitter.Node, src []byte, filePa
 		expr := m.Captures["call.expr"]
 		callerID := findEnclosingFunc(funcRanges, expr.StartLine+1)
 		if callerID == "" {
+			continue
+		}
+
+		// Namespace/default import receiver (e.g. `fs.readFile`): attach
+		// the module path so the resolver can classify externally.
+		if importPath, ok := imports[receiverText]; ok {
+			result.Edges = append(result.Edges, &graph.Edge{
+				From: callerID, To: "unresolved::extern::" + importPath + "::" + method,
+				Kind: graph.EdgeCalls, FilePath: filePath, Line: expr.StartLine + 1,
+			})
 			continue
 		}
 

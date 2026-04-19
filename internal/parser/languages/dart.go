@@ -333,6 +333,12 @@ func (e *DartExtractor) extractImports(
 //   expression_statement: identifier selector(argument_part) ...
 //   e.g. print('hello') → identifier "print", selector "(…)" with argument_part
 // We detect an identifier followed by a selector sibling that contains an argument_part.
+//
+// NOTE: receiver attribution is not yet wired here. Dart uses
+// `import 'pkg:foo/bar.dart' as f;` aliases; a proper `f.method()`
+// extern edge would need a query-based rewrite of this walker to
+// distinguish selector calls from plain calls. Tracked by roadmap
+// item A22 (parse-time import attribution — remaining language).
 func (e *DartExtractor) extractCalls(
 	root *sitter.Node, src []byte, filePath string,
 	result *parser.ExtractionResult,

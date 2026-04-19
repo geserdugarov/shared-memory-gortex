@@ -166,7 +166,17 @@ func (e *PythonExtractor) Extract(filePath string, src []byte) (*parser.Extracti
 		})
 	}
 
-	// Imports.
+	// Imports. `imports` is a per-file alias→module map used by the
+	// selector-call pass below:
+	//
+	//   import os                  → os → os
+	//   import os.path             → os → os.path (root ident is bound)
+	//   import numpy as np         → np → numpy
+	//   from os import path        → not mapped (bare binding)
+	//
+	// `from X import Y as Z` isn't a namespace handle — Z is called
+	// directly (pyQCall catches it), not as `Z.foo()` — so we skip it.
+	imports := map[string]string{}
 	matches, _ = parser.RunQuery(pyQImport, e.lang, root, src)
 	for _, m := range matches {
 		name := m.Captures["import.name"]
@@ -174,6 +184,40 @@ func (e *PythonExtractor) Extract(filePath string, src []byte) (*parser.Extracti
 			From: fileNode.ID, To: "unresolved::import::" + name.Text,
 			Kind: graph.EdgeImports, FilePath: filePath, Line: name.StartLine + 1,
 		})
+		// Walk the import_statement to handle `as` aliases. The grammar
+		// emits either a bare dotted_name or an aliased_import(name,
+		// alias) node as children of the import_statement.
+		def, ok := m.Captures["import.def"]
+		if !ok || def.Node == nil {
+			continue
+		}
+		stmt := def.Node
+		for i := 0; i < int(stmt.NamedChildCount()); i++ {
+			child := stmt.NamedChild(i)
+			switch child.Type() {
+			case "dotted_name":
+				dotted := child.Content(src)
+				alias := dotted
+				if j := strings.Index(dotted, "."); j >= 0 {
+					alias = dotted[:j] // `import os.path` binds `os`
+				}
+				imports[alias] = dotted
+			case "aliased_import":
+				var modulePath, alias string
+				for j := 0; j < int(child.NamedChildCount()); j++ {
+					cc := child.NamedChild(j)
+					switch cc.Type() {
+					case "dotted_name":
+						modulePath = cc.Content(src)
+					case "identifier":
+						alias = cc.Content(src)
+					}
+				}
+				if alias != "" && modulePath != "" {
+					imports[alias] = modulePath
+				}
+			}
+		}
 	}
 	matches, _ = parser.RunQuery(pyQImportFrom, e.lang, root, src)
 	for _, m := range matches {
@@ -213,6 +257,20 @@ func (e *PythonExtractor) Extract(filePath string, src []byte) (*parser.Extracti
 		if callerID == "" {
 			continue
 		}
+
+		// Module-qualified call (requests.get, np.array, os.path.join):
+		// attach the import path so resolver can classify externally.
+		// Handles both `foo.method` and `foo.bar.method` by walking the
+		// dotted receiver — Python's `import os.path` binds `os`, so
+		// `os.path.join(...)` has receiver `os.path` but alias `os`.
+		if importPath, ok := lookupPyImport(receiverText, imports); ok {
+			result.Edges = append(result.Edges, &graph.Edge{
+				From: callerID, To: "unresolved::extern::" + importPath + "::" + method,
+				Kind: graph.EdgeCalls, FilePath: filePath, Line: expr.StartLine + 1,
+			})
+			continue
+		}
+
 		edge := &graph.Edge{
 			From: callerID, To: "unresolved::*." + method,
 			Kind: graph.EdgeCalls, FilePath: filePath, Line: expr.StartLine + 1,
@@ -315,4 +373,26 @@ func normalizePyTypeName(t string) string {
 		return ""
 	}
 	return t
+}
+
+// lookupPyImport resolves a dotted Python receiver to an import path.
+// Tries the full receiver first, then progressively shorter prefixes
+// (os.path → os), so `os.path.join(x)` with `import os.path` finds the
+// right module.
+func lookupPyImport(receiver string, imports map[string]string) (string, bool) {
+	if p, ok := imports[receiver]; ok {
+		return p, true
+	}
+	for i := strings.LastIndex(receiver, "."); i > 0; i = strings.LastIndex(receiver[:i], ".") {
+		prefix := receiver[:i]
+		if p, ok := imports[prefix]; ok {
+			return p, true
+		}
+	}
+	if i := strings.Index(receiver, "."); i > 0 {
+		if p, ok := imports[receiver[:i]]; ok {
+			return p, true
+		}
+	}
+	return "", false
 }

@@ -188,14 +188,17 @@ func (e *GoExtractor) Extract(filePath string, src []byte) (*parser.ExtractionRe
 	// Types: structs, interfaces, type aliases.
 	e.extractTypes(root, src, filePath, fileNode.ID, result)
 
-	// Imports.
-	e.extractImports(root, src, filePath, fileNode.ID, pkgName, result)
+	// Imports. Returned map is alias→importPath so downstream call-site
+	// extraction can attribute selector calls like `json.NewEncoder` to
+	// the owning package instead of the generic `unresolved::*.Method`.
+	imports := e.extractImports(root, src, filePath, fileNode.ID, pkgName, result)
 
 	// Build type environment for receiver type inference.
 	tenv := e.buildTypeEnv(root, src)
 
-	// Call sites (with type env for receiver resolution).
-	e.extractCalls(root, src, filePath, result, tenv)
+	// Call sites (with type env for receiver resolution, plus imports
+	// so imported-package calls get a stable extern:: target).
+	e.extractCalls(root, src, filePath, result, tenv, imports)
 
 	// Variables and constants.
 	e.extractVarsConsts(root, src, filePath, fileNode.ID, result)
@@ -384,7 +387,13 @@ func (e *GoExtractor) extractTypes(root *sitter.Node, src []byte, filePath, file
 	}
 }
 
-func (e *GoExtractor) extractImports(root *sitter.Node, src []byte, filePath, fileID, _ string, result *parser.ExtractionResult) {
+// extractImports emits one EdgeImports per import spec and returns a
+// per-file alias→importPath map. The alias is the explicit one when
+// present, else the last path segment (Go's default). Blank and dot
+// imports are skipped in the map — they don't introduce a callable
+// identifier (only side-effects / merged names).
+func (e *GoExtractor) extractImports(root *sitter.Node, src []byte, filePath, fileID, _ string, result *parser.ExtractionResult) map[string]string {
+	imports := map[string]string{}
 	for _, q := range []string{qImportSingle, qImportBlock} {
 		matches, err := parser.RunQuery(q, e.lang, root, src)
 		if err != nil {
@@ -400,11 +409,26 @@ func (e *GoExtractor) extractImports(root *sitter.Node, src []byte, filePath, fi
 				FilePath: filePath,
 				Line:     pathCap.StartLine + 1,
 			})
+			alias := ""
+			if a, ok := m.Captures["import.alias"]; ok {
+				alias = strings.TrimSpace(a.Text)
+			}
+			switch alias {
+			case "_", ".":
+				continue
+			case "":
+				alias = importPath
+				if i := strings.LastIndex(importPath, "/"); i >= 0 {
+					alias = importPath[i+1:]
+				}
+			}
+			imports[alias] = importPath
 		}
 	}
+	return imports
 }
 
-func (e *GoExtractor) extractCalls(root *sitter.Node, src []byte, filePath string, result *parser.ExtractionResult, tenv typeEnv) {
+func (e *GoExtractor) extractCalls(root *sitter.Node, src []byte, filePath string, result *parser.ExtractionResult, tenv typeEnv, imports map[string]string) {
 	funcRanges := buildFuncRanges(result)
 
 	// Plain function calls: foo()
@@ -433,6 +457,23 @@ func (e *GoExtractor) extractCalls(root *sitter.Node, src []byte, filePath strin
 		expr := m.Captures["call.expr"]
 		callerID := findEnclosingFunc(funcRanges, expr.StartLine+1)
 		if callerID == "" {
+			continue
+		}
+
+		// Package-qualified call (json.NewEncoder, fmt.Println, …): use
+		// the import path as the extern target so the resolver can
+		// classify it as stdlib / dep / cross-repo and the UI can render
+		// a meaningful "crosses web → encoding/json" label. Takes
+		// precedence over receiver-type inference — a bare identifier
+		// that matches an import alias is always a package reference.
+		if importPath, ok := imports[receiverText]; ok {
+			result.Edges = append(result.Edges, &graph.Edge{
+				From:     callerID,
+				To:       "unresolved::extern::" + importPath + "::" + methodName,
+				Kind:     graph.EdgeCalls,
+				FilePath: filePath,
+				Line:     expr.StartLine + 1,
+			})
 			continue
 		}
 

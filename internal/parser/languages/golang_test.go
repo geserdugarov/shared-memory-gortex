@@ -166,7 +166,9 @@ func helper() {}
 		targets = append(targets, c.To)
 	}
 	assert.Contains(t, targets, "unresolved::helper")
-	assert.Contains(t, targets, "unresolved::*.Println")
+	// fmt.Println is now attributed to the import path so the resolver
+	// can render cross-boundary badges instead of a bare `*.Println`.
+	assert.Contains(t, targets, "unresolved::extern::fmt::Println")
 }
 
 func TestGoExtractor_Variables(t *testing.T) {

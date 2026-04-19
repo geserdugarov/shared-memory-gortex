@@ -14,6 +14,7 @@ import (
 	"github.com/zzet/gortex/internal/analysis"
 	"github.com/zzet/gortex/internal/audit"
 	"github.com/zzet/gortex/internal/contracts"
+	"github.com/zzet/gortex/internal/excludes"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/persistence"
 	"github.com/zzet/gortex/internal/query"
@@ -195,12 +196,14 @@ func (s *Server) registerEnhancementTools() {
 	// contracts — unified contracts tool (list + check + validate)
 	s.mcpServer.AddTool(
 		mcp.NewTool("contracts",
-			mcp.WithDescription("API contracts tool. action=list (default): lists detected contracts (HTTP, gRPC, GraphQL, topics, WebSocket, env, OpenAPI). action=check: detects orphan providers/consumers across repos. action=validate: diffs provider↔consumer request/response shapes and flags breaking/warning/info issues."),
+			mcp.WithDescription("API contracts tool. action=list (default): lists detected contracts (HTTP, gRPC, GraphQL, topics, WebSocket, env, OpenAPI). action=check: detects orphan providers/consumers across repos. action=validate: diffs provider↔consumer request/response shapes and flags breaking/warning/info issues.\n\nDEFAULT SCOPE for list: auto-scopes to the active project's repos and hides dependency-origin contracts (type=dependency, vendored paths like vendor/, node_modules/). The response reports other_repos (count of contracts filtered out of scope) and dependencies_skipped (count of dep contracts hidden). To widen scope, pass repo=<prefix>, project=<name>, ref=<tag>, or all_repos=true. To include dependency contracts, pass include_deps=true."),
 			mcp.WithString("action", mcp.Description("list (default), check, or validate")),
 			mcp.WithString("repo", mcp.Description("Filter by repository prefix")),
 			mcp.WithString("project", mcp.Description("Filter to repositories in a specific project (resolves to the project's repo set)")),
 			mcp.WithString("ref", mcp.Description("Filter to repositories tagged with this ref")),
-			mcp.WithString("type", mcp.Description("(list) Filter by type: http, grpc, graphql, topic, ws, env, openapi")),
+			mcp.WithBoolean("all_repos", mcp.Description("(list) Disable active-project auto-scope; return contracts from every indexed repo. Default false.")),
+			mcp.WithBoolean("include_deps", mcp.Description("(list) Include type=dependency contracts and contracts from vendored paths (vendor/, node_modules/, Pods/, .venv/). Default false.")),
+			mcp.WithString("type", mcp.Description("(list) Filter by type: http, grpc, graphql, topic, ws, env, openapi, dependency")),
 			mcp.WithString("role", mcp.Description("(list) Filter by role: provider or consumer")),
 			mcp.WithBoolean("compact", mcp.Description("One-line-per-contract text output")),
 			mcp.WithString("format", mcp.Description("Output format: json (default) or gcx (GCX1 compact wire format)")),
@@ -626,6 +629,20 @@ func (s *Server) handleFindDeadCode(_ context.Context, req mcp.CallToolRequest) 
 		variablesNote = "Variables excluded by default (graph lacks intra-function data flow). Pass include_variables=true to include them."
 	}
 
+	if isGCX(req) {
+		items := make([]deadCodeItem, 0, len(entries))
+		for _, e := range entries {
+			items = append(items, deadCodeItem{
+				ID:   e.ID,
+				Kind: e.Kind,
+				Name: e.Name,
+				Path: e.FilePath,
+				Line: e.Line,
+			})
+		}
+		return gcxResponse(encodeAnalyze("dead_code", items))
+	}
+
 	if isCompact(req) {
 		var b strings.Builder
 		for _, e := range entries {
@@ -669,6 +686,23 @@ func (s *Server) handleFindHotspots(_ context.Context, req mcp.CallToolRequest) 
 	if len(entries) > 20 {
 		entries = entries[:20]
 		truncated = true
+	}
+
+	if isGCX(req) {
+		items := make([]hotspotItem, 0, len(entries))
+		for _, e := range entries {
+			items = append(items, hotspotItem{
+				ID:             e.ID,
+				Name:           e.Name,
+				Path:           e.FilePath,
+				Line:           e.Line,
+				FanIn:          e.FanIn,
+				FanOut:         e.FanOut,
+				CrossCommunity: e.CommunityCrossings,
+				Score:          e.ComplexityScore,
+			})
+		}
+		return gcxResponse(encodeAnalyze("hotspots", items))
 	}
 
 	if isCompact(req) {
@@ -764,6 +798,18 @@ func (s *Server) handleFindCycles(_ context.Context, req mcp.CallToolRequest) (*
 
 	cycles := analysis.DetectCycles(s.graph, s.getCommunities(), scope)
 
+	if isGCX(req) {
+		items := make([]cycleItem, 0, len(cycles))
+		for _, c := range cycles {
+			items = append(items, cycleItem{
+				Size:     len(c.Path),
+				Severity: c.Kind,
+				Nodes:    c.Path,
+			})
+		}
+		return gcxResponse(encodeAnalyze("cycles", items))
+	}
+
 	if len(cycles) == 0 {
 		return mcp.NewToolResultJSON(map[string]any{
 			"cycles":  []any{},
@@ -816,6 +862,13 @@ func (s *Server) handleWouldCreateCycle(_ context.Context, req mcp.CallToolReque
 	}
 
 	wouldCycle, path := analysis.WouldCreateCycle(s.graph, fromID, toID)
+
+	if isGCX(req) {
+		return gcxResponse(encodeAnalyze("would_create_cycle", map[string]any{
+			"would_cycle": wouldCycle,
+			"path":        path,
+		}))
+	}
 
 	if isCompact(req) {
 		if wouldCycle {
@@ -1516,20 +1569,41 @@ func (s *Server) handleGetContracts(_ context.Context, req mcp.CallToolRequest) 
 	contractType := req.GetString("type", "")
 	role := req.GetString("role", "")
 
+	args := req.GetArguments()
+	allRepos := false
+	if v, ok := args["all_repos"].(bool); ok {
+		allRepos = v
+	}
+	includeDeps := false
+	if v, ok := args["include_deps"].(bool); ok {
+		includeDeps = v
+	}
+
 	// resolveRepoFilter unifies repo/project/ref into a single allow-set
 	// and falls back to the active project when no axis is given — same
-	// default scoping every other query tool uses.
-	allowed, err := s.resolveRepoFilter(req)
-	if err != nil {
-		return mcp.NewToolResultError(err.Error()), nil
+	// default scoping every other query tool uses. all_repos=true opts out.
+	var allowed map[string]bool
+	if !allRepos {
+		var err error
+		allowed, err = s.resolveRepoFilter(req)
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
 	}
 
 	all := registry.All()
 
 	// Apply filters.
 	var filtered []contracts.Contract
+	otherRepos := make(map[string]int)
+	depsSkipped := 0
 	for _, c := range all {
+		isDep := c.Type == contracts.ContractDependency || excludes.IsVendored(c.FilePath)
+
 		if allowed != nil && c.RepoPrefix != "" && !allowed[c.RepoPrefix] {
+			if includeDeps || !isDep {
+				otherRepos[c.RepoPrefix]++
+			}
 			continue
 		}
 		if contractType != "" && string(c.Type) != contractType {
@@ -1538,7 +1612,16 @@ func (s *Server) handleGetContracts(_ context.Context, req mcp.CallToolRequest) 
 		if role != "" && string(c.Role) != role {
 			continue
 		}
+		if !includeDeps && isDep {
+			depsSkipped++
+			continue
+		}
 		filtered = append(filtered, c)
+	}
+
+	otherReposTotal := 0
+	for _, n := range otherRepos {
+		otherReposTotal += n
 	}
 
 	if isCompact(req) {
@@ -1564,11 +1647,25 @@ func (s *Server) handleGetContracts(_ context.Context, req mcp.CallToolRequest) 
 			b.WriteString("no contracts found\n")
 		}
 		fmt.Fprintf(&b, "total: %d contracts\n", len(filtered))
+		if otherReposTotal > 0 {
+			fmt.Fprintf(&b, "other_repos: %d contracts in %d repo(s) (pass all_repos=true or repo=<prefix> to include)\n", otherReposTotal, len(otherRepos))
+		}
+		if depsSkipped > 0 {
+			fmt.Fprintf(&b, "dependencies_skipped: %d (pass include_deps=true to include)\n", depsSkipped)
+		}
 		return mcp.NewToolResultText(b.String()), nil
 	}
 
 	if isGCX(req) {
-		return gcxResponse(encodeContractsList(filtered, len(filtered)))
+		extra := []string{}
+		if otherReposTotal > 0 {
+			extra = append(extra, "other_repos_contracts", fmt.Sprintf("%d", otherReposTotal),
+				"other_repos", fmt.Sprintf("%d", len(otherRepos)))
+		}
+		if depsSkipped > 0 {
+			extra = append(extra, "dependencies_skipped", fmt.Sprintf("%d", depsSkipped))
+		}
+		return gcxResponse(encodeContractsList(filtered, len(filtered), extra...))
 	}
 
 	// Group by repo, then by type for structured output.
@@ -1592,6 +1689,20 @@ func (s *Server) handleGetContracts(_ context.Context, req mcp.CallToolRequest) 
 	payload := map[string]any{
 		"by_repo": byRepo,
 		"total":   len(filtered),
+	}
+	if otherReposTotal > 0 {
+		payload["other_repos"] = map[string]any{
+			"total":       otherReposTotal,
+			"repo_count":  len(otherRepos),
+			"by_repo":     otherRepos,
+			"hint":        "pass all_repos=true or repo=<prefix>/project=<name> to include these",
+		}
+	}
+	if depsSkipped > 0 {
+		payload["dependencies_skipped"] = map[string]any{
+			"total": depsSkipped,
+			"hint":  "pass include_deps=true to include type=dependency and vendor-pathed contracts",
+		}
 	}
 	return mcp.NewToolResultJSON(payload)
 }

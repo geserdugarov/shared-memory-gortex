@@ -466,11 +466,10 @@ func formatContractMeta(m map[string]any, exclude ...string) string {
 // encodeContractsList emits one row per contract. The by_repo grouping
 // from the JSON payload is flattened — rows carry repo in-band so
 // consumers can regroup without walking a tree.
-func encodeContractsList(rows []contracts.Contract, total int) ([]byte, error) {
+func encodeContractsList(rows []contracts.Contract, total int, extraMeta ...string) ([]byte, error) {
 	var buf bytes.Buffer
-	enc := newGCX(&buf, "contracts.list", contractFields,
-		"total", fmt.Sprintf("%d", total),
-	)
+	meta := append([]string{"total", fmt.Sprintf("%d", total)}, extraMeta...)
+	enc := newGCX(&buf, "contracts.list", contractFields, meta...)
 	if err := enc.WriteComment(fmt.Sprintf("%d contract(s)", len(rows))); err != nil {
 		return nil, err
 	}

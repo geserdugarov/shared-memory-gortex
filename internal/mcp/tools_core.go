@@ -746,6 +746,11 @@ func (s *Server) handleFindImplementations(_ context.Context, req mcp.CallToolRe
 	minTier := req.GetString("min_tier", "")
 	impls := s.engine.FindImplementationsMinTier(id, minTier)
 
+	if isGCX(req) {
+		sg := &query.SubGraph{Nodes: impls, TotalNodes: len(impls)}
+		return returnSubGraph(req, sg)
+	}
+
 	if isTOON(req) {
 		result := struct {
 			Implementations []toonNodeRow `toon:"implementations"`

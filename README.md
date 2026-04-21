@@ -24,7 +24,7 @@ See [docs/agents.md](docs/agents.md) for the adapter matrix, per-agent schema no
 - **Knowledge graph** — every file, symbol, import, call chain, and type relationship in one queryable structure
 - **Multi-repo workspaces** — index multiple repositories into a single graph with cross-repo symbol resolution, project grouping, reference tags, and per-repo scoping
 - **92 languages** — tree-sitter + regex extractors across core programming (Go, TypeScript, Python, Rust, Java, C#, Kotlin, Swift, C, C++, …), scripting (Bash, PowerShell, Perl, Lua, …), functional (Haskell, OCaml, Elixir, Clojure, …), template engines (Blade, EJS, Jinja, Twig, ERB, Liquid, Pug, Handlebars), blockchain (Solidity, Move, Cairo, Noir, Tact, Ballerina), scientific (Julia, R, MATLAB, Mathematica, SAS, Stata, Fortran, COBOL, Ada, Pascal, ABAP, Apex), emerging (Mojo, Odin, V, Hare, Carbon, ReScript, Gleam), build/data (Makefile, CMake, Dockerfile, SQL, Protobuf, JSON, YAML, TOML, HCL), and more. See [docs/languages.md](docs/languages.md) for the full table
-- **47 MCP tools** — symbol lookup, call chains, blast radius, community/process discovery, contract detection, unified `analyze` (dead code, hotspots, cycles), scaffolding, inline editing, symbol renaming, multi-repo management, agent feedback loop, context export, graph-validated config hygiene (`audit_agent_config`), opening-move routing (`plan_turn`), narrative repo overview (`get_repo_outline`), test-coverage gaps (`get_untested_symbols`), and 18 agent-optimized tools
+- **49 MCP tools** — symbol lookup, call chains, blast radius, community/process discovery, contract detection, unified `analyze` (dead code, hotspots, cycles), scaffolding, inline editing, symbol renaming, read-free file writes (`edit_file` / `write_file` — no Read-before-Edit roundtrip for docs/configs/specs), multi-repo management, agent feedback loop, context export, graph-validated config hygiene (`audit_agent_config`), opening-move routing (`plan_turn`), narrative repo overview (`get_repo_outline`), test-coverage gaps (`get_untested_symbols`), and 18 agent-optimized tools
 - **Semantic search** — hybrid BM25 + vector search with RRF fusion. Hugot (pure-Go ONNX runtime with MiniLM-L6-v2) is bundled by default and auto-downloads the model on first use — zero-config, no native dependencies. GloVe word vectors remain as fallback. Optional build tags switch to ONNX or GoMLX for higher throughput
 - **LSP-enriched call-graph tiers** — every edge carries an `origin` tier (`lsp_resolved` / `lsp_dispatch` / `ast_resolved` / `ast_inferred` / `text_matched`); pass `min_tier` to `get_callers`, `find_usages`, `find_implementations`, etc. to restrict results to compiler-verified edges for high-stakes refactors
 - **MCP progress notifications** — long-running indexing and track_repository calls emit `notifications/progress` with stage messages (walking files → parsing → resolving → semantic enrichment → search index → contracts → done) so hosts show real progress bars on large repos
@@ -49,6 +49,7 @@ See [docs/agents.md](docs/agents.md) for the adapter matrix, per-agent schema no
 - **Benchmarked** — per-language parsing, query engine, indexer benchmarks
 - **Per-community skills** — `gortex init --skills` (default on) auto-generates SKILL.md per detected community with key files, entry points, cross-community connections, and MCP tool invocations for Claude Code auto-discovery; the same routing table lands in every detected agent's per-repo instructions file
 - **Eval framework** — SWE-bench harness for A/B benchmarking tool effectiveness with Docker-based environments and multi-model support
+- **`gortex eval` CLI** — first-class evaluation harness. Subcommands: `recall` (fixture-driven any-hit R@1/5/20 + MRR per ranker, per-tier breakdown, p50/p95 latency, tokens-returned, optional LLM judge for CQS-style dual-judge scoring), `embedders` (ONNX variant comparison — size + init + embed latency + end-to-end quality across MiniLM variants, BGE, Jina), `swebench` (passthrough), `tokens` (GCX1 wire-format bench). Seed fixture at [`bench/fixtures/retrieval.yaml`](bench/fixtures/retrieval.yaml); published BM25 baseline on Gortex: **R@1 42.3% · R@5 56.4% · R@20 69.9% · exact R@5 95.2%**
 - **Zero dependencies** — everything runs in-process, in memory, no external services
 
 ## Installation
@@ -376,6 +377,7 @@ gortex init [path]           Per-repo setup (.mcp.json, hooks, community routing
 gortex mcp [flags]           Start the MCP server (--server to add HTTP API)
 gortex server [flags]        Start standalone HTTP server API
 gortex eval-server [flags]   Start eval HTTP server for benchmarking
+gortex eval <subcommand>     Retrieval-quality + token-savings benchmarks (recall, embedders, swebench, tokens)
 gortex context [flags]       Generate portable context briefing for a task
 gortex savings [flags]       Show cumulative token savings + cost avoided across sessions
 gortex index [path...]       Index one or more repositories and print stats
@@ -402,7 +404,7 @@ gortex query stats                      Show graph statistics
 
 All query commands support `--format text|json|dot` (DOT output for Graphviz visualization).
 
-## MCP Tools (44)
+## MCP Tools (49)
 
 ### Core Navigation
 | Tool | Description |
@@ -433,6 +435,8 @@ All query commands support `--format text|json|dot` (DOT output for Graphviz vis
 | `explain_change_impact` | Risk-tiered blast radius with affected processes |
 | `get_recent_changes` | Files/symbols changed since timestamp |
 | `edit_symbol` | Edit a symbol's source directly by ID — no Read needed |
+| `edit_file` | Edit any file (markdown, config, spec, template, source) by exact string replacement — accepts absolute paths or repo-rooted paths. Kills the Read-before-Edit stall on files not in the graph |
+| `write_file` | Create or overwrite any file with given content — atomic temp+rename, re-indexes on write |
 | `rename_symbol` | Coordinated multi-file rename with all references |
 
 ### Agent-Optimized (token efficiency)

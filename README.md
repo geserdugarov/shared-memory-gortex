@@ -58,7 +58,7 @@ See [docs/agents.md](docs/agents.md) for the adapter matrix, per-agent schema no
 curl -fsSL https://get.gortex.dev | sh
 ```
 
-Detects OS/arch, downloads the signed release tarball, verifies the SHA256 against `checksums.txt` (and cosign if installed), drops the binary in `$HOME/.local/bin`, and adds it to your shell rc. Re-runs upgrade in place. No silent sudo. Linux + macOS, amd64 + arm64. Windows support is planned.
+> Detects OS/arch, downloads the signed release tarball, verifies the SHA256 against `checksums.txt` (and cosign if installed), drops the binary in `$HOME/.local/bin`, and adds it to your shell rc. Re-runs upgrade in place. No silent sudo. Linux + macOS, amd64 + arm64. Windows support is planned.
 
 For Homebrew, package managers (`.deb` / `.rpm` / `.apk`), direct binary download, supply-chain verification (cosign + SLSA-3 + VirusTotal), and from-source builds — see [docs/installation.md](docs/installation.md).
 

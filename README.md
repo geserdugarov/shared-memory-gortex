@@ -42,7 +42,7 @@ See [docs/agents.md](docs/agents.md) for the adapter matrix, per-agent schema no
 - **Two-tier config** — global config (`~/.config/gortex/config.yaml`) for projects and repo lists, per-repo `.gortex.yaml` for guards, excludes, and local overrides
 - **Guard rules** — project-specific constraints (co-change, boundary) enforced via `check_guards`
 - **Watch mode** — surgical graph updates on file change across all tracked repos, live sync with agents
-- **Web UI** — standalone Next.js 15 app (`web/`) that talks to `gortex server` over `/v1/*`, with Sigma.js 2D graphs and five react-three-fiber 3D views (City, Strata, Galaxies, Constellation, Graph3D)
+- **Web UI** — standalone Next.js 15 app at [`gortexhq/web`](https://github.com/gortexhq/web) (separate repo so it deploys independently) that talks to `gortex server` over `/v1/*`, with Sigma.js 2D graphs and five react-three-fiber 3D views (City, Strata, Galaxies, Constellation, Graph3D)
 - **IMPLEMENTS inference** — structural interface satisfaction for Go, TypeScript, Java, Rust, C#, Scala, Swift, Protobuf
 - **PreToolUse + PreCompact + Stop hooks** — PreToolUse enriches Read/Grep/Glob/Bash (`codebase-search` / `rg` / `grep` probes routed through graph tools) with graph context and redirects to Gortex MCP tools; matching `Task` also briefs spawned subagents with an inline tool-swap table + task-scoped `smart_context` so subagents don't fall back to grep/Read. PreCompact injects a condensed orientation snapshot (index stats, recently-modified symbols, top hotspots, feedback-ranked symbols) before Claude Code compacts the conversation. Stop runs post-task diagnostics (`detect_changes` → `get_test_targets`, `check_guards`, `analyze dead_code`, `contracts check` on modified symbols) so the agent self-corrects before handoff. All hooks degrade silently when the server is unreachable
 - **Long-living daemon (optional)** — `gortex daemon start` runs a single shared process that holds the graph for every tracked repo. Each Claude Code / Cursor / Kiro window connects as a thin stdio proxy over a Unix socket, getting per-client session isolation (recent activity, token stats) + cross-repo queries by default. Live fsnotify watching on every tracked repo so file edits flow into the graph without manual reload. `gortex install` sets up user-level config; `gortex daemon install-service` installs a LaunchAgent (macOS) or systemd `--user` unit (Linux) so the OS supervises lifecycle and auto-starts at login — no sudo required. Binaries fall back to embedded mode if the daemon isn't running; the feature is additive
@@ -131,7 +131,7 @@ You don't need to verify manually if you're installing via `brew` / `dpkg` / `rp
 **cosign** — install once via `brew install cosign`, `apt install cosign`, or from [the cosign releases page](https://github.com/sigstore/cosign/releases). Then:
 
 ```bash
-TAG=v0.5.4                           # replace with the release you downloaded
+TAG=v0.14.0                          # replace with the release you downloaded
 FILE=gortex_linux_amd64.tar.gz       # pick your artifact
 
 BASE="https://github.com/zzet/gortex/releases/download/${TAG}"
@@ -199,11 +199,16 @@ gortex install --no-hooks           # skip user-level hook installation
 
 # Daemon lifecycle (also spawned by `gortex install --start`):
 gortex daemon start --detach        # spawn in background
-gortex daemon status                # PID, uptime, memory, tracked repos, sessions
+gortex daemon status                # PID, uptime, memory, tracked repos, sessions, server roster
 gortex daemon stop                  # graceful shutdown + final snapshot
 gortex daemon restart               # stop + start
 gortex daemon reload                # re-read config, pick up new/removed repos
 gortex daemon logs -n 50            # tail the log file
+
+# Multi-server roster — let the daemon route to additional Gortex servers (local sockets or remote HTTPS):
+gortex daemon server list                                                  # show ~/.gortex/servers.toml
+gortex daemon server add work --url https://gortex.work.example --auth-token-env WORK_TOK
+gortex daemon server remove work
 
 # Auto-start at login (launchd on macOS, systemd --user on Linux):
 gortex daemon install-service
@@ -237,7 +242,7 @@ gortex mcp --no-daemon --watch          # explicit embedded mode
 ### Other commands
 
 ```bash
-gortex server --index .                  # HTTP/JSON API on :4747 (/v1/*). Run `cd web && npm run dev` for the UI.
+gortex server --index .                  # HTTP/JSON API on :4747 (/v1/*). UI lives at github.com/gortexhq/web.
 gortex savings                           # cumulative tokens saved + $ avoided across sessions
 gortex version
 ```
@@ -245,6 +250,18 @@ gortex version
 ## Multi-Repo Workspaces
 
 Gortex can index multiple repositories into a single shared graph, enabling cross-repo symbol resolution, impact analysis, and navigation.
+
+### Workspace boundary
+
+Every node and contract is keyed on a **workspace slug**, which is the hard graph boundary for cross-repo work. Two repos that should pair their contracts (an HTTP server and the client that calls it, a Kafka producer and its consumer, etc.) must declare the same `workspace:` in their `.gortex.yaml` — otherwise contract matching stops at the boundary and they look like orphans.
+
+Slug resolution precedence (first match wins):
+
+1. `RepoEntry.workspace` in `~/.config/gortex/config.yaml` — overrides everything, ideal for OSS / read-only repos where you don't want to leave an artifact in the tree
+2. `workspace:` in the repo's own `.gortex.yaml` — the default for first-party repos
+3. The repo prefix — fallback when neither is set, so each unconfigured repo gets its own isolated workspace
+
+The same chain applies to the optional `project:` slug (a sub-bucket inside a workspace). On `gortex server`, the `--workspace` and `--scope-project` flags filter both indexing and queries: `gortex server --workspace api` will only load repos that resolve to the `api` workspace, and a typo'd value errors out at startup rather than producing an empty graph.
 
 ### Configuration
 
@@ -318,6 +335,12 @@ gortex mcp --project my-saas        # Set active project scope
 gortex index repo-a/ repo-b/        # Index multiple repos
 gortex status                       # Per-repo and per-project stats
 
+# Stamp workspace / project slugs across tracked repos (migration helper)
+gortex workspace list                                       # Show what each tracked repo currently declares
+gortex workspace set backend api                            # Write workspace=api to backend's .gortex.yaml
+gortex workspace set upstream-lib api --global              # OSS-friendly: pin to api in ~/.config/gortex/config.yaml
+gortex workspace set-all api --root ~/projects/work --yes   # Bulk: stamp every tracked repo under a prefix
+
 # Manage the effective ignore list used by indexing + watching
 gortex config exclude list                          # Show all layers (builtin, global, repo entry, workspace)
 gortex config exclude add pkg/generated             # Default target: workspace .gortex.yaml
@@ -377,7 +400,7 @@ gortex init [path]           Per-repo setup (.mcp.json, hooks, community routing
 gortex init doctor           Zero-op drift report across all detected agents (human or --json)
 gortex mcp [flags]            Start the MCP stdio server (auto-detects daemon; --no-daemon / --proxy; --server adds HTTP API)
 gortex server [flags]         Start the HTTP/JSON API under /v1/* (--bind, --auth-token, --watch, --cors-origin)
-gortex daemon <subcommand>   start / stop / restart / reload / status / logs / install-service / service-status / uninstall-service
+gortex daemon <subcommand>   start / stop / restart / reload / status / logs / install-service / service-status / uninstall-service / server (multi-server roster)
 gortex eval <subcommand>     Retrieval + token benchmarks — recall, embedders, swebench, tokens
 gortex eval-server [flags]   HTTP server used by the swebench harness
 gortex context [flags]       Generate portable context briefing for a task
@@ -386,6 +409,7 @@ gortex index [path...]       Index one or more repositories and print stats
 gortex status [flags]        Show index status (per-repo and per-project in multi-repo mode)
 gortex track <path>          Add a repository to the tracked workspace
 gortex untrack <path>        Remove a repository from the tracked workspace
+gortex workspace <sub>       list / set / set-all — manage workspace + project slugs across tracked repos
 gortex config exclude ...    add / list / remove entries in the effective ignore list
 gortex query <subcommand>    Query the knowledge graph from the CLI
 gortex clean                 Remove Gortex files from a project
@@ -517,15 +541,14 @@ All query commands support `--format text|json|dot` (DOT output for Graphviz vis
 
 ## Web UI
 
-Gortex ships a standalone Next.js 15 application under `web/`. It runs separately from the backend and talks to `gortex server` over `/v1/*`:
+The web UI lives in its own repo at [`gortexhq/web`](https://github.com/gortexhq/web) so it can be deployed independently of the backend (Vercel / a static host / your own Next.js deployment). It's a standalone Next.js 15 app that talks to `gortex server` over `/v1/*`:
 
 ```bash
 # 1) Start the HTTP backend (localhost:4747 by default, bearer-auth in non-localhost binds)
 gortex server --index /path/to/repo --watch
 
-# 2) Start the frontend in another terminal
-cd web
-# point the UI at the backend (and at an auth token if you set one on the server)
+# 2) Clone and run the UI in another terminal
+git clone https://github.com/gortexhq/web.git gortex-web && cd gortex-web
 echo 'NEXT_PUBLIC_GORTEX_URL=http://localhost:4747' > .env.local
 npm install && npm run dev
 # Open http://localhost:3000
@@ -569,7 +592,11 @@ gortex mcp --index /path/to/repo --server --port 8765
 | `/v1/graph` | GET | Full brief-graph dump (nodes + edges + stats); accepts `?project=` and/or `?repo=` for scoping |
 | `/v1/events` | GET | SSE stream of graph-change events (requires `--watch`). Accepts `?token=<t>` for `EventSource` auth |
 
-**Auth & binding.** The server defaults to `--bind 127.0.0.1` and runs unauthenticated on localhost only (logs `server: unauthenticated mode; localhost only`). Set `--auth-token <token>` or `$GORTEX_SERVER_TOKEN` to require `Authorization: Bearer <token>` on every `/v1/*` request (constant-time compare; CORS preflights bypass). Non-localhost binds without a token are rejected at startup. CORS origin is configurable via `--cors-origin` (default `*`).
+**Auth & binding.** The server defaults to `--bind 127.0.0.1` and runs unauthenticated on localhost only (logs `server: unauthenticated mode; localhost only`). Set `--auth-token <token>` or `$GORTEX_SERVER_TOKEN` to require `Authorization: Bearer <token>` on every `/v1/*` request (constant-time compare; CORS preflights bypass). Non-localhost binds without a token are rejected at startup. CORS origin is configurable via `--cors-origin` (default `*`). `--bind` also accepts `unix:///path/to.sock` for a Unix-domain socket.
+
+**Scoping the graph.** Pass `--workspace <slug>` to restrict both indexing and queries to repos that resolve to that workspace, and `--scope-project <slug>` to narrow further. A scope that matches zero tracked repos errors out at startup rather than silently producing an empty graph.
+
+**Multi-server roster.** When the daemon is running, it can route MCP traffic across multiple Gortex servers — a local Unix socket for the repos on this machine, plus one or more remote HTTPS servers for shared / cloud indexes. The roster lives at `~/.gortex/servers.toml`; manage it with `gortex daemon server list / add / remove`. Auth tokens can be embedded directly (`--auth-token`) or pulled from an env var the daemon reads at request time (`--auth-token-env`, preferred). Restart the daemon to pick up roster changes.
 
 ## Cross-Repo API Contracts
 

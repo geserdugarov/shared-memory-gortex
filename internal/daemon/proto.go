@@ -158,14 +158,14 @@ type StatusResponse struct {
 // when diagnosing daemon memory: live vs reserve, GC pressure, and
 // goroutine count. All byte fields are raw (not human-formatted).
 type RuntimeStats struct {
-	Alloc         uint64 `json:"alloc"`          // live heap allocations
-	Sys           uint64 `json:"sys"`            // total bytes from OS
-	HeapInuse     uint64 `json:"heap_inuse"`     // bytes in in-use spans
-	HeapIdle      uint64 `json:"heap_idle"`      // bytes in idle spans (released or reserve)
-	HeapReleased  uint64 `json:"heap_released"`  // bytes returned to OS
-	StackInuse    uint64 `json:"stack_inuse"`    // goroutine stacks
-	NumGC         uint32 `json:"num_gc"`         // completed GC cycles
-	NumGoroutine  int    `json:"num_goroutine"`  // live goroutines
+	Alloc        uint64 `json:"alloc"`         // live heap allocations
+	Sys          uint64 `json:"sys"`           // total bytes from OS
+	HeapInuse    uint64 `json:"heap_inuse"`    // bytes in in-use spans
+	HeapIdle     uint64 `json:"heap_idle"`     // bytes in idle spans (released or reserve)
+	HeapReleased uint64 `json:"heap_released"` // bytes returned to OS
+	StackInuse   uint64 `json:"stack_inuse"`   // goroutine stacks
+	NumGC        uint32 `json:"num_gc"`        // completed GC cycles
+	NumGoroutine int    `json:"num_goroutine"` // live goroutines
 }
 
 // SearchBackendStats identifies which search backend is currently
@@ -173,10 +173,10 @@ type RuntimeStats struct {
 // repo breakdown with the right mental model. Bleve with the default
 // gtreap KV store costs ~32 KiB per document; BM25 costs ~2 KiB.
 type SearchBackendStats struct {
-	Name     string `json:"name"`                 // "bm25" | "bleve-memory" | "bleve-disk"
-	DocCount int    `json:"doc_count"`            // indexed documents across all repos
-	Bytes    uint64 `json:"bytes"`                // approximate heap footprint
-	DiskPath string `json:"disk_path,omitempty"`  // set only when Name == "bleve-disk"
+	Name      string `json:"name"`                 // "bm25" | "bleve-memory" | "bleve-disk"
+	DocCount  int    `json:"doc_count"`            // indexed documents across all repos
+	Bytes     uint64 `json:"bytes"`                // approximate heap footprint
+	DiskPath  string `json:"disk_path,omitempty"`  // set only when Name == "bleve-disk"
 	DiskBytes uint64 `json:"disk_bytes,omitempty"` // current on-disk size for "bleve-disk"
 }
 
@@ -206,31 +206,31 @@ type SearchSymbolsResult struct {
 
 // TrackedRepoStatus is one row in StatusResponse.TrackedRepos.
 type TrackedRepoStatus struct {
-	Prefix    string          `json:"prefix"`
-	Path      string          `json:"path"`
-	Name      string          `json:"name,omitempty"`
+	Prefix string `json:"prefix"`
+	Path   string `json:"path"`
+	Name   string `json:"name,omitempty"`
 	// Project is the GlobalConfig active-project slug — a named
 	// grouping of repos in `~/.config/gortex/config.yaml::projects`.
 	// Distinct from `WorkspaceProject` below, which is the §4.2
 	// project slug from `.gortex.yaml::project`. Kept here for
 	// backwards compatibility with older daemon clients that read
 	// the field.
-	Project   string          `json:"project,omitempty"`
+	Project string `json:"project,omitempty"`
 	// Workspace is the §4.2 workspace slug stamped onto every node
 	// emitted from this repo. Falls back to Prefix when no
 	// `.gortex.yaml::workspace` is declared. Two repos that share a
 	// Workspace pair their contracts as one logical service.
-	Workspace string          `json:"workspace,omitempty"`
+	Workspace string `json:"workspace,omitempty"`
 	// WorkspaceProject is the §4.2 project slug — the soft sub-
 	// boundary inside Workspace. Falls back to Prefix when no
 	// `.gortex.yaml::project` is declared.
-	WorkspaceProject string `json:"workspace_project,omitempty"`
-	Ref       string          `json:"ref,omitempty"`
-	Files     int             `json:"files"`
-	Nodes     int             `json:"nodes"`
-	Edges     int             `json:"edges"`
-	LastIndex int64           `json:"last_index_unix"`
-	Memory    MemoryBreakdown `json:"memory"`
+	WorkspaceProject string          `json:"workspace_project,omitempty"`
+	Ref              string          `json:"ref,omitempty"`
+	Files            int             `json:"files"`
+	Nodes            int             `json:"nodes"`
+	Edges            int             `json:"edges"`
+	LastIndex        int64           `json:"last_index_unix"`
+	Memory           MemoryBreakdown `json:"memory"`
 }
 
 // WorkspaceSummary aggregates per-workspace stats so `gortex daemon

@@ -213,7 +213,7 @@ func (sg *SubGraph) ToMermaid() string {
 		toID := mermaidID(e.To)
 
 		// For simple arrow styles, add the edge kind as label.
-		if style == "-->" || style == "-.->"{
+		if style == "-->" || style == "-.->" {
 			fmt.Fprintf(&b, "  %s %s|%s| %s\n", fromID, style, e.Kind, toID)
 		} else {
 			fmt.Fprintf(&b, "  %s %s %s\n", fromID, style, toID)

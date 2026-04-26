@@ -97,14 +97,15 @@ func EnrichHTTPContract(c *Contract, lines []string, fileNodes []*graph.Node, la
 // handler's body span can't be located, or when no enricher matched.
 //
 // Keys written to c.Meta on success:
-//   path_params   []string   — always when the path template has placeholders
-//   query_params  []string   — when any enricher found query reads
-//   status_codes  []int      — when any enricher found status writes
-//   request_type  string     — symbol ID or bare type name
-//   request_expr  string     — raw expression fallback
-//   response_type string     — symbol ID or bare type name
-//   response_expr string     — raw expression fallback
-//   schema_source string     — one of "extracted" | "partial" | "none"
+//
+//	path_params   []string   — always when the path template has placeholders
+//	query_params  []string   — when any enricher found query reads
+//	status_codes  []int      — when any enricher found status writes
+//	request_type  string     — symbol ID or bare type name
+//	request_expr  string     — raw expression fallback
+//	response_type string     — symbol ID or bare type name
+//	response_expr string     — raw expression fallback
+//	schema_source string     — one of "extracted" | "partial" | "none"
 func enrichHTTPContract(c *Contract, lines []string, fileNodes []*graph.Node, lang string) {
 	if c.Meta == nil {
 		c.Meta = map[string]any{}
@@ -461,33 +462,33 @@ func containsStr(xs []string, needle string) bool {
 // -----------------------------------------------------------------------------
 
 var httpStatusNames = map[string]int{
-	"StatusContinue":                      100,
-	"StatusSwitchingProtocols":            101,
-	"StatusOK":                            200,
-	"StatusCreated":                       201,
-	"StatusAccepted":                      202,
-	"StatusNoContent":                     204,
-	"StatusMovedPermanently":              301,
-	"StatusFound":                         302,
-	"StatusSeeOther":                      303,
-	"StatusNotModified":                   304,
-	"StatusTemporaryRedirect":             307,
-	"StatusPermanentRedirect":             308,
-	"StatusBadRequest":                    400,
-	"StatusUnauthorized":                  401,
-	"StatusForbidden":                     403,
-	"StatusNotFound":                      404,
-	"StatusMethodNotAllowed":              405,
-	"StatusConflict":                      409,
-	"StatusGone":                          410,
-	"StatusPreconditionFailed":            412,
-	"StatusUnprocessableEntity":           422,
-	"StatusTooManyRequests":               429,
-	"StatusInternalServerError":           500,
-	"StatusNotImplemented":                501,
-	"StatusBadGateway":                    502,
-	"StatusServiceUnavailable":            503,
-	"StatusGatewayTimeout":                504,
+	"StatusContinue":            100,
+	"StatusSwitchingProtocols":  101,
+	"StatusOK":                  200,
+	"StatusCreated":             201,
+	"StatusAccepted":            202,
+	"StatusNoContent":           204,
+	"StatusMovedPermanently":    301,
+	"StatusFound":               302,
+	"StatusSeeOther":            303,
+	"StatusNotModified":         304,
+	"StatusTemporaryRedirect":   307,
+	"StatusPermanentRedirect":   308,
+	"StatusBadRequest":          400,
+	"StatusUnauthorized":        401,
+	"StatusForbidden":           403,
+	"StatusNotFound":            404,
+	"StatusMethodNotAllowed":    405,
+	"StatusConflict":            409,
+	"StatusGone":                410,
+	"StatusPreconditionFailed":  412,
+	"StatusUnprocessableEntity": 422,
+	"StatusTooManyRequests":     429,
+	"StatusInternalServerError": 500,
+	"StatusNotImplemented":      501,
+	"StatusBadGateway":          502,
+	"StatusServiceUnavailable":  503,
+	"StatusGatewayTimeout":      504,
 }
 
 // parseStatusExpr turns a status expression like "http.StatusOK" or

@@ -72,11 +72,11 @@ func (s *Server) handlePlanTurn(_ context.Context, req mcp.CallToolRequest) (*mc
 	}
 
 	return mcp.NewToolResultJSON(map[string]any{
-		"task":               task,
-		"keywords":           keywords,
-		"recommended_calls":  recs,
-		"top_candidates":     topCandidateIDs,
-		"candidate_count":    len(candidates),
+		"task":              task,
+		"keywords":          keywords,
+		"recommended_calls": recs,
+		"top_candidates":    topCandidateIDs,
+		"candidate_count":   len(candidates),
 	})
 }
 

@@ -14,8 +14,8 @@ import (
 // `call name(...)` for subroutines or via expression context for
 // functions — we only catch the `call` form reliably.
 var (
-	fortranSubRe  = regexp.MustCompile(`(?im)^\s*(?:pure\s+|elemental\s+|recursive\s+)?subroutine\s+(\w+)`)
-	fortranFnRe   = regexp.MustCompile(`(?im)^\s*(?:pure\s+|elemental\s+|recursive\s+)?(?:\w+\s+)?function\s+(\w+)\s*\(`)
+	fortranSubRe = regexp.MustCompile(`(?im)^\s*(?:pure\s+|elemental\s+|recursive\s+)?subroutine\s+(\w+)`)
+	fortranFnRe  = regexp.MustCompile(`(?im)^\s*(?:pure\s+|elemental\s+|recursive\s+)?(?:\w+\s+)?function\s+(\w+)\s*\(`)
 	// `module NAME` — but Fortran also uses `module procedure foo` inside
 	// interfaces; the capture filters `procedure` by name below.
 	fortranModRe  = regexp.MustCompile(`(?im)^\s*module\s+(\w+)`)

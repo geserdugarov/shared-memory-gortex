@@ -3,10 +3,10 @@ package languages
 import (
 	"strings"
 
-	sitter "github.com/zzet/gortex/internal/parser/tsitter"
-	"github.com/zzet/gortex/internal/parser/tsitter/c"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/parser"
+	sitter "github.com/zzet/gortex/internal/parser/tsitter"
+	"github.com/zzet/gortex/internal/parser/tsitter/c"
 )
 
 // qCAll is a single tree-sitter query alternating over every pattern

@@ -8,10 +8,10 @@ import (
 
 	"github.com/mark3labs/mcp-go/mcp"
 
+	wire "github.com/gortexhq/gcx-go"
 	"github.com/zzet/gortex/internal/contracts"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/query"
-	wire "github.com/gortexhq/gcx-go"
 )
 
 // isGCX reports whether the caller requested the GCX1 compact wire
@@ -776,4 +776,3 @@ func indexNodes(nodes []*graph.Node) map[string]*graph.Node {
 	}
 	return m
 }
-

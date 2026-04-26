@@ -1,10 +1,10 @@
 package languages
 
 import (
-	sitter "github.com/zzet/gortex/internal/parser/tsitter"
-	"github.com/zzet/gortex/internal/parser/tsitter/hcl"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/parser"
+	sitter "github.com/zzet/gortex/internal/parser/tsitter"
+	"github.com/zzet/gortex/internal/parser/tsitter/hcl"
 )
 
 // HCLExtractor extracts HCL/Terraform files into graph nodes and edges.

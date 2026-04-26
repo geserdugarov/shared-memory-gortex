@@ -18,7 +18,6 @@ import (
 // edges during BFS traversal and include affected symbols from other repositories
 // in the result. The result SHALL group affected symbols by RepoPrefix and set
 // cross_repo_impact to true when symbols from multiple repos are affected.
-//
 func TestPropertyCrossRepoImpactTraversal(t *testing.T) {
 	rapid.Check(t, func(rt *rapid.T) {
 		g := graph.New()
@@ -121,7 +120,6 @@ func TestPropertyCrossRepoImpactTraversal(t *testing.T) {
 // VerifyChanges SHALL report violations for those cross-repo callers.
 // For any changed symbol that has transitive test dependents in other repositories,
 // get_test_targets SHALL include those cross-repo test files in the result.
-//
 func TestPropertyCrossRepoSafetyChecks(t *testing.T) {
 	rapid.Check(t, func(rt *rapid.T) {
 		g := graph.New()

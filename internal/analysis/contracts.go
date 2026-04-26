@@ -20,7 +20,7 @@ type ContractViolation struct {
 	Name        string `json:"name"`
 	FilePath    string `json:"file_path"`
 	Line        int    `json:"line"`
-	Kind        string `json:"kind"`        // "caller_mismatch", "interface_violation", "removed_param"
+	Kind        string `json:"kind"` // "caller_mismatch", "interface_violation", "removed_param"
 	Description string `json:"description"`
 	RepoPrefix  string `json:"repo_prefix,omitempty"`
 }

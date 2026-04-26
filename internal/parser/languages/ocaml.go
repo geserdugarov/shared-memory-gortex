@@ -4,10 +4,10 @@ import (
 	"fmt"
 	"strings"
 
-	sitter "github.com/zzet/gortex/internal/parser/tsitter"
-	"github.com/zzet/gortex/internal/parser/tsitter/ocaml"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/parser"
+	sitter "github.com/zzet/gortex/internal/parser/tsitter"
+	"github.com/zzet/gortex/internal/parser/tsitter/ocaml"
 )
 
 // OCamlExtractor extracts OCaml source files.

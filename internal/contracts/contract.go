@@ -10,12 +10,12 @@ import (
 type ContractType string
 
 const (
-	ContractHTTP    ContractType = "http"
-	ContractGRPC    ContractType = "grpc"
-	ContractGraphQL ContractType = "graphql"
-	ContractTopic   ContractType = "topic"
-	ContractWS      ContractType = "ws"
-	ContractEnv     ContractType = "env"
+	ContractHTTP       ContractType = "http"
+	ContractGRPC       ContractType = "grpc"
+	ContractGraphQL    ContractType = "graphql"
+	ContractTopic      ContractType = "topic"
+	ContractWS         ContractType = "ws"
+	ContractEnv        ContractType = "env"
 	ContractOpenAPI    ContractType = "openapi"
 	ContractDependency ContractType = "dependency"
 	// ContractDI covers NestJS-style dependency-injection bindings
@@ -37,13 +37,13 @@ const (
 // Contract represents a detected API contract (e.g., an HTTP route) attached
 // to a symbol in the graph.
 type Contract struct {
-	ID         string            `json:"id"`
-	Type       ContractType      `json:"type"`
-	Role       Role              `json:"role"`
-	SymbolID   string            `json:"symbol_id"`
-	FilePath   string            `json:"file_path"`
-	Line       int               `json:"line"`
-	RepoPrefix string            `json:"repo_prefix,omitempty"`
+	ID         string       `json:"id"`
+	Type       ContractType `json:"type"`
+	Role       Role         `json:"role"`
+	SymbolID   string       `json:"symbol_id"`
+	FilePath   string       `json:"file_path"`
+	Line       int          `json:"line"`
+	RepoPrefix string       `json:"repo_prefix,omitempty"`
 	// WorkspaceID is the spec-launch.md §4.2 hard-boundary slug. The
 	// matcher pairs providers and consumers only inside the same
 	// (workspace, project) tuple — across-workspace contracts never
@@ -52,9 +52,9 @@ type Contract struct {
 	// ProjectID is the soft sub-boundary inside a workspace. Across-
 	// project (same-workspace) contracts become orphans rather than
 	// paired matches. Empty falls back to RepoPrefix.
-	ProjectID  string            `json:"project_id,omitempty"`
+	ProjectID  string         `json:"project_id,omitempty"`
 	Meta       map[string]any `json:"meta,omitempty"`
-	Confidence float64           `json:"confidence"`
+	Confidence float64        `json:"confidence"`
 }
 
 // EffectiveWorkspace returns the spec §4.2 workspace slug that

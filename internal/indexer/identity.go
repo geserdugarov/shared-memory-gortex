@@ -139,7 +139,7 @@ func DeduplicateRepos(entries []config.RepoEntry) ([]config.RepoEntry, []string)
 
 	// Track last occurrence of each canonical identity.
 	// Iterate in reverse so last occurrence wins.
-	seen := make(map[string]int)       // canonical → last index
+	seen := make(map[string]int)        // canonical → last index
 	duplicates := make(map[string]bool) // canonical → has duplicates
 	var warnings []string
 

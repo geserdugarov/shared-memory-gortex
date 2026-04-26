@@ -9,9 +9,9 @@ import (
 )
 
 const (
-	frecencyFile          = "frecency.gob.gz"
-	maxFrecencyAccesses   = 16 // entries per symbol; matches FFF's bounded deque
-	maxFrecencySymbols    = 10000
+	frecencyFile        = "frecency.gob.gz"
+	maxFrecencyAccesses = 16 // entries per symbol; matches FFF's bounded deque
+	maxFrecencySymbols  = 10000
 )
 
 // FrecencyAccesses is the bounded, ordered (oldest→newest) list of unix

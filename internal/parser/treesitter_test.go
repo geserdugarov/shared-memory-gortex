@@ -3,9 +3,9 @@ package parser
 import (
 	"testing"
 
-	"github.com/zzet/gortex/internal/parser/tsitter/golang"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/zzet/gortex/internal/parser/tsitter/golang"
 )
 
 func TestParseFile_Go(t *testing.T) {

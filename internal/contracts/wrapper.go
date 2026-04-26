@@ -29,7 +29,7 @@ type SourceReader func(n *graph.Node) ([]byte, bool)
 //     caller's source at the call-site line and extract the first arg.
 //     - Literal path → emit a new consumer contract for the caller.
 //     - Bare identifier matching the caller's own parameter name → the
-//       caller is itself a wrapper; enqueue it for the next pass.
+//     caller is itself a wrapper; enqueue it for the next pass.
 //     - Anything else (runtime expression) → skip silently.
 //  3. Repeat until no new wrappers are found, bounded by a safety cap.
 //

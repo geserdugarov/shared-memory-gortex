@@ -3,12 +3,12 @@ package languages
 import (
 	"testing"
 
-	sitter "github.com/zzet/gortex/internal/parser/tsitter"
-	"github.com/zzet/gortex/internal/parser/tsitter/ocaml"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/parser"
+	sitter "github.com/zzet/gortex/internal/parser/tsitter"
+	"github.com/zzet/gortex/internal/parser/tsitter/ocaml"
 )
 
 func TestOCamlAST_Debug(t *testing.T) {

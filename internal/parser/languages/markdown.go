@@ -4,10 +4,10 @@ import (
 	"regexp"
 	"strings"
 
-	sitter "github.com/zzet/gortex/internal/parser/tsitter"
-	tree_sitter_markdown "github.com/zzet/gortex/internal/parser/tsitter/markdown"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/parser"
+	sitter "github.com/zzet/gortex/internal/parser/tsitter"
+	tree_sitter_markdown "github.com/zzet/gortex/internal/parser/tsitter/markdown"
 )
 
 // linkPattern matches markdown links: [text](target)

@@ -53,12 +53,12 @@ type Handler struct {
 	logger        *zap.Logger
 	mux           *http.ServeMux
 	startTime     time.Time
-	eventHub      *hub.Hub                 // nil when watch mode is off
-	configManager *config.ConfigManager    // nil in single-repo mode
-	serverID      string                   // UUID; empty until SetServerID wires it
-	activity      *activityBuffer          // ring buffer of recent graph events
-	overlays      *daemon.OverlayManager   // nil when overlay support is off
-	router        *daemon.Router           // nil when single-server (no servers.toml)
+	eventHub      *hub.Hub               // nil when watch mode is off
+	configManager *config.ConfigManager  // nil in single-repo mode
+	serverID      string                 // UUID; empty until SetServerID wires it
+	activity      *activityBuffer        // ring buffer of recent graph events
+	overlays      *daemon.OverlayManager // nil when overlay support is off
+	router        *daemon.Router         // nil when single-server (no servers.toml)
 }
 
 // NewHandler creates an HTTP handler that dispatches to MCP tools.

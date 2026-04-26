@@ -41,11 +41,11 @@ func genDistinctPrefixPair() *rapid.Generator[[2]string] {
 
 // coChangeTestCase holds a generated scenario for co-change rule testing.
 type coChangeTestCase struct {
-	Graph          *graph.Graph
-	Rule           config.GuardRule
-	ChangedIDs     []string
-	HasSource      bool // whether any changed symbol is in source prefix
-	HasTarget      bool // whether any changed symbol is in target prefix
+	Graph      *graph.Graph
+	Rule       config.GuardRule
+	ChangedIDs []string
+	HasSource  bool // whether any changed symbol is in source prefix
+	HasTarget  bool // whether any changed symbol is in target prefix
 }
 
 // genCoChangeTestCase generates a graph with symbols in two packages and a
@@ -236,7 +236,6 @@ func genBoundaryTestCase() *rapid.Generator[boundaryTestCase] {
 }
 
 // --- Property Tests ---
-
 
 // TestPropertyGuardCoChange verifies that EvaluateGuards triggers a co-change
 // violation if and only if the change set contains source-prefix symbols but
@@ -438,7 +437,6 @@ func TestPropertyGuardMixedRules(t *testing.T) {
 }
 
 // --- Unit Tests ---
-
 
 // TestGuardEmptyRules verifies that when no guard rules are configured,
 // EvaluateGuards returns an empty result.

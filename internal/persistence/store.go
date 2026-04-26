@@ -13,13 +13,13 @@ var ErrNotFound = errors.New("persistence: snapshot not found")
 
 // Snapshot is the unit of persistence — a complete graph state at a point in time.
 type Snapshot struct {
-	Version    string            `json:"version"`
-	RepoPath   string            `json:"repo_path"`
-	CommitHash string            `json:"commit_hash"`
-	IndexedAt  time.Time         `json:"indexed_at"`
-	Nodes      []*graph.Node     `json:"nodes"`
-	Edges      []*graph.Edge     `json:"edges"`
-	FileMtimes map[string]int64  `json:"file_mtimes"`
+	Version    string           `json:"version"`
+	RepoPath   string           `json:"repo_path"`
+	CommitHash string           `json:"commit_hash"`
+	IndexedAt  time.Time        `json:"indexed_at"`
+	Nodes      []*graph.Node    `json:"nodes"`
+	Edges      []*graph.Edge    `json:"edges"`
+	FileMtimes map[string]int64 `json:"file_mtimes"`
 
 	// VectorIndex is the serialized HNSW vector index (nil when embeddings are disabled).
 	VectorIndex []byte `json:"vector_index,omitempty"`

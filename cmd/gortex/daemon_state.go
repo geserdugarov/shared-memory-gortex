@@ -184,11 +184,11 @@ func buildDaemonState(logger *zap.Logger) (*daemonState, error) {
 	// for the few seconds warmup takes.
 
 	return &daemonState{
-		graph:         g,
-		indexer:       idx,
-		multiIndexer:  mi,
-		configManager: cm,
-		mcpServer:     srv,
+		graph:             g,
+		indexer:           idx,
+		multiIndexer:      mi,
+		configManager:     cm,
+		mcpServer:         srv,
 		snapshotRepos:     loadResult.Repos,
 		snapshotContracts: loadResult.Contracts,
 	}, nil

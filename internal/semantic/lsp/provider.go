@@ -42,7 +42,7 @@ func NewProvider(command string, args []string, languages []string, daemon bool,
 	}
 }
 
-func (p *Provider) Name() string       { return "lsp-" + p.command }
+func (p *Provider) Name() string        { return "lsp-" + p.command }
 func (p *Provider) Languages() []string { return p.languages }
 
 func (p *Provider) Available() bool {

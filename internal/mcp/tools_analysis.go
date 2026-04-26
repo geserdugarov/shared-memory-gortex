@@ -423,12 +423,12 @@ func impactMetaString(m map[string]any, key string) string {
 
 // CommunityCoupling describes the coupling between two communities.
 type CommunityCoupling struct {
-	CommunityA    string  `json:"community_a"`
-	CommunityB    string  `json:"community_b"`
-	LabelA        string  `json:"label_a"`
-	LabelB        string  `json:"label_b"`
-	CouplingScore float64 `json:"coupling_score"`
-	TightlyCoupled bool   `json:"tightly_coupled"`
+	CommunityA     string  `json:"community_a"`
+	CommunityB     string  `json:"community_b"`
+	LabelA         string  `json:"label_a"`
+	LabelB         string  `json:"label_b"`
+	CouplingScore  float64 `json:"coupling_score"`
+	TightlyCoupled bool    `json:"tightly_coupled"`
 }
 
 // CrossCommunityWarning describes cross-community impact.

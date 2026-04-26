@@ -38,11 +38,11 @@ import (
 // "discover at runtime"; `WorkspaceRosterCache` falls back to
 // querying the server for the roster on demand.
 type ServerEntry struct {
-	Slug          string   `toml:"slug"`
-	URL           string   `toml:"url"`
-	AuthToken     string   `toml:"auth_token,omitempty"`
-	AuthTokenEnv  string   `toml:"auth_token_env,omitempty"`
-	Workspaces    []string `toml:"workspaces,omitempty"`
+	Slug         string   `toml:"slug"`
+	URL          string   `toml:"url"`
+	AuthToken    string   `toml:"auth_token,omitempty"`
+	AuthTokenEnv string   `toml:"auth_token_env,omitempty"`
+	Workspaces   []string `toml:"workspaces,omitempty"`
 	// Default flips a single ServerEntry to the "use me when no
 	// workspace context disambiguates" pick. Conflict (multiple
 	// entries marked Default=true) is rejected at load time.

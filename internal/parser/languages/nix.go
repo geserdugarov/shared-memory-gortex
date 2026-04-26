@@ -23,9 +23,9 @@ var (
 	// Two capture groups: "quoted", relative path, or <angle>. Exactly one
 	// of them will match per import occurrence; the handler picks
 	// whichever is non-empty.
-	nixImportRe  = regexp.MustCompile(`\b(?:import|builtins\.fetchTarball|fetchurl|fetchGit|fetchFromGitHub)\s+(?:\(\s*)?(?:"([^"]+)"|(\.?\./[^;\s)]+)|<([^>]+)>)`)
-	nixWithRe    = regexp.MustCompile(`(?m)\bwith\s+(\w[\w.]*)\s*;`)
-	nixPkgRefRe  = regexp.MustCompile(`(?m)\b(?:inherit\s*\(\s*)(\w[\w.]*)\s*\)`)
+	nixImportRe = regexp.MustCompile(`\b(?:import|builtins\.fetchTarball|fetchurl|fetchGit|fetchFromGitHub)\s+(?:\(\s*)?(?:"([^"]+)"|(\.?\./[^;\s)]+)|<([^>]+)>)`)
+	nixWithRe   = regexp.MustCompile(`(?m)\bwith\s+(\w[\w.]*)\s*;`)
+	nixPkgRefRe = regexp.MustCompile(`(?m)\b(?:inherit\s*\(\s*)(\w[\w.]*)\s*\)`)
 )
 
 // NixExtractor extracts Nix expressions using regex.

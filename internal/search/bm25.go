@@ -17,9 +17,9 @@ type BM25Backend struct {
 }
 
 type doc struct {
-	id     string
-	len    int
-	terms  map[string]int // term -> frequency in this doc
+	id    string
+	len   int
+	terms map[string]int // term -> frequency in this doc
 }
 
 type posting struct {

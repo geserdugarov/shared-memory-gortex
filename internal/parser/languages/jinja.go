@@ -15,11 +15,11 @@ import (
 // import edges. Block and macro bodies are closed by matching
 // `{% endblock %}` / `{% endmacro %}` which we find by keyword scan.
 var (
-	jinjaBlockRe     = regexp.MustCompile(`(?m)\{%\s*block\s+([A-Za-z_][\w]*)`)
-	jinjaMacroRe     = regexp.MustCompile(`(?m)\{%\s*macro\s+([A-Za-z_][\w]*)\s*\(`)
-	jinjaExtendsRe   = regexp.MustCompile(`(?m)\{%\s*extends\s+['"]([^'"]+)['"]`)
-	jinjaIncludeRe   = regexp.MustCompile(`(?m)\{%\s*include\s+['"]([^'"]+)['"]`)
-	jinjaImportRe    = regexp.MustCompile(`(?m)\{%\s*import\s+['"]([^'"]+)['"]`)
+	jinjaBlockRe      = regexp.MustCompile(`(?m)\{%\s*block\s+([A-Za-z_][\w]*)`)
+	jinjaMacroRe      = regexp.MustCompile(`(?m)\{%\s*macro\s+([A-Za-z_][\w]*)\s*\(`)
+	jinjaExtendsRe    = regexp.MustCompile(`(?m)\{%\s*extends\s+['"]([^'"]+)['"]`)
+	jinjaIncludeRe    = regexp.MustCompile(`(?m)\{%\s*include\s+['"]([^'"]+)['"]`)
+	jinjaImportRe     = regexp.MustCompile(`(?m)\{%\s*import\s+['"]([^'"]+)['"]`)
 	jinjaFromImportRe = regexp.MustCompile(`(?m)\{%\s*from\s+['"]([^'"]+)['"]\s+import`)
 )
 

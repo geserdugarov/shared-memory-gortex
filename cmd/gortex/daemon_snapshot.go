@@ -104,15 +104,15 @@ type snapshotHeader struct {
 // contracts. Daemons in the wild write v_n snapshots; daemons at v_{n+k}
 // must still load them. Rules:
 //
-//   • Additive field changes (new field, unused by older readers) do
+//   - Additive field changes (new field, unused by older readers) do
 //     NOT require a schema bump — gob decodes unknown fields as zero,
 //     and newer fields on older writers stay zero on newer readers.
 //
-//   • Renames, type changes, or removals on existing fields DO require
+//   - Renames, type changes, or removals on existing fields DO require
 //     a schema bump + migration entry in snapshotMigrations. The gob
 //     stream is field-name-tagged; renaming breaks decode silently.
 //
-//   • CI guard: TestWireContractFingerprint (wire_contract_test.go)
+//   - CI guard: TestWireContractFingerprint (wire_contract_test.go)
 //     hashes the exported fields of the four wire types above and
 //     fails any PR that drifts the fingerprint without updating the
 //     pinned golden. Runs as part of the normal `go test ./...` sweep.
@@ -172,19 +172,28 @@ func canMigrate(from, to int) bool {
 // extractors — IncrementalReindex skips extraction in steady state, so
 // without this the registries came back nil after every restart.
 func saveSnapshot(g *graph.Graph, repos []snapshotRepo, snapContracts []snapshotContract, version string, logger *zap.Logger) {
+	_ = saveSnapshotTo(g, repos, snapContracts, version, daemon.SnapshotPath(), logger)
+}
+
+// saveSnapshotTo writes the snapshot to an explicit path. Used by
+// `gortex index --snapshot <path>` (the cloud indexer worker shells
+// this out per spec-launch.md §0a iteration 2). Returns an error
+// when the path can't be written so the caller can fail the job;
+// the daemon's saveSnapshot wrapper still swallows errors because
+// a failed snapshot must never block clean shutdown.
+func saveSnapshotTo(g *graph.Graph, repos []snapshotRepo, snapContracts []snapshotContract, version string, path string, logger *zap.Logger) error {
 	if g == nil {
-		return
+		return errors.New("snapshot: nil graph")
 	}
-	path := daemon.SnapshotPath()
 	if err := daemon.EnsureParentDir(path); err != nil {
 		logger.Warn("snapshot: parent dir", zap.Error(err))
-		return
+		return err
 	}
 	tmp := path + ".tmp"
 	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 	if err != nil {
 		logger.Warn("snapshot: create tmp", zap.Error(err))
-		return
+		return err
 	}
 
 	gz := gzip.NewWriter(f)
@@ -206,57 +215,53 @@ func saveSnapshot(g *graph.Graph, repos []snapshotRepo, snapContracts []snapshot
 	}
 
 	// Helper to clean up after any failure.
-	abort := func(stage string, e error) {
+	abort := func(stage string, e error) error {
 		logger.Warn("snapshot: "+stage, zap.Error(e))
 		_ = gz.Close()
 		_ = f.Close()
 		_ = os.Remove(tmp)
+		return e
 	}
 
 	if err := enc.Encode(header); err != nil {
-		abort("encode header", err)
-		return
+		return abort("encode header", err)
 	}
 	for _, n := range nodes {
 		if err := enc.Encode(n); err != nil {
-			abort("encode node", err)
-			return
+			return abort("encode node", err)
 		}
 	}
 	for _, e := range edges {
 		if err := enc.Encode(e); err != nil {
-			abort("encode edge", err)
-			return
+			return abort("encode edge", err)
 		}
 	}
 	for i := range repos {
 		if err := enc.Encode(repos[i]); err != nil {
-			abort("encode repo", err)
-			return
+			return abort("encode repo", err)
 		}
 	}
 	for i := range snapContracts {
 		if err := enc.Encode(snapContracts[i]); err != nil {
-			abort("encode contract", err)
-			return
+			return abort("encode contract", err)
 		}
 	}
 	if err := gz.Close(); err != nil {
 		logger.Warn("snapshot: gzip close", zap.Error(err))
 		_ = f.Close()
 		_ = os.Remove(tmp)
-		return
+		return err
 	}
 	if err := f.Close(); err != nil {
 		logger.Warn("snapshot: file close", zap.Error(err))
 		_ = os.Remove(tmp)
-		return
+		return err
 	}
 	// Atomic swap so a concurrent crash can never leave a truncated
 	// snapshot on disk.
 	if err := os.Rename(tmp, path); err != nil {
 		logger.Warn("snapshot: rename", zap.Error(err))
-		return
+		return err
 	}
 	logger.Info("snapshot: wrote",
 		zap.String("path", path),
@@ -264,6 +269,7 @@ func saveSnapshot(g *graph.Graph, repos []snapshotRepo, snapContracts []snapshot
 		zap.Int("edges", header.EdgeCount),
 		zap.Int("repos", header.RepoCount),
 		zap.Int("contracts", header.ContractCount))
+	return nil
 }
 
 // toSnapshotContract flattens a contracts.Contract into its wire form.
@@ -315,6 +321,14 @@ func fromSnapshotContract(s snapshotContract) contracts.Contract {
 // trades "one bad byte poisons the entire cache" for "N bad records
 // cost at most N files being re-indexed on next warmup."
 func loadSnapshot(g *graph.Graph, logger *zap.Logger) (snapshotLoadResult, error) {
+	return loadSnapshotFrom(g, daemon.SnapshotPath(), logger)
+}
+
+// loadSnapshotFrom is loadSnapshot with an explicit path argument.
+// Used by `gortex server --snapshot <path>` so a per-workspace
+// process can boot from a specific snapshot file produced by the
+// cloud indexer worker (spec-launch.md §0a iteration 2).
+func loadSnapshotFrom(g *graph.Graph, path string, logger *zap.Logger) (snapshotLoadResult, error) {
 	// Allocate Contracts up front so every early-return path (missing
 	// file, gzip error, header decode error, schema mismatch) hands the
 	// caller a safe-to-read zero-value instead of a nil map. The warmup
@@ -326,7 +340,6 @@ func loadSnapshot(g *graph.Graph, logger *zap.Logger) (snapshotLoadResult, error
 	if g == nil {
 		return result, nil
 	}
-	path := daemon.SnapshotPath()
 	f, err := os.Open(path)
 	if err != nil {
 		if os.IsNotExist(err) {

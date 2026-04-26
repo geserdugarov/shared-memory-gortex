@@ -59,13 +59,13 @@ func TestLoadSnapshot_DropsStaleAbsPathNodes(t *testing.T) {
 	orig := graph.New()
 	// Clean, current-shape node — should be restored.
 	orig.AddNode(&graph.Node{
-		ID: "core-api/api/handler.go::Handler.CreateTuck",
+		ID:   "core-api/api/handler.go::Handler.CreateTuck",
 		Name: "CreateTuck", Kind: graph.KindMethod,
 		FilePath: "core-api/api/handler.go", RepoPrefix: "core-api",
 	})
 	// Stale abs-path node — a duplicate of the clean one, must be dropped.
 	orig.AddNode(&graph.Node{
-		ID: "/Users/me/tuck/core-api/api/handler.go::Handler.CreateTuck",
+		ID:   "/Users/me/tuck/core-api/api/handler.go::Handler.CreateTuck",
 		Name: "CreateTuck", Kind: graph.KindMethod,
 		FilePath: "/Users/me/tuck/core-api/api/handler.go",
 	})
@@ -78,7 +78,7 @@ func TestLoadSnapshot_DropsStaleAbsPathNodes(t *testing.T) {
 	})
 	// Edge between two clean nodes — must survive.
 	orig.AddNode(&graph.Node{
-		ID: "core-api/api/handler.go::Handler.RegisterRoutes",
+		ID:   "core-api/api/handler.go::Handler.RegisterRoutes",
 		Name: "RegisterRoutes", Kind: graph.KindMethod,
 		FilePath: "core-api/api/handler.go", RepoPrefix: "core-api",
 	})

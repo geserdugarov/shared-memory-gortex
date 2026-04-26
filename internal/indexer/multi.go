@@ -40,7 +40,7 @@ type MultiIndexer struct {
 	search    search.Backend
 	embedder  embedding.Provider
 	repos     map[string]*RepoMetadata // repoPrefix → metadata
-	indexers  map[string]*Indexer       // repoPrefix → per-repo indexer
+	indexers  map[string]*Indexer      // repoPrefix → per-repo indexer
 	configMgr *config.ConfigManager
 	logger    *zap.Logger
 	mu        sync.RWMutex

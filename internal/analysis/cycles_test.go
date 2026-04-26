@@ -224,7 +224,6 @@ func pickDistinct(t *rapid.T, max, n int, label string) []int {
 
 // --- Property Tests ---
 
-
 // TestPropertyCycleValidity verifies that every cycle returned by DetectCycles
 // is a valid cycle: following the edges in path order from the first symbol
 // eventually returns to the first symbol. All consecutive pairs in the path
@@ -439,7 +438,6 @@ func referenceDFS(adj map[string][]string, start, target string) bool {
 }
 
 // --- Property Tests ---
-
 
 // TestPropertyWouldCreateCycle_MatchesReachability verifies that
 // WouldCreateCycle(from_id, to_id) returns true if and only if there exists

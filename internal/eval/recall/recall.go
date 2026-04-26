@@ -2,7 +2,7 @@
 // metrics for the Gortex retrieval stack against a curated fixture of
 // {query, expected_ids} pairs.
 //
-// Methodology
+// # Methodology
 //
 // Recall is reported as any-hit set-level recall: a retrieval counts as
 // correct at rank K if *any* of the Expected IDs for a case appears in
@@ -22,7 +22,7 @@
 //   - multi_hop: relational queries accepting several valid expected
 //     IDs (any-hit). Tests graph-aware retrieval.
 //
-// Gold vs judged
+// # Gold vs judged
 //
 // All fixture labels in this package are hand-curated gold labels, not
 // LLM-judged. This is a stricter measurement than a dual-judge setup
@@ -379,4 +379,3 @@ func Markdown(report Report) string {
 }
 
 func pct(f float64) string { return fmt.Sprintf("%5.1f%%", f*100) }
-

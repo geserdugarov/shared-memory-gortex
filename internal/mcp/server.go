@@ -72,12 +72,12 @@ func (sh *symbolHistory) All() map[string][]SymbolModification {
 
 // Server wraps the MCP server with Gortex-specific tools.
 type Server struct {
-	mcpServer    *server.MCPServer
-	engine       *query.Engine
-	graph        *graph.Graph
-	indexer      *indexer.Indexer
-	watcher      *indexer.Watcher
-	multiIndexer *indexer.MultiIndexer
+	mcpServer     *server.MCPServer
+	engine        *query.Engine
+	graph         *graph.Graph
+	indexer       *indexer.Indexer
+	watcher       *indexer.Watcher
+	multiIndexer  *indexer.MultiIndexer
 	configManager *config.ConfigManager
 	activeProject string
 	// scopeWorkspace / scopeProject default-scope every query at this
@@ -87,18 +87,18 @@ type Server struct {
 	// QueryScope() helper rather than reading the fields directly.
 	scopeWorkspace string
 	scopeProject   string
-	logger       *zap.Logger
-	communities  *analysis.CommunityResult
-	processes    *analysis.ProcessResult
-	analysisMu   sync.RWMutex
+	logger         *zap.Logger
+	communities    *analysis.CommunityResult
+	processes      *analysis.ProcessResult
+	analysisMu     sync.RWMutex
 
 	// session / symHistory / tokenStats are the shared-default per-client
 	// state for the embedded stdio path (one implicit client per process).
 	// Tool handlers reach per-session activity via sessionFor(ctx); that
 	// helper returns this default when ctx carries no session ID.
-	session      *sessionState
-	symHistory   *symbolHistory
-	tokenStats   *tokenStats
+	session    *sessionState
+	symHistory *symbolHistory
+	tokenStats *tokenStats
 
 	// sessions multiplexes per-client sessionLocal for the daemon
 	// transport. When ctx carries a session ID (WithSessionID), handlers
@@ -348,11 +348,11 @@ func NewServer(engine *query.Engine, g *graph.Graph, idx *indexer.Indexer, watch
 			server.WithToolCapabilities(false),
 			server.WithRecovery(),
 		),
-		engine:  engine,
-		graph:   g,
-		indexer: idx,
-		watcher: watcher,
-		logger:  logger,
+		engine:     engine,
+		graph:      g,
+		indexer:    idx,
+		watcher:    watcher,
+		logger:     logger,
 		session:    newSessionState(),
 		tokenStats: &tokenStats{},
 		symHistory: &symbolHistory{
@@ -537,11 +537,11 @@ func (s *Server) cumulativeSavingsSnapshot() map[string]any {
 	snap := store.Snapshot()
 	costs := savings.CostAvoidedAll(snap.Totals.TokensSaved)
 	return map[string]any{
-		"first_seen":      snap.FirstSeen.Format(time.RFC3339),
-		"last_updated":    snap.LastUpdated.Format(time.RFC3339),
-		"tokens_saved":    snap.Totals.TokensSaved,
-		"tokens_returned": snap.Totals.TokensReturned,
-		"calls_counted":   snap.Totals.CallsCounted,
+		"first_seen":       snap.FirstSeen.Format(time.RFC3339),
+		"last_updated":     snap.LastUpdated.Format(time.RFC3339),
+		"tokens_saved":     snap.Totals.TokensSaved,
+		"tokens_returned":  snap.Totals.TokensReturned,
+		"calls_counted":    snap.Totals.CallsCounted,
 		"cost_avoided_usd": costs,
 	}
 }

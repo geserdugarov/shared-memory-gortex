@@ -15,9 +15,10 @@ import (
 //	name: Array<Foo>                 → repeated
 //
 // Capture groups:
-//  1: field name (may include quotes)
-//  2: "?" when optional declared at the field level
-//  3: type expression to the end of the line, trailing comma / semicolon trimmed
+//
+//	1: field name (may include quotes)
+//	2: "?" when optional declared at the field level
+//	3: type expression to the end of the line, trailing comma / semicolon trimmed
 var tsFieldRe = regexp.MustCompile(`^\s*(?:readonly\s+)?(['"]?[\w$-]+['"]?)\s*(\??)\s*:\s*(.+?)\s*[,;]?\s*(?://\s*(.*))?$`)
 
 // extractTSShape reads a TypeScript interface or type literal and

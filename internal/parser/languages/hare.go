@@ -12,10 +12,10 @@ import (
 // `type NAME = struct { ... };` / `= union { ... };` / `= enum`
 // for type definitions. Imports use `use X;` or `use X::Y;`.
 var (
-	hareFuncRe   = regexp.MustCompile(`(?m)^\s*(?:export\s+)?fn\s+(\w+)\s*\(`)
-	hareTypeRe   = regexp.MustCompile(`(?m)^\s*(?:export\s+)?type\s+(\w+)\s*=\s*(?:struct|union|enum)`)
-	hareUseRe    = regexp.MustCompile(`(?m)^\s*use\s+([\w:]+)\s*;`)
-	hareCallRe   = regexp.MustCompile(`\b([a-zA-Z_]\w*)\s*\(`)
+	hareFuncRe = regexp.MustCompile(`(?m)^\s*(?:export\s+)?fn\s+(\w+)\s*\(`)
+	hareTypeRe = regexp.MustCompile(`(?m)^\s*(?:export\s+)?type\s+(\w+)\s*=\s*(?:struct|union|enum)`)
+	hareUseRe  = regexp.MustCompile(`(?m)^\s*use\s+([\w:]+)\s*;`)
+	hareCallRe = regexp.MustCompile(`\b([a-zA-Z_]\w*)\s*\(`)
 )
 
 // HareExtractor extracts Hare source using regex.

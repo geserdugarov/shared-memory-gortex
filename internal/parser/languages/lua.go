@@ -80,8 +80,9 @@ func (e *LuaExtractor) Extract(filePath string, src []byte) (*parser.ExtractionR
 // extractFunction handles `function name(...)` / `function M.name(...)`
 // / `function M:name(...)` / `local function name(...)`.
 // AST: function_declaration { name: identifier | dot_index_expression | method_index_expression,
-//                             parameters: parameters,
-//                             body: block }
+//
+//	parameters: parameters,
+//	body: block }
 func (e *LuaExtractor) extractFunction(
 	node *sitter.Node, src []byte, filePath string, fileNode *graph.Node,
 	result *parser.ExtractionResult, seen map[string]bool,

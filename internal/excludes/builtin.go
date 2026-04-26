@@ -35,11 +35,11 @@ var Builtin = []string{
 	// graph with upstream code (e.g. CocoaPods' sqlite3.c — 150k+ lines)
 	// that users can't act on. Names are unambiguous — no first-party
 	// project uses `Pods/` or `.dart_tool/` for its own source.
-	"Pods/",        // CocoaPods (iOS/macOS)
-	".gradle/",     // Gradle build cache (Android/JVM)
-	".bundle/",     // Ruby Bundler cache
-	".dart_tool/",  // Dart/Flutter build cache
-	".pub-cache/",  // Dart global pub cache, occasionally vendored
+	"Pods/",       // CocoaPods (iOS/macOS)
+	".gradle/",    // Gradle build cache (Android/JVM)
+	".bundle/",    // Ruby Bundler cache
+	".dart_tool/", // Dart/Flutter build cache
+	".pub-cache/", // Dart global pub cache, occasionally vendored
 	"*.tmp",
 	"*.swp",
 }

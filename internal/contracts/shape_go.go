@@ -12,9 +12,10 @@ import (
 var goStructOpenRe = regexp.MustCompile(`(?s)type\s+\w+\s+struct\s*\{`)
 
 // goFieldRe parses one Go struct field line. Capture groups:
-//  1: field name (or comma-separated names)
-//  2: type expression (with optional leading * / [] / map[])
-//  3: raw tag body including backticks when present
+//
+//	1: field name (or comma-separated names)
+//	2: type expression (with optional leading * / [] / map[])
+//	3: raw tag body including backticks when present
 //
 // Embedded fields (`sync.Mutex`, `io.Reader`) don't match this regex;
 // we skip them by checking that we got two non-empty groups.

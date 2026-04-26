@@ -38,7 +38,7 @@ func NewProvider(command string, args []string, languages []string, timeoutSec i
 	}
 }
 
-func (p *Provider) Name() string       { return "scip-" + p.languages[0] }
+func (p *Provider) Name() string        { return "scip-" + p.languages[0] }
 func (p *Provider) Languages() []string { return p.languages }
 func (p *Provider) Close() error        { return nil }
 
@@ -360,8 +360,8 @@ func extractTypeFromDocs(docs []string) string {
 
 // SCIPIndex represents a parsed SCIP index.
 type SCIPIndex struct {
-	Documents       []SCIPDocument      `json:"documents"`
-	ExternalSymbols []SCIPSymbolInfo    `json:"external_symbols"`
+	Documents       []SCIPDocument   `json:"documents"`
+	ExternalSymbols []SCIPSymbolInfo `json:"external_symbols"`
 }
 
 // SCIPDocument represents a single file in the SCIP index.

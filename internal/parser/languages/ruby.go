@@ -3,10 +3,10 @@ package languages
 import (
 	"strings"
 
-	sitter "github.com/zzet/gortex/internal/parser/tsitter"
-	"github.com/zzet/gortex/internal/parser/tsitter/ruby"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/parser"
+	sitter "github.com/zzet/gortex/internal/parser/tsitter"
+	"github.com/zzet/gortex/internal/parser/tsitter/ruby"
 )
 
 // qRubyAll is a single tree-sitter query alternating over every pattern
@@ -349,12 +349,12 @@ func rubyDirectClassParent(def *sitter.Node, src []byte) string {
 // pass. The negative-space impact is small; the positive binding
 // from the parent class still surfaces as an edge.
 var railsCallbackMethods = map[string]struct{}{
-	"before_action":  {},
-	"after_action":   {},
-	"around_action":  {},
-	"before_filter":  {},
-	"after_filter":   {},
-	"around_filter":  {},
+	"before_action": {},
+	"after_action":  {},
+	"around_action": {},
+	"before_filter": {},
+	"after_filter":  {},
+	"around_filter": {},
 }
 
 func emitRailsCallbacks(root *sitter.Node, src []byte, filePath string, result *parser.ExtractionResult) {

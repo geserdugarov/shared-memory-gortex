@@ -17,10 +17,10 @@ import (
 // socket connection closes. The daemon routes every inbound frame to its
 // session by looking up the net.Conn in the session registry.
 type Session struct {
-	ID            string
-	Mode          ConnectionMode
-	CWD           string
-	ClientName    string
+	ID         string
+	Mode       ConnectionMode
+	CWD        string
+	ClientName string
 	// ClientVersion is the version reported by the MCP client in its
 	// `initialize` request (`params.clientInfo.version`). Empty until
 	// the daemon dispatcher sees that frame; the env-var sniff in
@@ -33,10 +33,10 @@ type Session struct {
 	// from "initialize" wins over any "handshake" — including the
 	// "unknown" string the proxy uses when env-var detection fails.
 	ClientNameSource string
-	ClientPID     int
-	DefaultRepo   string
-	ActiveProject string
-	StartedAt     time.Time
+	ClientPID        int
+	DefaultRepo      string
+	ActiveProject    string
+	StartedAt        time.Time
 
 	// Conn is the underlying socket. Kept for close-on-shutdown and
 	// logging; handlers should not read from or write to it directly —

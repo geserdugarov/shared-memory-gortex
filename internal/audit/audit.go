@@ -39,13 +39,13 @@ type DeadPath struct {
 
 // BloatMetrics captures per-file structural bloat signals.
 type BloatMetrics struct {
-	Lines       int `json:"lines"`
-	Bullets     int `json:"bullets"`
-	LongLines   int `json:"long_lines"`
-	Duplicates  int `json:"duplicate_bullets"`
-	CodeBlocks  int `json:"code_blocks"`
-	MaxDepth    int `json:"max_list_depth"`
-	Score       int `json:"score"`
+	Lines      int `json:"lines"`
+	Bullets    int `json:"bullets"`
+	LongLines  int `json:"long_lines"`
+	Duplicates int `json:"duplicate_bullets"`
+	CodeBlocks int `json:"code_blocks"`
+	MaxDepth   int `json:"max_list_depth"`
+	Score      int `json:"score"`
 }
 
 // FileReport is the per-file rollup.

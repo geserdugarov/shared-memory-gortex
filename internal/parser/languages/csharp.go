@@ -4,10 +4,10 @@ import (
 	"fmt"
 	"strings"
 
-	sitter "github.com/zzet/gortex/internal/parser/tsitter"
-	"github.com/zzet/gortex/internal/parser/tsitter/csharp"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/parser"
+	sitter "github.com/zzet/gortex/internal/parser/tsitter"
+	"github.com/zzet/gortex/internal/parser/tsitter/csharp"
 )
 
 // qCSharpAll is a single tree-sitter query alternating over every
@@ -90,10 +90,10 @@ func (e *CSharpExtractor) Extensions() []string { return []string{".cs"} }
 // --- Deferred match buffers ----------------------------------------
 
 type csharpDeferredCall struct {
-	name       string
-	receiver   string
-	line       int
-	isMember   bool
+	name     string
+	receiver string
+	line     int
+	isMember bool
 }
 
 // csharpDeferredLocal buffers a local variable declaration for the

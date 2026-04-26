@@ -59,13 +59,13 @@ type File struct {
 // delta, and writing back. A second process that flushed in between just
 // shifts our baseline up; nothing is lost.
 type Store struct {
-	mu       sync.Mutex
-	path     string
-	file     File
-	delta    Totals             // cumulative this-process contributions since last successful flush
-	perDelta map[string]*Totals // per-repo deltas, same semantics as delta
+	mu        sync.Mutex
+	path      string
+	file      File
+	delta     Totals             // cumulative this-process contributions since last successful flush
+	perDelta  map[string]*Totals // per-repo deltas, same semantics as delta
 	langDelta map[string]*Totals // per-language deltas
-	pending  int                // observations since last flush
+	pending   int                // observations since last flush
 
 	// stop signals the optional periodic flusher to exit. Nil when no
 	// flusher is running.

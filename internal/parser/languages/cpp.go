@@ -4,10 +4,10 @@ import (
 	"fmt"
 	"strings"
 
-	sitter "github.com/zzet/gortex/internal/parser/tsitter"
-	"github.com/zzet/gortex/internal/parser/tsitter/cpp"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/parser"
+	sitter "github.com/zzet/gortex/internal/parser/tsitter"
+	"github.com/zzet/gortex/internal/parser/tsitter/cpp"
 )
 
 // qCppAll is a single tree-sitter query alternating over every pattern

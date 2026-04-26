@@ -11,10 +11,10 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 
+	wire "github.com/gortexhq/gcx-go"
 	"github.com/zzet/gortex/internal/analysis"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/query"
-	wire "github.com/gortexhq/gcx-go"
 )
 
 // buildWinnowGraph creates a tiny deterministic graph with four functions
@@ -54,9 +54,9 @@ func buildWinnowGraph(t *testing.T) *Server {
 	// Seed community membership so community-filter tests have data.
 	srv.communities = &analysis.CommunityResult{
 		NodeToComm: map[string]string{
-			"svc/auth.go::Login":         "community-0",
-			"svc/auth.go::Logout":        "community-0",
-			"svc/auth.go::validateToken": "community-0",
+			"svc/auth.go::Login":           "community-0",
+			"svc/auth.go::Logout":          "community-0",
+			"svc/auth.go::validateToken":   "community-0",
 			"handlers/user.go::HandleUser": "community-1",
 		},
 		Communities: []analysis.Community{

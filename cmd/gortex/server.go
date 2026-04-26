@@ -17,12 +17,12 @@ import (
 	"github.com/zzet/gortex/internal/config"
 	"github.com/zzet/gortex/internal/daemon"
 	"github.com/zzet/gortex/internal/embedding"
-	"github.com/zzet/gortex/internal/persistence"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/indexer"
 	gortexmcp "github.com/zzet/gortex/internal/mcp"
 	"github.com/zzet/gortex/internal/parser"
 	"github.com/zzet/gortex/internal/parser/languages"
+	"github.com/zzet/gortex/internal/persistence"
 	"github.com/zzet/gortex/internal/query"
 	"github.com/zzet/gortex/internal/semantic"
 	"github.com/zzet/gortex/internal/semantic/goanalysis"
@@ -61,6 +61,12 @@ var (
 	serverSemantic        bool
 	serverNoSemantic      bool
 	serverSemanticMode    string
+	// serverSnapshot is a path to a gob+gzip snapshot file (the
+	// format `gortex index --snapshot <path>` writes). Loaded into
+	// the in-memory graph before the HTTP listener accepts traffic.
+	// Used by gortex-cloud's per-workspace supervisor to boot a
+	// hosted gortex server from R2/Hetzner-OS-cached state.
+	serverSnapshot string
 )
 
 var serverCmd = &cobra.Command{
@@ -89,6 +95,7 @@ func init() {
 	serverCmd.Flags().BoolVar(&serverSemantic, "semantic", false, "enable semantic enrichment (SCIP, go/types, LSP)")
 	serverCmd.Flags().BoolVar(&serverNoSemantic, "no-semantic", false, "disable semantic enrichment")
 	serverCmd.Flags().StringVar(&serverSemanticMode, "semantic-mode", "typecheck", "Go analysis mode: typecheck or callgraph")
+	serverCmd.Flags().StringVar(&serverSnapshot, "snapshot", "", "load a snapshot file at startup (gob+gzip; the format `gortex index --snapshot` writes). Used by gortex-cloud's per-workspace supervisor to boot from a precomputed snapshot.")
 	rootCmd.AddCommand(serverCmd)
 }
 
@@ -134,6 +141,21 @@ func runServer(_ *cobra.Command, _ []string) error {
 	reg := parser.NewRegistry()
 	languages.RegisterAll(reg)
 	idx := indexer.New(g, reg, cfg.Index, logger)
+
+	// --snapshot pre-loads the in-memory graph from a gob+gzip file
+	// before the HTTP listener accepts traffic. Used by gortex-cloud's
+	// supervisor (it downloads the snapshot from object storage to
+	// local disk, then launches `gortex server --snapshot <path>`).
+	// Failures here are logged but non-fatal — the server proceeds
+	// with an empty graph and `--index` / multi-repo paths populate
+	// it. spec-launch.md §0a iteration 2.
+	if serverSnapshot != "" {
+		if res, err := loadSnapshotFrom(g, serverSnapshot, logger); err != nil {
+			fmt.Fprintf(os.Stderr, "[gortex] server: snapshot load failed: %v\n", err)
+		} else if res.Loaded {
+			fmt.Fprintf(os.Stderr, "[gortex] server: snapshot loaded (path=%s)\n", serverSnapshot)
+		}
+	}
 
 	// Set up embedding provider for semantic search. Kept local so it
 	// can be handed off to MultiIndexer below; otherwise per-repo

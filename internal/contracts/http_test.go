@@ -6,7 +6,10 @@ import (
 	"github.com/zzet/gortex/internal/graph"
 )
 
-func makeNodes(filePath string, fns []struct{ name string; start, end int }) []*graph.Node {
+func makeNodes(filePath string, fns []struct {
+	name       string
+	start, end int
+}) []*graph.Node {
 	var nodes []*graph.Node
 	for _, f := range fns {
 		nodes = append(nodes, &graph.Node{
@@ -84,7 +87,10 @@ func setupRoutes(r *gin.Engine) {
 	r.DELETE("/api/users/:id", deleteUser)
 }
 `)
-	nodes := makeNodes("main.go", []struct{ name string; start, end int }{
+	nodes := makeNodes("main.go", []struct {
+		name       string
+		start, end int
+	}{
 		{"setupRoutes", 5, 10},
 	})
 
@@ -139,7 +145,10 @@ function registerRoutes() {
   app.get('/api/products/:id', getProduct);
 }
 `)
-	nodes := makeNodes("routes.ts", []struct{ name string; start, end int }{
+	nodes := makeNodes("routes.ts", []struct {
+		name       string
+		start, end int
+	}{
 		{"registerRoutes", 5, 9},
 	})
 
@@ -179,7 +188,10 @@ def create_item(item: Item):
 def get_item(item_id: int):
     return item_id
 `)
-	nodes := makeNodes("main.py", []struct{ name string; start, end int }{
+	nodes := makeNodes("main.py", []struct {
+		name       string
+		start, end int
+	}{
 		{"list_items", 6, 7},
 		{"create_item", 10, 11},
 		{"get_item", 14, 15},
@@ -225,7 +237,10 @@ public class UserController {
     }
 }
 `)
-	nodes := makeNodes("UserController.java", []struct{ name string; start, end int }{
+	nodes := makeNodes("UserController.java", []struct {
+		name       string
+		start, end int
+	}{
 		{"listUsers", 6, 8},
 		{"createUser", 11, 13},
 		{"deleteUser", 16, 18},
@@ -264,7 +279,10 @@ func callAPI() {
 	http.NewRequest("POST", "http://service-b/api/orders", nil)
 }
 `)
-	nodes := makeNodes("client.go", []struct{ name string; start, end int }{
+	nodes := makeNodes("client.go", []struct {
+		name       string
+		start, end int
+	}{
 		{"callAPI", 5, 8},
 	})
 
@@ -289,7 +307,10 @@ async function fetchData() {
   const result = await axios.post('/api/orders', data);
 }
 `)
-	nodes := makeNodes("api.js", []struct{ name string; start, end int }{
+	nodes := makeNodes("api.js", []struct {
+		name       string
+		start, end int
+	}{
 		{"fetchData", 2, 5},
 	})
 
@@ -316,7 +337,10 @@ def call_service():
     resp = requests.get("http://service/api/users")
     resp2 = requests.post("http://service/api/orders")
 `)
-	nodes := makeNodes("client.py", []struct{ name string; start, end int }{
+	nodes := makeNodes("client.py", []struct {
+		name       string
+		start, end int
+	}{
 		{"call_service", 4, 6},
 	})
 
@@ -414,7 +438,9 @@ func wire(mux *http.ServeMux, h *Handler) {
 
 // TestHTTPExtractor_Go_HandlerThroughMiddleware guards against the
 // regression where routes registered as
-//   mux.HandleFunc("POST /v1/tucks", WithAuth(auth, h.CreateTuck))
+//
+//	mux.HandleFunc("POST /v1/tucks", WithAuth(auth, h.CreateTuck))
+//
 // landed with SymbolID = "WithAuth" (the middleware wrapper) or the
 // enclosing RegisterRoutes function, rather than the actual handler
 // h.CreateTuck. The extractor now walks the balanced-paren tail of

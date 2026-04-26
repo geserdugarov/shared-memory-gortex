@@ -27,7 +27,6 @@ import (
 // SHALL reflect the current state of the repos list. After tracking a repo,
 // the config file SHALL contain that entry. After untracking, the entry
 // SHALL be removed.
-//
 func TestPropertyConfigPersistenceRoundTrip(t *testing.T) {
 	rapid.Check(t, func(rt *rapid.T) {
 		// Create a temp directory for the GlobalConfig file.
@@ -100,7 +99,6 @@ func TestPropertyConfigPersistenceRoundTrip(t *testing.T) {
 	})
 }
 
-
 // ============================================================================
 // 10.4 Property 14: Query scoping by repo, project, and ref
 // ============================================================================
@@ -115,7 +113,6 @@ func TestPropertyConfigPersistenceRoundTrip(t *testing.T) {
 // without project, results SHALL contain nodes from all repos across all
 // projects with matching reference tag. When no filter is specified, results
 // SHALL span all repositories.
-//
 func TestPropertyQueryScopingByRepoProjectRef(t *testing.T) {
 	rapid.Check(t, func(rt *rapid.T) {
 		// Generate 2-5 repos with distinct prefixes.
@@ -283,7 +280,6 @@ func TestPropertyQueryScopingByRepoProjectRef(t *testing.T) {
 	})
 }
 
-
 // ============================================================================
 // 10.7 Property 20: Active project default scoping
 // ============================================================================
@@ -294,7 +290,6 @@ func TestPropertyQueryScopingByRepoProjectRef(t *testing.T) {
 // project parameter SHALL return results scoped to the active project's
 // repositories. Changing the active project via set_active_project SHALL
 // immediately change the default scope for all subsequent queries.
-//
 func TestPropertyActiveProjectDefaultScoping(t *testing.T) {
 	rapid.Check(t, func(rt *rapid.T) {
 		// Generate 2-4 repos with distinct prefixes.
@@ -429,7 +424,6 @@ func TestPropertyActiveProjectDefaultScoping(t *testing.T) {
 	})
 }
 
-
 // ============================================================================
 // 10.8 Property 15: Shared repo indexed once
 // ============================================================================
@@ -440,7 +434,6 @@ func TestPropertyActiveProjectDefaultScoping(t *testing.T) {
 // the graph SHALL contain exactly one set of nodes for that repository
 // (not duplicated per project). The node count for that RepoPrefix SHALL
 // equal the count from a single indexing of that repository.
-//
 func TestPropertySharedRepoIndexedOnce(t *testing.T) {
 	rapid.Check(t, func(rt *rapid.T) {
 		// Generate a shared repo prefix and 1-2 unique repo prefixes.

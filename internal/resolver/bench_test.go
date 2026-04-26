@@ -56,9 +56,9 @@ func buildResolverGraph(files, symsPerFile int) (*graph.Graph, *Resolver) {
 
 func BenchmarkResolver_ResolveAll(b *testing.B) {
 	sizes := []struct {
-		name         string
-		files        int
-		symsPerFile  int
+		name        string
+		files       int
+		symsPerFile int
 	}{
 		{"Small_50files", 50, 5},
 		{"Medium_200files", 200, 10},

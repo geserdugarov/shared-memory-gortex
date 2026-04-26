@@ -8,12 +8,12 @@ import (
 
 // Severity rates how much a validation issue impacts running code.
 //
-//   * SeverityBreaking — the contract is broken for at least one side.
+//   - SeverityBreaking — the contract is broken for at least one side.
 //     Code will fail at runtime, or serialisation will silently lose
 //     data that the caller relied on.
-//   * SeverityWarning  — drift that might become breaking later. Fields
+//   - SeverityWarning  — drift that might become breaking later. Fields
 //     added or removed that aren't load-bearing right now.
-//   * SeverityInfo     — observational; no action required, but useful
+//   - SeverityInfo     — observational; no action required, but useful
 //     for reviewers ("provider added a field, consumer may want to
 //     start reading it").
 type Severity string
@@ -32,10 +32,10 @@ type ContractIssue struct {
 	ContractID   string   `json:"contract_id"`
 	Kind         string   `json:"kind"`
 	Severity     Severity `json:"severity"`
-	Provider     string   `json:"provider,omitempty"`     // repo prefix
-	Consumer     string   `json:"consumer,omitempty"`     // repo prefix
-	Field        string   `json:"field,omitempty"`        // field name when relevant
-	Details      string   `json:"details,omitempty"`      // human-readable explanation
+	Provider     string   `json:"provider,omitempty"` // repo prefix
+	Consumer     string   `json:"consumer,omitempty"` // repo prefix
+	Field        string   `json:"field,omitempty"`    // field name when relevant
+	Details      string   `json:"details,omitempty"`  // human-readable explanation
 	ProviderType string   `json:"provider_type,omitempty"`
 	ConsumerType string   `json:"consumer_type,omitempty"`
 }
@@ -52,32 +52,32 @@ type ShapeLookup func(symbolID string) *Shape
 // format and the UI's switch statements reference the same literal
 // values the tests assert on.
 const (
-	IssueOrphanProvider          = "orphan_provider"
-	IssueOrphanConsumer          = "orphan_consumer"
-	IssueRequestTypeUnknown      = "request_type_unknown"
-	IssueResponseTypeUnknown     = "response_type_unknown"
-	IssueResponseFieldRemoved    = "response_field_removed"
+	IssueOrphanProvider           = "orphan_provider"
+	IssueOrphanConsumer           = "orphan_consumer"
+	IssueRequestTypeUnknown       = "request_type_unknown"
+	IssueResponseTypeUnknown      = "response_type_unknown"
+	IssueResponseFieldRemoved     = "response_field_removed"
 	IssueResponseFieldTypeChanged = "response_field_type_changed"
-	IssueResponseFieldAdded      = "response_field_added"
-	IssueRequestFieldRequired    = "request_field_required_missing"
-	IssueRequestFieldTypeChanged = "request_field_type_changed"
-	IssueRequestFieldExtra       = "request_field_extra"
+	IssueResponseFieldAdded       = "response_field_added"
+	IssueRequestFieldRequired     = "request_field_required_missing"
+	IssueRequestFieldTypeChanged  = "request_field_type_changed"
+	IssueRequestFieldExtra        = "request_field_extra"
 )
 
 // Validate walks every contract ID in the registry and emits an issue
 // list describing provider/consumer drift.
 //
 // Algorithm:
-//   1. Group contracts by canonical ID.
-//   2. If only one role is present → orphan issue.
-//   3. For matched pairs, fetch shapes via lookup.
-//   4. Diff response (provider -> consumer reads) and request
-//      (consumer sends -> provider accepts) separately. Breaking-ness
-//      is decided by direction: a field the reader relies on being
-//      missing is always breaking; an extra field the writer sends
-//      that the reader ignores is cosmetic.
-//   5. Issues are sorted by severity (breaking first) then contract ID
-//      for a stable output across calls.
+//  1. Group contracts by canonical ID.
+//  2. If only one role is present → orphan issue.
+//  3. For matched pairs, fetch shapes via lookup.
+//  4. Diff response (provider -> consumer reads) and request
+//     (consumer sends -> provider accepts) separately. Breaking-ness
+//     is decided by direction: a field the reader relies on being
+//     missing is always breaking; an extra field the writer sends
+//     that the reader ignores is cosmetic.
+//  5. Issues are sorted by severity (breaking first) then contract ID
+//     for a stable output across calls.
 func Validate(reg *Registry, lookup ShapeLookup) []ContractIssue {
 	if lookup == nil {
 		lookup = func(string) *Shape { return nil }
@@ -418,15 +418,15 @@ func canAssign(to, from string) bool {
 //
 // Categories tracked:
 //
-//   str        - string types across languages
-//   bool       - boolean
-//   int        - integer (all widths / sign combinations)
-//   float      - floating-point + high-precision decimal
-//   any        - opaque JSON-value / universal containers
-//   time       - instant-in-time (serialises as ISO 8601 on the wire)
-//   duration   - time intervals
-//   bytes      - binary payloads (serialise as base64 strings)
-//   uuid       - UUID types (serialise as hex-dashed strings)
+//	str        - string types across languages
+//	bool       - boolean
+//	int        - integer (all widths / sign combinations)
+//	float      - floating-point + high-precision decimal
+//	any        - opaque JSON-value / universal containers
+//	time       - instant-in-time (serialises as ISO 8601 on the wire)
+//	duration   - time intervals
+//	bytes      - binary payloads (serialise as base64 strings)
+//	uuid       - UUID types (serialise as hex-dashed strings)
 //
 // The time/duration/bytes/uuid categories are chosen to match what
 // the wire actually carries: two fields that serialise to the same

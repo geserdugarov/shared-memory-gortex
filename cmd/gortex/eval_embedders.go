@@ -25,12 +25,12 @@ import (
 )
 
 var (
-	evalEmbeddersFixture string
-	evalEmbeddersIndex   string
-	evalEmbeddersFormat  string
-	evalEmbeddersOut     string
-	evalEmbeddersVariants string
-	evalEmbeddersSkipQuality bool
+	evalEmbeddersFixture      string
+	evalEmbeddersIndex        string
+	evalEmbeddersFormat       string
+	evalEmbeddersOut          string
+	evalEmbeddersVariants     string
+	evalEmbeddersSkipQuality  bool
 	evalEmbeddersProbeQueries int
 )
 
@@ -71,17 +71,17 @@ func init() {
 
 // embedderResult is one row in the comparison table.
 type embedderResult struct {
-	Variant          string  `json:"variant"`
-	OnnxFile         string  `json:"onnx_file"`
-	Dimensions       int     `json:"dimensions"`
-	ModelSizeMB      float64 `json:"model_size_mb"`
-	InitMs           int64   `json:"init_ms"`
-	EmbedP50Micros   int64   `json:"embed_p50_micros"`
-	EmbedP95Micros   int64   `json:"embed_p95_micros"`
-	IndexMs          int64   `json:"index_ms,omitempty"`
-	Recall           map[int]float64 `json:"recall,omitempty"`
-	MeanRRank        float64 `json:"mean_reciprocal_rank,omitempty"`
-	Notes            string  `json:"notes,omitempty"`
+	Variant        string          `json:"variant"`
+	OnnxFile       string          `json:"onnx_file"`
+	Dimensions     int             `json:"dimensions"`
+	ModelSizeMB    float64         `json:"model_size_mb"`
+	InitMs         int64           `json:"init_ms"`
+	EmbedP50Micros int64           `json:"embed_p50_micros"`
+	EmbedP95Micros int64           `json:"embed_p95_micros"`
+	IndexMs        int64           `json:"index_ms,omitempty"`
+	Recall         map[int]float64 `json:"recall,omitempty"`
+	MeanRRank      float64         `json:"mean_reciprocal_rank,omitempty"`
+	Notes          string          `json:"notes,omitempty"`
 }
 
 type embeddersReport struct {

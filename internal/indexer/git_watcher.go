@@ -30,13 +30,13 @@ import (
 // `git reset --mixed` leaving the working tree dirty) still fire
 // normal fsnotify events and flow through the per-file path.
 type GitWatcher struct {
-	repoPath   string
-	indexer    *Indexer
-	logger     *zap.Logger
-	fsw        *fsnotify.Watcher
-	debounce   time.Duration
-	done       chan struct{}
-	stopped    chan struct{}
+	repoPath    string
+	indexer     *Indexer
+	logger      *zap.Logger
+	fsw         *fsnotify.Watcher
+	debounce    time.Duration
+	done        chan struct{}
+	stopped     chan struct{}
 	mu          sync.Mutex
 	lastSHA     string
 	fireTimer   *time.Timer

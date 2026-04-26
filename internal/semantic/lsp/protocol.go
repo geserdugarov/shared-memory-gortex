@@ -40,7 +40,7 @@ type DefinitionCapability struct {
 
 // HoverCapability declares hover request support.
 type HoverCapability struct {
-	DynamicRegistration bool `json:"dynamicRegistration,omitempty"`
+	DynamicRegistration bool     `json:"dynamicRegistration,omitempty"`
 	ContentFormat       []string `json:"contentFormat,omitempty"`
 }
 
@@ -51,12 +51,12 @@ type InitializeResult struct {
 
 // ServerCapabilities declares what the server supports.
 type ServerCapabilities struct {
-	ImplementationProvider any  `json:"implementationProvider,omitempty"`
-	ReferencesProvider     any  `json:"referencesProvider,omitempty"`
-	DefinitionProvider     any  `json:"definitionProvider,omitempty"`
-	HoverProvider          any  `json:"hoverProvider,omitempty"`
-	CallHierarchyProvider  any  `json:"callHierarchyProvider,omitempty"`
-	TypeHierarchyProvider  any  `json:"typeHierarchyProvider,omitempty"`
+	ImplementationProvider any `json:"implementationProvider,omitempty"`
+	ReferencesProvider     any `json:"referencesProvider,omitempty"`
+	DefinitionProvider     any `json:"definitionProvider,omitempty"`
+	HoverProvider          any `json:"hoverProvider,omitempty"`
+	CallHierarchyProvider  any `json:"callHierarchyProvider,omitempty"`
+	TypeHierarchyProvider  any `json:"typeHierarchyProvider,omitempty"`
 }
 
 // TextDocumentIdentifier identifies a text document.
@@ -166,6 +166,6 @@ type CallHierarchyOutgoingCallsParams struct {
 
 // CallHierarchyOutgoingCall represents an outgoing call.
 type CallHierarchyOutgoingCall struct {
-	To       CallHierarchyItem `json:"to"`
-	FromRanges []Range         `json:"fromRanges"`
+	To         CallHierarchyItem `json:"to"`
+	FromRanges []Range           `json:"fromRanges"`
 }

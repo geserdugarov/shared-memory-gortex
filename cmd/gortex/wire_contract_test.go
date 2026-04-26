@@ -20,15 +20,15 @@ import (
 //
 // When this test fails:
 //
-//   1. Additive change (new field only, existing fields untouched) —
-//      update the golden value below. Old snapshots still load because
-//      gob decodes unknown fields as zero.
+//  1. Additive change (new field only, existing fields untouched) —
+//     update the golden value below. Old snapshots still load because
+//     gob decodes unknown fields as zero.
 //
-//   2. Breaking change (rename, remove, retype an existing field) —
-//      bump snapshotSchemaVersion in daemon_snapshot.go AND register a
-//      migration in snapshotMigrations, THEN update the golden value.
-//      Without a migration, deployed daemons reading an old snapshot
-//      will discard the cache on upgrade and pay the full-reindex cost.
+//  2. Breaking change (rename, remove, retype an existing field) —
+//     bump snapshotSchemaVersion in daemon_snapshot.go AND register a
+//     migration in snapshotMigrations, THEN update the golden value.
+//     Without a migration, deployed daemons reading an old snapshot
+//     will discard the cache on upgrade and pay the full-reindex cost.
 //
 // This replaces the "CI fingerprint check on snapshot-relevant structs"
 // item from spec-daemon-resilience.md Phase 4 — runs as part of the

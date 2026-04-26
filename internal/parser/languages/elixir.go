@@ -3,10 +3,10 @@ package languages
 import (
 	"strings"
 
-	sitter "github.com/zzet/gortex/internal/parser/tsitter"
-	"github.com/zzet/gortex/internal/parser/tsitter/elixir"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/parser"
+	sitter "github.com/zzet/gortex/internal/parser/tsitter"
+	"github.com/zzet/gortex/internal/parser/tsitter/elixir"
 )
 
 // Tree-sitter queries for Elixir.
@@ -35,9 +35,9 @@ var elixirKeywords = map[string]bool{
 // call + dot call), so we precompile each but don't merge.
 // extractCalls runs after walkNode so funcRanges is ready.
 type ElixirExtractor struct {
-	lang        *sitter.Language
-	qFuncCall   *parser.PreparedQuery
-	qDotCall    *parser.PreparedQuery
+	lang      *sitter.Language
+	qFuncCall *parser.PreparedQuery
+	qDotCall  *parser.PreparedQuery
 }
 
 func NewElixirExtractor() *ElixirExtractor {

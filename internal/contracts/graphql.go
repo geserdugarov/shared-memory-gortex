@@ -18,9 +18,9 @@ var (
 	gqlFieldRe     = regexp.MustCompile(`(?m)^\s*(\w+)`)
 
 	// Consumer query strings: query { users { ... } } or mutation { createUser(...) { ... } }
-	gqlQueryOpRe    = regexp.MustCompile(`(?m)(query|mutation|subscription)\s*(?:\w+\s*)?\{([^}]*)\}`)
-	gqlGqlTagRe     = regexp.MustCompile("(?s)gql`([^`]*)`")
-	gqlTopFieldRe   = regexp.MustCompile(`(?m)^\s*(\w+)`)
+	gqlQueryOpRe  = regexp.MustCompile(`(?m)(query|mutation|subscription)\s*(?:\w+\s*)?\{([^}]*)\}`)
+	gqlGqlTagRe   = regexp.MustCompile("(?s)gql`([^`]*)`")
+	gqlTopFieldRe = regexp.MustCompile(`(?m)^\s*(\w+)`)
 )
 
 func (e *GraphQLExtractor) SupportedLanguages() []string {
@@ -29,7 +29,7 @@ func (e *GraphQLExtractor) SupportedLanguages() []string {
 
 // gqlConsumerMarkers is the substring prefilter for the consumer
 // scan. Every consumer pattern needs one of:
-//   - a gql`` tagged template literal (marker: "gql`")
+//   - a gql“ tagged template literal (marker: "gql`")
 //   - a bare `query` / `mutation` / `subscription` operation block
 //
 // Reject any file that contains none. Schema files (.graphql/.gql)

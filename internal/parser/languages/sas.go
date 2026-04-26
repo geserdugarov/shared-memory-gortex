@@ -13,6 +13,7 @@ import (
 //   - DATA <name>;  ... RUN;                (dataset — variable)
 //   - PROC <name> ...;  ... RUN;            (procedure call — function)
 //   - %MACRO <name>(args);  ... %MEND <name>; (macro — function)
+//
 // Imports arrive through `%INCLUDE 'file';` and `LIBNAME ref '/path';`.
 var (
 	sasDataRe    = regexp.MustCompile(`(?im)^\s*data\s+([\w.]+)`)

@@ -45,8 +45,8 @@ type realController struct {
 	// queries against not-yet-indexed repos return partial results
 	// until ready is true. warmupSeconds records how long warmup took
 	// so status can surface it.
-	ready          atomic.Bool
-	warmupSeconds  atomic.Int64
+	ready         atomic.Bool
+	warmupSeconds atomic.Int64
 }
 
 // Track indexes a new repository and persists it to the global config.
@@ -539,4 +539,3 @@ func (c *realController) Shutdown(_ context.Context) error {
 	}
 	return nil
 }
-

@@ -46,7 +46,7 @@ func NewProvider(mode LoadMode, includeTest bool, logger *zap.Logger) *Provider 
 	}
 }
 
-func (p *Provider) Name() string       { return "go-types" }
+func (p *Provider) Name() string        { return "go-types" }
 func (p *Provider) Languages() []string { return []string{"go"} }
 func (p *Provider) Close() error        { return nil }
 

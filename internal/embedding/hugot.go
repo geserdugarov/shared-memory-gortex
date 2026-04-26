@@ -44,13 +44,13 @@ type HugotVariant struct {
 
 var hugotVariants = map[string]HugotVariant{
 	// MiniLM-L6-v2 variants — general-English baseline.
-	"fp32":         {RepoID: miniLMRepo, OnnxFile: "onnx/model.onnx",              Dimensions: 384, Label: "MiniLM-L6 fp32"},
-	"o2":           {RepoID: miniLMRepo, OnnxFile: "onnx/model_O2.onnx",           Dimensions: 384, Label: "MiniLM-L6 fp32-O2"},
-	"o3":           {RepoID: miniLMRepo, OnnxFile: "onnx/model_O3.onnx",           Dimensions: 384, Label: "MiniLM-L6 fp32-O3"},
-	"o4":           {RepoID: miniLMRepo, OnnxFile: "onnx/model_O4.onnx",           Dimensions: 384, Label: "MiniLM-L6 fp32-O4"},
-	"qint8_arm64":  {RepoID: miniLMRepo, OnnxFile: "onnx/model_qint8_arm64.onnx",  Dimensions: 384, Label: "MiniLM-L6 qint8-arm64"},
+	"fp32":         {RepoID: miniLMRepo, OnnxFile: "onnx/model.onnx", Dimensions: 384, Label: "MiniLM-L6 fp32"},
+	"o2":           {RepoID: miniLMRepo, OnnxFile: "onnx/model_O2.onnx", Dimensions: 384, Label: "MiniLM-L6 fp32-O2"},
+	"o3":           {RepoID: miniLMRepo, OnnxFile: "onnx/model_O3.onnx", Dimensions: 384, Label: "MiniLM-L6 fp32-O3"},
+	"o4":           {RepoID: miniLMRepo, OnnxFile: "onnx/model_O4.onnx", Dimensions: 384, Label: "MiniLM-L6 fp32-O4"},
+	"qint8_arm64":  {RepoID: miniLMRepo, OnnxFile: "onnx/model_qint8_arm64.onnx", Dimensions: 384, Label: "MiniLM-L6 qint8-arm64"},
 	"qint8_avx512": {RepoID: miniLMRepo, OnnxFile: "onnx/model_qint8_avx512.onnx", Dimensions: 384, Label: "MiniLM-L6 qint8-avx512"},
-	"quint8_avx2":  {RepoID: miniLMRepo, OnnxFile: "onnx/model_quint8_avx2.onnx",  Dimensions: 384, Label: "MiniLM-L6 quint8-avx2"},
+	"quint8_avx2":  {RepoID: miniLMRepo, OnnxFile: "onnx/model_quint8_avx2.onnx", Dimensions: 384, Label: "MiniLM-L6 quint8-avx2"},
 
 	// General retrieval-tuned models — trained for search (not just
 	// sentence similarity), published with ONNX exports, drop-in under

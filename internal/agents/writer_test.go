@@ -156,11 +156,11 @@ func TestRegistryFilterValidatesNames(t *testing.T) {
 
 type stubAdapter struct{ name string }
 
-func (s stubAdapter) Name() string                              { return s.name }
-func (s stubAdapter) DocsURL() string                           { return "" }
-func (s stubAdapter) Detect(Env) (bool, error)                  { return true, nil }
-func (s stubAdapter) Plan(Env) (*Plan, error)                   { return &Plan{}, nil }
-func (s stubAdapter) Apply(Env, ApplyOpts) (*Result, error)     { return &Result{Name: s.name}, nil }
+func (s stubAdapter) Name() string                          { return s.name }
+func (s stubAdapter) DocsURL() string                       { return "" }
+func (s stubAdapter) Detect(Env) (bool, error)              { return true, nil }
+func (s stubAdapter) Plan(Env) (*Plan, error)               { return &Plan{}, nil }
+func (s stubAdapter) Apply(Env, ApplyOpts) (*Result, error) { return &Result{Name: s.name}, nil }
 
 func names(as []Adapter) []string {
 	out := make([]string, 0, len(as))

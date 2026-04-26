@@ -125,4 +125,3 @@ func TestInitAgentsFilterRejectsUnknownName(t *testing.T) {
 		t.Fatalf("expected error to name the typo, got: %v", err)
 	}
 }
-

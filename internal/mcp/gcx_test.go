@@ -6,10 +6,10 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	wire "github.com/gortexhq/gcx-go"
 	"github.com/zzet/gortex/internal/contracts"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/query"
-	wire "github.com/gortexhq/gcx-go"
 )
 
 func newTestNode(id, name string, kind graph.NodeKind, path string, line int) *graph.Node {

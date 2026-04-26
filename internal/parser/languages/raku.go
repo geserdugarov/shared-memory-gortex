@@ -13,12 +13,12 @@ import (
 // callables. `unit` forms declare a file-level module. Imports use
 // `use`, `need`, or `import`.
 var (
-	rakuSubRe     = regexp.MustCompile(`(?m)^\s*(?:multi\s+|proto\s+|only\s+)?sub\s+(\w[\w-]*)`)
-	rakuMethodRe  = regexp.MustCompile(`(?m)^\s*(?:multi\s+|proto\s+|only\s+)?method\s+(\w[\w-]*)`)
-	rakuClassRe   = regexp.MustCompile(`(?m)^\s*(?:unit\s+)?class\s+([\w:]+)`)
-	rakuRoleRe    = regexp.MustCompile(`(?m)^\s*(?:unit\s+)?role\s+([\w:]+)`)
-	rakuModuleRe  = regexp.MustCompile(`(?m)^\s*(?:unit\s+)?module\s+([\w:]+)`)
-	rakuUseRe     = regexp.MustCompile(`(?m)^\s*(?:use|need|import)\s+([\w:]+)`)
+	rakuSubRe    = regexp.MustCompile(`(?m)^\s*(?:multi\s+|proto\s+|only\s+)?sub\s+(\w[\w-]*)`)
+	rakuMethodRe = regexp.MustCompile(`(?m)^\s*(?:multi\s+|proto\s+|only\s+)?method\s+(\w[\w-]*)`)
+	rakuClassRe  = regexp.MustCompile(`(?m)^\s*(?:unit\s+)?class\s+([\w:]+)`)
+	rakuRoleRe   = regexp.MustCompile(`(?m)^\s*(?:unit\s+)?role\s+([\w:]+)`)
+	rakuModuleRe = regexp.MustCompile(`(?m)^\s*(?:unit\s+)?module\s+([\w:]+)`)
+	rakuUseRe    = regexp.MustCompile(`(?m)^\s*(?:use|need|import)\s+([\w:]+)`)
 )
 
 // RakuExtractor extracts Raku source using regex.

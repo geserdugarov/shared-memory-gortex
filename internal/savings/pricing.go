@@ -11,8 +11,8 @@ import (
 // tokens that would have been sent to the model, so we always bill them at
 // the input rate.
 type Price struct {
-	Model           string  `json:"model"`
-	USDPerMInput    float64 `json:"usd_per_m_input"`
+	Model        string  `json:"model"`
+	USDPerMInput float64 `json:"usd_per_m_input"`
 }
 
 // defaultPricing is the built-in table used when no override is configured.

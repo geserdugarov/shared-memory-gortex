@@ -3,10 +3,10 @@ package languages
 import (
 	"strings"
 
-	sitter "github.com/zzet/gortex/internal/parser/tsitter"
-	"github.com/zzet/gortex/internal/parser/tsitter/css"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/parser"
+	sitter "github.com/zzet/gortex/internal/parser/tsitter"
+	"github.com/zzet/gortex/internal/parser/tsitter/css"
 )
 
 // Tree-sitter query patterns for CSS files.
@@ -21,10 +21,10 @@ const (
 // merged-alternation pattern wouldn't pay; precompiling each query
 // once at init still removes the per-file sitter.NewQuery cost.
 type CSSExtractor struct {
-	lang     *sitter.Language
-	qImport  *parser.PreparedQuery
-	qClass   *parser.PreparedQuery
-	qID      *parser.PreparedQuery
+	lang    *sitter.Language
+	qImport *parser.PreparedQuery
+	qClass  *parser.PreparedQuery
+	qID     *parser.PreparedQuery
 }
 
 func NewCSSExtractor() *CSSExtractor {

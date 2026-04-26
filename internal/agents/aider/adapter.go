@@ -124,7 +124,9 @@ func (a *Adapter) Apply(env agents.Env, opts agents.ApplyOpts) (*agents.Result, 
 // they're already present. We key idempotency on the comment
 // sentinel — if a user ran init once already, they see it on line
 // one of our block.
-func appendAiderIgnoreBlock(w interface{ Write(p []byte) (n int, err error) }, path string, opts agents.ApplyOpts) (agents.FileAction, error) {
+func appendAiderIgnoreBlock(w interface {
+	Write(p []byte) (n int, err error)
+}, path string, opts agents.ApplyOpts) (agents.FileAction, error) {
 	existing, readErr := os.ReadFile(path)
 	if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
 		return agents.FileAction{}, readErr

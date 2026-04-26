@@ -11,11 +11,11 @@ import (
 // Mirrors the resolution chain in resolveWorkspaceID's docstring.
 func TestResolveWorkspaceID_Precedence(t *testing.T) {
 	cases := []struct {
-		name     string
-		entry    *config.RepoEntry
-		cfg      *config.Config
-		prefix   string
-		want     string
+		name   string
+		entry  *config.RepoEntry
+		cfg    *config.Config
+		prefix string
+		want   string
 	}{
 		{
 			name:   "all empty falls back to prefix",

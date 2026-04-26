@@ -112,7 +112,7 @@ func (cm *comboManager) Record(rawQuery, symbolID string) {
 	idx := cm.findQueryLocked(q)
 	if idx < 0 {
 		cm.store.Queries = append(cm.store.Queries, persistence.ComboQuery{
-			Query: q,
+			Query:   q,
 			Matches: []persistence.ComboMatch{{SymbolID: symbolID, HitCount: 1, LastUsed: now}},
 		})
 	} else {

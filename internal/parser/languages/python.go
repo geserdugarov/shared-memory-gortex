@@ -4,10 +4,10 @@ import (
 	"strings"
 	"unicode"
 
-	sitter "github.com/zzet/gortex/internal/parser/tsitter"
-	"github.com/zzet/gortex/internal/parser/tsitter/python"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/parser"
+	sitter "github.com/zzet/gortex/internal/parser/tsitter"
+	"github.com/zzet/gortex/internal/parser/tsitter/python"
 )
 
 // qPyAll is a single tree-sitter query alternating over every pattern
@@ -77,11 +77,11 @@ func (e *PythonExtractor) Extensions() []string { return []string{".py"} }
 // --- Deferred match buffers ----------------------------------------
 
 type pyDeferredCall struct {
-	name       string
-	receiver   string // attribute receiver text
-	line       int
-	isAttr     bool
-	expr       *sitter.Node // for FastAPI Depends() arg lookup
+	name     string
+	receiver string // attribute receiver text
+	line     int
+	isAttr   bool
+	expr     *sitter.Node // for FastAPI Depends() arg lookup
 }
 
 func (e *PythonExtractor) Extract(filePath string, src []byte) (*parser.ExtractionResult, error) {

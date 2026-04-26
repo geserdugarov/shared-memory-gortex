@@ -313,7 +313,6 @@ func setResponseType(h *schemaHints, ident, body string, fileNodes []*graph.Node
 	}
 }
 
-
 // looksLikeType is a quick heuristic: starts with an uppercase letter,
 // contains only identifier-ish characters. Filters out things like
 // "err" or "nil" while keeping "LoginRequest" and "pkg.User".

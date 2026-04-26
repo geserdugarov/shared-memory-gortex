@@ -25,7 +25,7 @@ type ERBExtractor struct{}
 
 func NewERBExtractor() *ERBExtractor { return &ERBExtractor{} }
 
-func (e *ERBExtractor) Language() string     { return "erb" }
+func (e *ERBExtractor) Language() string { return "erb" }
 func (e *ERBExtractor) Extensions() []string {
 	return []string{".erb", ".rhtml", ".html.erb", ".js.erb", ".css.erb", ".json.erb"}
 }

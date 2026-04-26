@@ -24,6 +24,8 @@ var (
 	indexOutput    string
 	indexWatch     bool
 	indexProfile   bool
+	indexSnapshot  string
+	indexWorkspace string
 )
 
 var indexCmd = &cobra.Command{
@@ -40,6 +42,8 @@ func init() {
 	indexCmd.Flags().StringVar(&indexOutput, "output", "text", "output format: text|json")
 	indexCmd.Flags().BoolVar(&indexWatch, "watch", false, "stay running and reindex on file changes")
 	indexCmd.Flags().BoolVar(&indexProfile, "profile", false, "print per-stage timings + peak RSS for battle-testing")
+	indexCmd.Flags().StringVar(&indexSnapshot, "snapshot", "", "write a snapshot.gob.gz file at the given path (used by gortex-cloud's indexer worker)")
+	indexCmd.Flags().StringVar(&indexWorkspace, "workspace", "", "stamp emitted nodes with this WorkspaceID (defaults to repo name); see spec-launch.md §4")
 	rootCmd.AddCommand(indexCmd)
 }
 
@@ -113,6 +117,18 @@ func runIndex(cmd *cobra.Command, args []string) error {
 
 		if indexProfile {
 			writeProfileReport(cmd.OutOrStdout(), path, timer, result, memBefore)
+		}
+
+		// --snapshot writes a gob+gzip snapshot suitable for `gortex
+		// server --snapshot <path>`. The cloud indexer worker (in
+		// github.com/gortexhq/gortex-cloud) shells this out per
+		// spec-launch.md §0a iteration 2 to produce per-workspace
+		// snapshots that the per-workspace gortex server later loads
+		// at boot.
+		if indexSnapshot != "" {
+			if err := saveSnapshotTo(g, nil, nil, "gortex-index", indexSnapshot, logger); err != nil {
+				return fmt.Errorf("write snapshot %s: %w", indexSnapshot, err)
+			}
 		}
 	}
 

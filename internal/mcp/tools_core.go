@@ -669,12 +669,12 @@ func (s *Server) handleGetFileSummary(_ context.Context, req mcp.CallToolRequest
 
 	// Wrap with etag in response.
 	result := map[string]any{
-		"nodes":     sg.Nodes,
-		"edges":     sg.Edges,
+		"nodes":       sg.Nodes,
+		"edges":       sg.Edges,
 		"total_nodes": len(sg.Nodes),
 		"total_edges": len(sg.Edges),
-		"truncated": sg.Truncated,
-		"etag":      etag,
+		"truncated":   sg.Truncated,
+		"etag":        etag,
 	}
 	return mcp.NewToolResultJSON(result)
 }

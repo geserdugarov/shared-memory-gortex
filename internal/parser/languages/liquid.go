@@ -14,10 +14,10 @@ import (
 //   - `{% capture NAME %}...{% endcapture %}` → function nodes
 //   - `{% include 'x' %}` / `{% render 'x' %}` → import edges
 var (
-	liquidAssignRe   = regexp.MustCompile(`(?m)\{%\s*assign\s+([A-Za-z_][\w]*)\s*=`)
-	liquidCaptureRe  = regexp.MustCompile(`(?m)\{%\s*capture\s+([A-Za-z_][\w]*)\s*%\}`)
-	liquidIncludeRe  = regexp.MustCompile(`(?m)\{%\s*include\s+['"]([^'"]+)['"]`)
-	liquidRenderRe   = regexp.MustCompile(`(?m)\{%\s*render\s+['"]([^'"]+)['"]`)
+	liquidAssignRe  = regexp.MustCompile(`(?m)\{%\s*assign\s+([A-Za-z_][\w]*)\s*=`)
+	liquidCaptureRe = regexp.MustCompile(`(?m)\{%\s*capture\s+([A-Za-z_][\w]*)\s*%\}`)
+	liquidIncludeRe = regexp.MustCompile(`(?m)\{%\s*include\s+['"]([^'"]+)['"]`)
+	liquidRenderRe  = regexp.MustCompile(`(?m)\{%\s*render\s+['"]([^'"]+)['"]`)
 )
 
 // LiquidExtractor extracts Shopify/Jekyll Liquid templates.

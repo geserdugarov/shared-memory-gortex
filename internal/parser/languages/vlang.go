@@ -11,14 +11,14 @@ import (
 // V is a Go-like language with `fn`, `struct`, `interface`, and
 // `enum`. Imports use `import x`, `import x.y`, or `import x as y`.
 var (
-	vlangFuncRe    = regexp.MustCompile(`(?m)^\s*(?:pub\s+)?fn\s+(?:\([^)]*\)\s+)?(\w+)\s*\(`)
-	vlangStructRe  = regexp.MustCompile(`(?m)^\s*(?:pub\s+)?struct\s+(\w+)\b`)
-	vlangIfaceRe   = regexp.MustCompile(`(?m)^\s*(?:pub\s+)?interface\s+(\w+)\b`)
-	vlangEnumRe    = regexp.MustCompile(`(?m)^\s*(?:pub\s+)?enum\s+(\w+)\b`)
-	vlangTypeRe    = regexp.MustCompile(`(?m)^\s*(?:pub\s+)?type\s+(\w+)\s*=`)
-	vlangImportRe  = regexp.MustCompile(`(?m)^\s*import\s+([\w.]+)`)
-	vlangModuleRe  = regexp.MustCompile(`(?m)^\s*module\s+(\w+)`)
-	vlangCallRe    = regexp.MustCompile(`\b([a-zA-Z_]\w*)\s*\(`)
+	vlangFuncRe   = regexp.MustCompile(`(?m)^\s*(?:pub\s+)?fn\s+(?:\([^)]*\)\s+)?(\w+)\s*\(`)
+	vlangStructRe = regexp.MustCompile(`(?m)^\s*(?:pub\s+)?struct\s+(\w+)\b`)
+	vlangIfaceRe  = regexp.MustCompile(`(?m)^\s*(?:pub\s+)?interface\s+(\w+)\b`)
+	vlangEnumRe   = regexp.MustCompile(`(?m)^\s*(?:pub\s+)?enum\s+(\w+)\b`)
+	vlangTypeRe   = regexp.MustCompile(`(?m)^\s*(?:pub\s+)?type\s+(\w+)\s*=`)
+	vlangImportRe = regexp.MustCompile(`(?m)^\s*import\s+([\w.]+)`)
+	vlangModuleRe = regexp.MustCompile(`(?m)^\s*module\s+(\w+)`)
+	vlangCallRe   = regexp.MustCompile(`\b([a-zA-Z_]\w*)\s*\(`)
 )
 
 // VlangExtractor extracts V source using regex.

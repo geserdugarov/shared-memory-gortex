@@ -98,10 +98,10 @@ func TestRenderDaemonRepos_NoDiskColumnInMemoryMode(t *testing.T) {
 func TestRenderDaemonHeader_SearchBackendRow(t *testing.T) {
 	st := sampleStatus()
 	st.SearchBackend = daemon.SearchBackendStats{
-		Name:     "bleve-disk",
-		DocCount: 65000,
-		Bytes:    200 * 1024 * 1024,
-		DiskPath: "/tmp/gortex/bleve.scorch",
+		Name:      "bleve-disk",
+		DocCount:  65000,
+		Bytes:     200 * 1024 * 1024,
+		DiskPath:  "/tmp/gortex/bleve.scorch",
 		DiskBytes: 800 * 1024 * 1024,
 	}
 	var buf bytes.Buffer

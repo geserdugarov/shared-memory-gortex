@@ -22,7 +22,7 @@ type mockSourceReader struct {
 }
 
 func (m *mockSourceReader) Graph() *graph.Graph { return m.g }
-func (m *mockSourceReader) RootPath() string     { return m.rootPath }
+func (m *mockSourceReader) RootPath() string    { return m.rootPath }
 
 // --- Helpers ---
 
@@ -72,7 +72,6 @@ func genDistinctIdentPair() *rapid.Generator[[2]string] {
 }
 
 // --- Property Tests ---
-
 
 // TestPropertyScaffoldNameSubstitution verifies that for any existing symbol
 // used as an example and for any valid new name, the scaffold output contains
@@ -154,7 +153,6 @@ func %s(x int) int {
 
 // --- Unit Tests for Edge Cases ---
 
-
 // TestScaffoldNoCallersOmitsRegistration verifies that when the example symbol
 // has no callers at depth 1, the registration/wiring section is omitted and a
 // note is included explaining that no wiring pattern was detected.
@@ -204,7 +202,6 @@ func LonelyFunc(x int) int {
 	}
 	assert.True(t, foundNote, "expected a note about omitted registration; notes: %v", result.Notes)
 }
-
 
 // TestScaffoldNoTestsOmitsTestStub verifies that when the example symbol has
 // no associated test file or test function, the test stub is omitted and a

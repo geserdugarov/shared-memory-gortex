@@ -82,7 +82,7 @@ var jsBuiltins = map[string]string{
 	"click": "dom", "focus": "dom", "blur": "dom",
 	"createElement": "dom", "createTextNode": "dom", "createDocumentFragment": "dom",
 	"parseFromString": "dom.DOMParser",
-	"contains": "dom/array/string",
+	"contains":        "dom/array/string",
 
 	// console
 	"log": "console", "warn": "console", "error": "console", "debug": "console", "info": "console",
@@ -108,7 +108,7 @@ var pyBuiltins = map[string]string{
 	// Shared across str/list/dict/set
 	"split": "str", "rsplit": "str", "join": "str",
 	"replace": "str",
-	"remove": "list/set", "pop": "list/dict/set",
+	"remove":  "list/set", "pop": "list/dict/set",
 	"index": "list/str", "count": "list/str", "sort": "list", "reverse": "list",
 	"get": "dict", "keys": "dict", "values": "dict", "items": "dict",
 	"add": "set", "has": "set",

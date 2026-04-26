@@ -2,25 +2,25 @@ package semantic
 
 // Config holds configuration for the semantic enrichment layer.
 type Config struct {
-	Enabled            bool             `mapstructure:"enabled" yaml:"enabled"`
-	TimeoutSeconds     int              `mapstructure:"timeout_seconds" yaml:"timeout_seconds,omitempty"`
-	EnrichOnWatch      bool             `mapstructure:"enrich_on_watch" yaml:"enrich_on_watch,omitempty"`
-	WatchDebounceMs    int              `mapstructure:"watch_debounce_ms" yaml:"watch_debounce_ms,omitempty"`
-	RefuteUnconfirmed  bool             `mapstructure:"refute_unconfirmed" yaml:"refute_unconfirmed,omitempty"`
-	Providers          []ProviderConfig `mapstructure:"providers" yaml:"providers,omitempty"`
+	Enabled           bool             `mapstructure:"enabled" yaml:"enabled"`
+	TimeoutSeconds    int              `mapstructure:"timeout_seconds" yaml:"timeout_seconds,omitempty"`
+	EnrichOnWatch     bool             `mapstructure:"enrich_on_watch" yaml:"enrich_on_watch,omitempty"`
+	WatchDebounceMs   int              `mapstructure:"watch_debounce_ms" yaml:"watch_debounce_ms,omitempty"`
+	RefuteUnconfirmed bool             `mapstructure:"refute_unconfirmed" yaml:"refute_unconfirmed,omitempty"`
+	Providers         []ProviderConfig `mapstructure:"providers" yaml:"providers,omitempty"`
 }
 
 // ProviderConfig holds configuration for a single semantic provider.
 type ProviderConfig struct {
-	Name       string   `mapstructure:"name" yaml:"name"`
-	Command    string   `mapstructure:"command" yaml:"command,omitempty"`
-	Args       []string `mapstructure:"args" yaml:"args,omitempty"`
-	Languages  []string `mapstructure:"languages" yaml:"languages"`
-	Priority   int      `mapstructure:"priority" yaml:"priority,omitempty"`
-	Enabled    bool     `mapstructure:"enabled" yaml:"enabled"`
-	Mode       string   `mapstructure:"mode" yaml:"mode,omitempty"` // "typecheck" or "callgraph" for go-types
-	Daemon     bool     `mapstructure:"daemon" yaml:"daemon,omitempty"`
-	MaxParallel int     `mapstructure:"max_parallel" yaml:"max_parallel,omitempty"`
+	Name        string   `mapstructure:"name" yaml:"name"`
+	Command     string   `mapstructure:"command" yaml:"command,omitempty"`
+	Args        []string `mapstructure:"args" yaml:"args,omitempty"`
+	Languages   []string `mapstructure:"languages" yaml:"languages"`
+	Priority    int      `mapstructure:"priority" yaml:"priority,omitempty"`
+	Enabled     bool     `mapstructure:"enabled" yaml:"enabled"`
+	Mode        string   `mapstructure:"mode" yaml:"mode,omitempty"` // "typecheck" or "callgraph" for go-types
+	Daemon      bool     `mapstructure:"daemon" yaml:"daemon,omitempty"`
+	MaxParallel int      `mapstructure:"max_parallel" yaml:"max_parallel,omitempty"`
 }
 
 // DefaultConfig returns a default semantic config with auto-detection enabled.

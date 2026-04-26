@@ -22,8 +22,8 @@ import (
 var (
 	asmLabelRe = regexp.MustCompile(`(?m)^[ \t]*([A-Za-z_.][\w.$@]*)\s*:(?:$|[^:=])`)
 	// NASM/MASM directives start with bare keyword; GAS prefixes with `.`.
-	asmGlobalRe = regexp.MustCompile(`(?mi)^[ \t]*(?:\.)?(global|globl|public)\s+([A-Za-z_][\w.$@]*)`)
-	asmExternRe = regexp.MustCompile(`(?mi)^[ \t]*(?:\.)?(extern|externdef|import)\s+([A-Za-z_][\w.$@]*)`)
+	asmGlobalRe  = regexp.MustCompile(`(?mi)^[ \t]*(?:\.)?(global|globl|public)\s+([A-Za-z_][\w.$@]*)`)
+	asmExternRe  = regexp.MustCompile(`(?mi)^[ \t]*(?:\.)?(extern|externdef|import)\s+([A-Za-z_][\w.$@]*)`)
 	asmIncludeRe = regexp.MustCompile(`(?mi)^[ \t]*(?:%include|\.include|\.INCLUDE)\s+["<]?([^">\n]+?)[">]?\s*$`)
 	// Call-like mnemonics across x86 (call), 6502 (jsr), ARM (bl/blx),
 	// 68k (bsr/jsr), MIPS (jal/jalr), RISC-V (jal/jalr), SPARC (call).

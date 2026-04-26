@@ -15,12 +15,12 @@ import (
 	"github.com/zzet/gortex/internal/config"
 	"github.com/zzet/gortex/internal/daemon"
 	"github.com/zzet/gortex/internal/embedding"
-	"github.com/zzet/gortex/internal/persistence"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/indexer"
 	gortexmcp "github.com/zzet/gortex/internal/mcp"
 	"github.com/zzet/gortex/internal/parser"
 	"github.com/zzet/gortex/internal/parser/languages"
+	"github.com/zzet/gortex/internal/persistence"
 	"github.com/zzet/gortex/internal/query"
 	"github.com/zzet/gortex/internal/savings"
 	"github.com/zzet/gortex/internal/semantic"
@@ -32,27 +32,27 @@ import (
 )
 
 var (
-	mcpIndex      string
-	mcpTransport  string
-	mcpPort       int
-	mcpBind       string
-	mcpAuthToken  string
-	mcpWatch      bool
-	mcpServerAPI  bool
-	mcpCORSOrigin string
-	mcpDebounce   int
-	mcpTrack      []string
-	mcpProject    string
-	mcpCacheDir      string
-	mcpNoCache       bool
-	mcpEmbeddings    bool
-	mcpEmbeddingsURL string
+	mcpIndex           string
+	mcpTransport       string
+	mcpPort            int
+	mcpBind            string
+	mcpAuthToken       string
+	mcpWatch           bool
+	mcpServerAPI       bool
+	mcpCORSOrigin      string
+	mcpDebounce        int
+	mcpTrack           []string
+	mcpProject         string
+	mcpCacheDir        string
+	mcpNoCache         bool
+	mcpEmbeddings      bool
+	mcpEmbeddingsURL   string
 	mcpEmbeddingsModel string
-	mcpSemantic      bool
-	mcpNoSemantic    bool
-	mcpSemanticMode  string
-	mcpNoDaemon      bool
-	mcpForceProxy    bool
+	mcpSemantic        bool
+	mcpNoSemantic      bool
+	mcpSemanticMode    string
+	mcpNoDaemon        bool
+	mcpForceProxy      bool
 )
 
 var mcpCmd = &cobra.Command{

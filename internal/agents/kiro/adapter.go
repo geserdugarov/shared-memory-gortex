@@ -15,7 +15,7 @@ const DocsURL = "https://kiro.dev/docs/mcp"
 
 type Adapter struct{}
 
-func New() *Adapter        { return &Adapter{} }
+func New() *Adapter                { return &Adapter{} }
 func (a *Adapter) Name() string    { return Name }
 func (a *Adapter) DocsURL() string { return DocsURL }
 

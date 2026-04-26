@@ -16,10 +16,10 @@ import (
 
 // deadCodeGraphResult holds a generated graph with known dead and live symbols.
 type deadCodeGraphResult struct {
-	Graph       *graph.Graph
-	Processes   *ProcessResult
-	DeadIDs     []string // symbols that should be detected as dead code
-	LiveIDs     []string // symbols that should NOT be detected as dead code
+	Graph     *graph.Graph
+	Processes *ProcessResult
+	DeadIDs   []string // symbols that should be detected as dead code
+	LiveIDs   []string // symbols that should NOT be detected as dead code
 }
 
 // genDeadCodeGraph generates a random graph with a mix of dead and live symbols.
@@ -184,7 +184,6 @@ func genDeadCodeGraph() *rapid.Generator[deadCodeGraphResult] {
 
 // --- Property Tests ---
 
-
 // TestPropertyDeadCode_ZeroIncomingEdges verifies that every symbol returned by
 // FindDeadCode has zero incoming calls or references edges, is not a process member,
 // is not in a test file, and is not exported.
@@ -334,7 +333,6 @@ func TestPropertyDeadCode_Completeness(t *testing.T) {
 	})
 }
 
-
 // Feature: gortex-enhancements, Property 6: Hotspot complexity score matches formula
 
 // --- Generators ---
@@ -449,7 +447,6 @@ func genHotspotGraph() *rapid.Generator[hotspotGraphResult] {
 }
 
 // --- Property Tests ---
-
 
 // TestPropertyHotspot_ComplexityScoreFormula verifies that for every hotspot entry,
 // ComplexityScore equals (fan_in * 2) + (fan_out * 1.5) + (community_crossings * 3)
@@ -575,7 +572,6 @@ func TestPropertyHotspot_ThresholdFiltering(t *testing.T) {
 }
 
 // --- Unit Tests ---
-
 
 // TestHotspots_SmallGraphError verifies that a graph with fewer than 10 function/method
 // symbols returns an empty result from FindHotspots.

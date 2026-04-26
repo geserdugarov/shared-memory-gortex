@@ -10,10 +10,12 @@ import (
 
 // MATLAB / Octave. Keyword-delimited — every block terminates with
 // `end`. The canonical function heads are
-//   function out = name(args)
-//   function [out1, out2] = name(args)
-//   function name(args)
-//   function name
+//
+//	function out = name(args)
+//	function [out1, out2] = name(args)
+//	function name(args)
+//	function name
+//
 // Classes are `classdef NAME` ... `end`. Packages can be pulled in via
 // `import pkg.subpkg.Symbol`. We skip `.m` so the Objective-C
 // extractor keeps priority on that extension; orchestrator registration

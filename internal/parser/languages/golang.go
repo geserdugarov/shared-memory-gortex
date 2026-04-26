@@ -4,10 +4,10 @@ import (
 	"fmt"
 	"strings"
 
-	sitter "github.com/zzet/gortex/internal/parser/tsitter"
-	"github.com/zzet/gortex/internal/parser/tsitter/golang"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/parser"
+	sitter "github.com/zzet/gortex/internal/parser/tsitter"
+	"github.com/zzet/gortex/internal/parser/tsitter/golang"
 )
 
 // qGoAll is a single tree-sitter query that alternates over every pattern
@@ -127,11 +127,11 @@ func (e *GoExtractor) Extensions() []string { return []string{".go"} }
 // --- Deferred match buffers ----------------------------------------
 
 type goDeferredCall struct {
-	callName    string // plain call
-	method      string // selector call method name
-	receiver    string // selector call receiver text
-	line        int    // 1-based line of call_expression
-	isSelector  bool
+	callName   string // plain call
+	method     string // selector call method name
+	receiver   string // selector call receiver text
+	line       int    // 1-based line of call_expression
+	isSelector bool
 }
 
 type goDeferredTypeRef struct {

@@ -354,11 +354,10 @@ func TestMultiIndexer_IndexAll_EmptyRepos(t *testing.T) {
 // Feature: multi-repo-support, Property 6: Node ID format by mode
 //
 // TestPropertyNodeIDFormatByMode verifies that:
-// - In multi-repo mode (2+ repos), node IDs match <repo_prefix>/<path>::<Symbol>
-//   and RepoPrefix is non-empty.
-// - In single-repo mode (1 repo), node IDs match <path>::<Symbol>
-//   and RepoPrefix is empty.
-//
+//   - In multi-repo mode (2+ repos), node IDs match <repo_prefix>/<path>::<Symbol>
+//     and RepoPrefix is non-empty.
+//   - In single-repo mode (1 repo), node IDs match <path>::<Symbol>
+//     and RepoPrefix is empty.
 func TestPropertyNodeIDFormatByMode(t *testing.T) {
 	rapid.Check(t, func(rt *rapid.T) {
 		// Generate random function names for uniqueness per iteration.
@@ -481,7 +480,6 @@ func TestPropertyNodeIDFormatByMode(t *testing.T) {
 // modify, remove, or add any nodes or edges belonging to repo B.
 // The node count and edge count for repo B before and after re-indexing A
 // are identical.
-//
 func TestPropertyReindexIsolation(t *testing.T) {
 	rapid.Check(t, func(rt *rapid.T) {
 		// Generate random function names for uniqueness per iteration.

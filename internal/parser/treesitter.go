@@ -97,7 +97,7 @@ var cursorPool = sync.Pool{
 	New: func() any { return ts.NewQueryCursor() },
 }
 
-func getCursor() *ts.QueryCursor { return cursorPool.Get().(*ts.QueryCursor) }
+func getCursor() *ts.QueryCursor  { return cursorPool.Get().(*ts.QueryCursor) }
 func putCursor(c *ts.QueryCursor) { cursorPool.Put(c) }
 
 // RunQuery executes a tree-sitter S-expression query against a node and

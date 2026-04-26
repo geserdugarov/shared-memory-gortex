@@ -1692,10 +1692,10 @@ func (s *Server) handleGetContracts(_ context.Context, req mcp.CallToolRequest) 
 	}
 	if otherReposTotal > 0 {
 		payload["other_repos"] = map[string]any{
-			"total":       otherReposTotal,
-			"repo_count":  len(otherRepos),
-			"by_repo":     otherRepos,
-			"hint":        "pass all_repos=true or repo=<prefix>/project=<name> to include these",
+			"total":      otherReposTotal,
+			"repo_count": len(otherRepos),
+			"by_repo":    otherRepos,
+			"hint":       "pass all_repos=true or repo=<prefix>/project=<name> to include these",
 		}
 	}
 	if depsSkipped > 0 {

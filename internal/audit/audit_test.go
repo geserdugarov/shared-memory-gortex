@@ -186,9 +186,9 @@ func TestDiscoverConfigFiles(t *testing.T) {
 		t.Fatalf("expected 3 files, got %d: %v", len(files), files)
 	}
 	want := map[string]bool{
-		"CLAUDE.md":             true,
-		"AGENTS.md":             true,
-		".cursor/rules/foo.md":  true,
+		"CLAUDE.md":            true,
+		"AGENTS.md":            true,
+		".cursor/rules/foo.md": true,
 	}
 	for _, f := range files {
 		if !want[f] {

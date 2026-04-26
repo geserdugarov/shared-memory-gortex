@@ -14,8 +14,8 @@ import (
 	mcpserver "github.com/mark3labs/mcp-go/server"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"github.com/zzet/gortex/internal/server"
 	"github.com/zzet/gortex/internal/graph"
+	"github.com/zzet/gortex/internal/server"
 	"go.uber.org/zap"
 )
 

@@ -12,7 +12,7 @@ import (
 // assignment: `name[x_, y_] := body` (SetDelayed) or `name[x_] = body`
 // (Set). We also recognise the FullForm `SetDelayed[name, ...]`. Package
 // loading uses `Get["Pkg`"]`, `Needs["Pkg`"]` or the shorthand
-// `<< Pkg\``. Bodies are expressions, not blocks, so we emit the
+// `<< Pkg\“. Bodies are expressions, not blocks, so we emit the
 // definition as a single-line node.
 var (
 	wolframFuncRe = regexp.MustCompile(`(?m)^\s*([A-Za-z$][\w$]*)\s*\[[^\]]*\]\s*:?=`)

@@ -43,11 +43,11 @@ func TestParse_Invalid(t *testing.T) {
 		"1",
 		"1.2",
 		"1.2.3.4",
-		"v01.2.3",        // leading zero
-		"v1.2.3-",        // empty prerelease
-		"v1.2.3+",        // empty build
-		"v1.2.3-01",      // leading-zero numeric prerelease identifier
-		"v1.2.3 extra",   // trailing garbage
+		"v01.2.3",      // leading zero
+		"v1.2.3-",      // empty prerelease
+		"v1.2.3+",      // empty build
+		"v1.2.3-01",    // leading-zero numeric prerelease identifier
+		"v1.2.3 extra", // trailing garbage
 	}
 	for _, s := range bad {
 		t.Run(s, func(t *testing.T) {

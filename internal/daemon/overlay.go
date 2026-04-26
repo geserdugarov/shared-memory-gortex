@@ -38,11 +38,11 @@ type OverlayFile struct {
 // of an MCP session. Sessions auto-expire after IdleTTL of inactivity
 // so a crashed client doesn't leak memory in the daemon.
 type OverlaySession struct {
-	ID         string
+	ID          string
 	WorkspaceID string
-	Created    time.Time
-	LastUsed   time.Time
-	files      map[string]OverlayFile // path → overlay
+	Created     time.Time
+	LastUsed    time.Time
+	files       map[string]OverlayFile // path → overlay
 }
 
 // OverlayManager manages the per-session overlay map for the daemon.
@@ -198,4 +198,3 @@ func (m *OverlayManager) SweepIdle() int {
 	}
 	return dropped
 }
-

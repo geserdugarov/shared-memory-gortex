@@ -48,9 +48,9 @@ type EnrichResult struct {
 
 // ProviderStatus represents the current state of a semantic provider.
 type ProviderStatus struct {
-	Name            string  `json:"name"`
-	Language        string  `json:"language"`
-	Status          string  `json:"status"` // "ready", "unavailable", "error"
-	CoveragePercent float64 `json:"coverage_percent,omitempty"`
+	Name            string        `json:"name"`
+	Language        string        `json:"language"`
+	Status          string        `json:"status"` // "ready", "unavailable", "error"
+	CoveragePercent float64       `json:"coverage_percent,omitempty"`
 	LastResult      *EnrichResult `json:"last_result,omitempty"`
 }

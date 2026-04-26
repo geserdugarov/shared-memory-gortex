@@ -4,9 +4,9 @@ import (
 	"fmt"
 	"strings"
 
-	sitter "github.com/zzet/gortex/internal/parser/tsitter"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/parser"
+	sitter "github.com/zzet/gortex/internal/parser/tsitter"
 	"github.com/zzet/gortex/internal/parser/tsitter/dart"
 )
 
@@ -363,8 +363,10 @@ func (e *DartExtractor) extractImports(
 
 // extractCalls finds function/method call sites.
 // In Dart's tree-sitter grammar, calls appear as:
-//   expression_statement: identifier selector(argument_part) ...
-//   e.g. print('hello') → identifier "print", selector "(…)" with argument_part
+//
+//	expression_statement: identifier selector(argument_part) ...
+//	e.g. print('hello') → identifier "print", selector "(…)" with argument_part
+//
 // We detect an identifier followed by a selector sibling that contains an argument_part.
 //
 // NOTE: receiver attribution is not yet wired here. Dart uses

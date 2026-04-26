@@ -14,12 +14,12 @@ import (
 // `procedure TFoo.Bar`), `uses` imports, and class / record / interface
 // declarations of the form `TFoo = class(TBase)`.
 var (
-	pascalProcRe     = regexp.MustCompile(`(?im)^\s*(?:class\s+)?(?:procedure|function|constructor|destructor)\s+(?:(\w+)\.)?(\w+)`)
-	pascalUnitRe     = regexp.MustCompile(`(?im)^\s*unit\s+([\w.]+)`)
-	pascalProgramRe  = regexp.MustCompile(`(?im)^\s*program\s+(\w+)`)
-	pascalUsesRe     = regexp.MustCompile(`(?im)^\s*uses\s+([^;]+);`)
-	pascalTypeDefRe  = regexp.MustCompile(`(?im)^\s*(\w+)\s*=\s*(class|record|interface|object)\b`)
-	pascalUsesSplit  = regexp.MustCompile(`[\s,]+`)
+	pascalProcRe    = regexp.MustCompile(`(?im)^\s*(?:class\s+)?(?:procedure|function|constructor|destructor)\s+(?:(\w+)\.)?(\w+)`)
+	pascalUnitRe    = regexp.MustCompile(`(?im)^\s*unit\s+([\w.]+)`)
+	pascalProgramRe = regexp.MustCompile(`(?im)^\s*program\s+(\w+)`)
+	pascalUsesRe    = regexp.MustCompile(`(?im)^\s*uses\s+([^;]+);`)
+	pascalTypeDefRe = regexp.MustCompile(`(?im)^\s*(\w+)\s*=\s*(class|record|interface|object)\b`)
+	pascalUsesSplit = regexp.MustCompile(`[\s,]+`)
 )
 
 // PascalExtractor extracts Pascal / Delphi source using regex.

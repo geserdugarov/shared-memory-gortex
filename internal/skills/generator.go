@@ -97,7 +97,7 @@ func (g *Generator) GenerateRouting(skills []GeneratedSkill) string {
 	sb.WriteString("|------|-------------|-------|\n")
 	for _, s := range skills {
 		title := capitalizeWords(strings.ReplaceAll(s.Label, "-", " "))
-		fmt.Fprintf(&sb,"| %s | %d symbols | `/gortex-%s` |\n", title, g.CommunitySize(s.CommunityID), s.Label)
+		fmt.Fprintf(&sb, "| %s | %d symbols | `/gortex-%s` |\n", title, g.CommunitySize(s.CommunityID), s.Label)
 	}
 	sb.WriteString("<!-- gortex:skills:end -->\n")
 	return sb.String()
@@ -123,20 +123,20 @@ func (g *Generator) renderSkill(c analysis.Community, crossComm map[string]map[s
 	// Frontmatter.
 	kebab := toKebab(label)
 	sb.WriteString("---\n")
-	fmt.Fprintf(&sb,"name: gortex-%s\n", kebab)
-	fmt.Fprintf(&sb,"description: \"Work in the %s area — %d symbols across %d files (%.0f%% cohesion)\"\n",
+	fmt.Fprintf(&sb, "name: gortex-%s\n", kebab)
+	fmt.Fprintf(&sb, "description: \"Work in the %s area — %d symbols across %d files (%.0f%% cohesion)\"\n",
 		label, c.Size, len(c.Files), c.Cohesion*100)
 	sb.WriteString("---\n\n")
 
 	// Title.
-	fmt.Fprintf(&sb,"# %s\n\n", label)
-	fmt.Fprintf(&sb,"%d symbols | %d files | %.0f%% cohesion\n\n", c.Size, len(c.Files), c.Cohesion*100)
+	fmt.Fprintf(&sb, "# %s\n\n", label)
+	fmt.Fprintf(&sb, "%d symbols | %d files | %.0f%% cohesion\n\n", c.Size, len(c.Files), c.Cohesion*100)
 
 	// When to use.
 	sb.WriteString("## When to Use\n\n")
 	sb.WriteString("Use this skill when working on files in:\n")
 	for _, f := range c.Files {
-		fmt.Fprintf(&sb,"- `%s`\n", f)
+		fmt.Fprintf(&sb, "- `%s`\n", f)
 	}
 	sb.WriteString("\n")
 
@@ -159,7 +159,7 @@ func (g *Generator) renderSkill(c analysis.Community, crossComm map[string]map[s
 			if len(names) > 5 {
 				names = append(names[:5], "...")
 			}
-			fmt.Fprintf(&sb,"| `%s` | %s |\n", f, strings.Join(names, ", "))
+			fmt.Fprintf(&sb, "| `%s` | %s |\n", f, strings.Join(names, ", "))
 		}
 		sb.WriteString("\n")
 	}
@@ -169,7 +169,7 @@ func (g *Generator) renderSkill(c analysis.Community, crossComm map[string]map[s
 	if len(entryPoints) > 0 {
 		sb.WriteString("## Entry Points\n\n")
 		for _, ep := range entryPoints {
-			fmt.Fprintf(&sb,"- `%s`\n", ep)
+			fmt.Fprintf(&sb, "- `%s`\n", ep)
 		}
 		sb.WriteString("\n")
 	}
@@ -187,7 +187,7 @@ func (g *Generator) renderSkill(c analysis.Community, crossComm map[string]map[s
 		}
 		sort.Slice(conns, func(i, j int) bool { return conns[i].count > conns[j].count })
 		for _, cn := range conns {
-			fmt.Fprintf(&sb,"- **%s** (%d cross-edges)\n", cn.label, cn.count)
+			fmt.Fprintf(&sb, "- **%s** (%d cross-edges)\n", cn.label, cn.count)
 		}
 		sb.WriteString("\n")
 	}
@@ -195,10 +195,10 @@ func (g *Generator) renderSkill(c analysis.Community, crossComm map[string]map[s
 	// How to explore.
 	sb.WriteString("## How to Explore\n\n")
 	sb.WriteString("```\n")
-	fmt.Fprintf(&sb,"get_communities with id: \"%s\"\n", c.ID)
-	fmt.Fprintf(&sb,"smart_context with task: \"understand %s\", format: \"gcx\"\n", label)
+	fmt.Fprintf(&sb, "get_communities with id: \"%s\"\n", c.ID)
+	fmt.Fprintf(&sb, "smart_context with task: \"understand %s\", format: \"gcx\"\n", label)
 	if len(entryPoints) > 0 {
-		fmt.Fprintf(&sb,"find_usages with id: \"%s\", format: \"gcx\"\n", entryPoints[0])
+		fmt.Fprintf(&sb, "find_usages with id: \"%s\", format: \"gcx\"\n", entryPoints[0])
 	}
 	sb.WriteString("```\n\n")
 	sb.WriteString("_`format: \"gcx\"` returns the [GCX1 compact wire format](../../docs/wire-format.md) — round-trippable, ~27% fewer tokens than JSON. Drop it for JSON output; agents using `@gortex/wire` or the Go `github.com/gortexhq/gcx-go` package decode either._\n")

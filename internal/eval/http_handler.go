@@ -7,8 +7,8 @@ import (
 	"strings"
 
 	mcpserver "github.com/mark3labs/mcp-go/server"
-	"github.com/zzet/gortex/internal/server"
 	"github.com/zzet/gortex/internal/graph"
+	"github.com/zzet/gortex/internal/server"
 	"go.uber.org/zap"
 )
 

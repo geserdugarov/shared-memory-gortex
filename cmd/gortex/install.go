@@ -17,17 +17,17 @@ import (
 // kept separate to avoid cross-pollination when wiring from the
 // interactive wizard or the --json reporters.
 var (
-	installYes          bool
-	installAgents       string
-	installAgentsSkip   string
-	installJSON         bool
-	installDryRun       bool
-	installForce        bool
-	installHooks        = true
-	installNoHooks      bool
-	installStartDaemon  bool
-	installTrackRepo    bool
-	installTrackPath    string
+	installYes         bool
+	installAgents      string
+	installAgentsSkip  string
+	installJSON        bool
+	installDryRun      bool
+	installForce       bool
+	installHooks       = true
+	installNoHooks     bool
+	installStartDaemon bool
+	installTrackRepo   bool
+	installTrackPath   string
 )
 
 var installCmd = &cobra.Command{

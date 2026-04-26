@@ -662,9 +662,9 @@ func TestPrefetchNoContextReturnsError(t *testing.T) {
 func TestHealthScoreBelowThresholdIncludesRecommendation(t *testing.T) {
 	// Test the recommendation logic directly
 	tests := []struct {
-		name            string
-		healthScore     float64
-		wantRecommend   bool
+		name          string
+		healthScore   float64
+		wantRecommend bool
 	}{
 		{"score_50_recommends", 50.0, true},
 		{"score_79_recommends", 79.9, true},

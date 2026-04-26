@@ -1995,13 +1995,13 @@ func firstNonErrorReturnField(inner string) string {
 // and attaches the extracted Shape to the node's Meta["shape"].
 //
 // We:
-//   * Collect the unique set of symbol IDs — a popular DTO might be a
+//   - Collect the unique set of symbol IDs — a popular DTO might be a
 //     request/response on dozens of routes and we want to parse its
 //     source once.
-//   * Read each file once (cached in the source map).
-//   * Skip nodes whose ID doesn't look like a symbol (bare names that
+//   - Read each file once (cached in the source map).
+//   - Skip nodes whose ID doesn't look like a symbol (bare names that
 //     couldn't be upgraded) — those have nothing to dereference.
-//   * Skip type nodes that already have a shape attached from a prior
+//   - Skip type nodes that already have a shape attached from a prior
 //     pass on the same session (ETag-style short-circuit).
 func (idx *Indexer) snapshotContractShapes(reg *contracts.Registry) {
 	symbols := make(map[string]struct{})

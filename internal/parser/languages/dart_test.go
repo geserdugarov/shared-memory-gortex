@@ -3,11 +3,11 @@ package languages
 import (
 	"testing"
 
-	sitter "github.com/zzet/gortex/internal/parser/tsitter"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/parser"
+	sitter "github.com/zzet/gortex/internal/parser/tsitter"
 	"github.com/zzet/gortex/internal/parser/tsitter/dart"
 )
 

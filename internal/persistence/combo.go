@@ -10,8 +10,8 @@ import (
 )
 
 const (
-	comboFile     = "combo.gob.gz"
-	maxComboQueries = 2000
+	comboFile               = "combo.gob.gz"
+	maxComboQueries         = 2000
 	maxComboEntriesPerQuery = 20
 )
 
@@ -19,9 +19,9 @@ const (
 // times the agent picked this symbol following the same normalized query;
 // LastUsed is a unix timestamp (seconds) for decay and reaping.
 type ComboMatch struct {
-	SymbolID  string
-	HitCount  uint32
-	LastUsed  int64
+	SymbolID string
+	HitCount uint32
+	LastUsed int64
 }
 
 // ComboQuery holds all recorded matches for one normalized query string

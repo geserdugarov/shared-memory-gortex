@@ -11,11 +11,11 @@ import (
 // Stop hook asked the agent to continue) — we must skip in that case to
 // avoid recursion.
 type PostTaskInput struct {
-	HookEventName   string `json:"hook_event_name"`
-	SessionID       string `json:"session_id"`
-	TranscriptPath  string `json:"transcript_path"`
-	CWD             string `json:"cwd"`
-	StopHookActive  bool   `json:"stop_hook_active"`
+	HookEventName  string `json:"hook_event_name"`
+	SessionID      string `json:"session_id"`
+	TranscriptPath string `json:"transcript_path"`
+	CWD            string `json:"cwd"`
+	StopHookActive bool   `json:"stop_hook_active"`
 }
 
 // runPostTask handles a Stop hook invocation with the raw stdin bytes.

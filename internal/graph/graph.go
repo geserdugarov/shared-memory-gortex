@@ -86,11 +86,11 @@ type shard struct {
 	// Sidecar position indexes — see comment on shard. Reads are
 	// unchanged (callers still iterate the slices); only writes
 	// consult these maps.
-	byFileIdx  map[string]map[string]int     // filePath   → id  → position
-	byNameIdx  map[string]map[string]int     // name       → id  → position
-	byRepoIdx  map[string]map[string]int     // repoPrefix → id  → position
-	outEdgeIdx map[string]map[edgeKey]int    // fromID     → key → position
-	inEdgeIdx  map[string]map[edgeKey]int    // toID       → key → position
+	byFileIdx  map[string]map[string]int  // filePath   → id  → position
+	byNameIdx  map[string]map[string]int  // name       → id  → position
+	byRepoIdx  map[string]map[string]int  // repoPrefix → id  → position
+	outEdgeIdx map[string]map[edgeKey]int // fromID     → key → position
+	inEdgeIdx  map[string]map[edgeKey]int // toID       → key → position
 }
 
 func newShard() *shard {
@@ -963,4 +963,3 @@ func (g *Graph) RepoPrefixes() []string {
 	}
 	return prefixes
 }
-

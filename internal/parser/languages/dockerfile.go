@@ -3,10 +3,10 @@ package languages
 import (
 	"strings"
 
-	sitter "github.com/zzet/gortex/internal/parser/tsitter"
-	"github.com/zzet/gortex/internal/parser/tsitter/dockerfile"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/parser"
+	sitter "github.com/zzet/gortex/internal/parser/tsitter"
+	"github.com/zzet/gortex/internal/parser/tsitter/dockerfile"
 )
 
 // DockerfileExtractor extracts Dockerfile files into graph nodes and edges.
@@ -20,7 +20,7 @@ func NewDockerfileExtractor() *DockerfileExtractor {
 	return &DockerfileExtractor{lang: dockerfile.GetLanguage()}
 }
 
-func (e *DockerfileExtractor) Language() string     { return "dockerfile" }
+func (e *DockerfileExtractor) Language() string { return "dockerfile" }
 func (e *DockerfileExtractor) Extensions() []string {
 	return []string{".dockerfile", "Dockerfile", "Containerfile"}
 }

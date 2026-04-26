@@ -54,7 +54,7 @@ func testGraph() (*graph.Graph, *analysis.CommunityResult, *analysis.ProcessResu
 			"parser/ast.go::BuildAST":          "community-0",
 			"parser/ast.go::Node":              "community-0",
 			"server/handler.go::HandleRequest": "community-1",
-			"server/handler.go::Middleware":     "community-1",
+			"server/handler.go::Middleware":    "community-1",
 			"server/router.go::Route":          "community-1",
 			"util/helper.go::Max":              "community-2",
 		},

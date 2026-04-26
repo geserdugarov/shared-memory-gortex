@@ -14,10 +14,10 @@ import (
 // are intra-file call edges; `call FILE.BAT` (no leading colon) is
 // a cross-file import.
 var (
-	batchLabelRe    = regexp.MustCompile(`(?m)^\s*:([A-Za-z_][\w-]*)\s*$`)
+	batchLabelRe     = regexp.MustCompile(`(?m)^\s*:([A-Za-z_][\w-]*)\s*$`)
 	batchCallLabelRe = regexp.MustCompile(`(?mi)^\s*call\s+:([A-Za-z_][\w-]*)`)
 	batchCallFileRe  = regexp.MustCompile(`(?mi)^\s*call\s+([A-Za-z_][\w.\\/-]*\.(?:bat|cmd))`)
-	batchGotoRe     = regexp.MustCompile(`(?mi)^\s*goto\s+:?([A-Za-z_][\w-]*)`)
+	batchGotoRe      = regexp.MustCompile(`(?mi)^\s*goto\s+:?([A-Za-z_][\w-]*)`)
 )
 
 // BatchExtractor extracts Windows batch-file source using regex.

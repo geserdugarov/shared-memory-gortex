@@ -238,21 +238,21 @@ func TestValidate_TypesCompatible_AcrossLanguages(t *testing.T) {
 		{"[]User", "Array<User>"},
 		{"List<User>", "User[]"},
 		{"api.User", "User"},
-		{"string", "String"},              // Go / Dart
-		{"string", "str"},                 // Go / Python
-		{"bool", "Boolean"},               // Go / Java / Kotlin
-		{"int64", "Long"},                 // Go / Java
-		{"float64", "Double"},             // Go / Java / Dart
-		{"time.Time", "DateTime"},         // Go / Dart
-		{"time.Time", "Instant"},          // Go / Java (java.time)
-		{"time.Time", "datetime"},         // Go / Python
-		{"time.Time", "OffsetDateTime"},   // Go / Java
-		{"DateTime", "Instant"},           // Dart / Java
-		{"time.Duration", "Duration"},     // Go / Dart / Java
-		{"time.Duration", "timedelta"},    // Go / Python
-		{"[]byte", "Uint8List"},           // Go / Dart
-		{"[]byte", "bytes"},               // Go / Python
-		{"UUID", "Uuid"},                  // Python / Rust
+		{"string", "String"},            // Go / Dart
+		{"string", "str"},               // Go / Python
+		{"bool", "Boolean"},             // Go / Java / Kotlin
+		{"int64", "Long"},               // Go / Java
+		{"float64", "Double"},           // Go / Java / Dart
+		{"time.Time", "DateTime"},       // Go / Dart
+		{"time.Time", "Instant"},        // Go / Java (java.time)
+		{"time.Time", "datetime"},       // Go / Python
+		{"time.Time", "OffsetDateTime"}, // Go / Java
+		{"DateTime", "Instant"},         // Dart / Java
+		{"time.Duration", "Duration"},   // Go / Dart / Java
+		{"time.Duration", "timedelta"},  // Go / Python
+		{"[]byte", "Uint8List"},         // Go / Dart
+		{"[]byte", "bytes"},             // Go / Python
+		{"UUID", "Uuid"},                // Python / Rust
 	}
 	for _, c := range cases {
 		if !canAssign(c[0], c[1]) {

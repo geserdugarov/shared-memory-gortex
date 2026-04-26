@@ -238,4 +238,3 @@ func diContractFromEdge(e *graph.Edge) (contracts.Contract, bool) {
 		Confidence: 0.9,
 	}, true
 }
-

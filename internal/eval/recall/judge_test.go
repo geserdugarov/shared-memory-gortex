@@ -76,7 +76,7 @@ func TestRun_CapturesMisses(t *testing.T) {
 	fixture := Fixture{
 		Name: "t",
 		Cases: []Case{
-			{ID: "hit",  Query: "q1", Tier: TierExact, Expected: []string{"a"}},
+			{ID: "hit", Query: "q1", Tier: TierExact, Expected: []string{"a"}},
 			{ID: "miss", Query: "q2", Tier: TierExact, Expected: []string{"z"}},
 		},
 	}

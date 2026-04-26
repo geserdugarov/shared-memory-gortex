@@ -19,7 +19,7 @@ type mockProvider struct {
 	closed     bool
 }
 
-func (m *mockProvider) Name() string       { return m.name }
+func (m *mockProvider) Name() string        { return m.name }
 func (m *mockProvider) Languages() []string { return m.languages }
 func (m *mockProvider) Available() bool     { return m.available }
 func (m *mockProvider) Close() error        { m.closed = true; return nil }
@@ -29,10 +29,10 @@ func (m *mockProvider) Enrich(g *graph.Graph, repoRoot string) (*EnrichResult, e
 		return m.enrichFunc(g, repoRoot)
 	}
 	return &EnrichResult{
-		Provider:       m.name,
-		Language:       m.languages[0],
-		EdgesConfirmed: 5,
-		EdgesAdded:     2,
+		Provider:        m.name,
+		Language:        m.languages[0],
+		EdgesConfirmed:  5,
+		EdgesAdded:      2,
 		CoveragePercent: 95.0,
 	}, nil
 }

@@ -230,9 +230,7 @@ func genInterfaceGraph() *rapid.Generator[interfaceGraphResult] {
 	})
 }
 
-
 // --- Property Tests ---
-
 
 // TestPropertyContractViolation_CallerParamCountChange verifies that when the
 // parameter count changes, every caller is reported as a violation.

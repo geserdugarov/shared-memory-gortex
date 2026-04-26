@@ -387,14 +387,14 @@ func (h *Handler) handleWorkspaceRoster(w http.ResponseWriter, r *http.Request) 
 // an empty list rather than 404 so the page can render its empty state.
 
 type processEntry struct {
-	ID      string   `json:"id"`
-	Name    string   `json:"name"`
-	Entry   string   `json:"entry"`
-	Steps   int      `json:"steps"`
-	Files   int      `json:"files"`
-	Repos   int      `json:"repos"`
-	Score   int      `json:"score"`
-	Risk    string   `json:"risk"`    // ok | warn | risk
+	ID       string   `json:"id"`
+	Name     string   `json:"name"`
+	Entry    string   `json:"entry"`
+	Steps    int      `json:"steps"`
+	Files    int      `json:"files"`
+	Repos    int      `json:"repos"`
+	Score    int      `json:"score"`
+	Risk     string   `json:"risk"`     // ok | warn | risk
 	Crosses  []string `json:"crosses"`  // repo prefixes this flow touches
 	Category string   `json:"category"` // product | tests | internal
 }
@@ -498,9 +498,9 @@ type contractEntry struct {
 	Producer  string             `json:"producer"`
 	Consumers []string           `json:"consumers"`
 	Version   string             `json:"version"`
-	Breaking  bool                `json:"breaking"`
-	Callers   int                 `json:"callers"`
-	Last      string              `json:"last"`
+	Breaking  bool               `json:"breaking"`
+	Callers   int                `json:"callers"`
+	Last      string             `json:"last"`
 	Locations []contractLocation `json:"locations"`
 
 	// Schema-shape fields promoted from the primary location's meta so
@@ -1293,18 +1293,18 @@ func nonEmpty(s, fallback string) string {
 
 type dashboardSnapshot struct {
 	Stats struct {
-		TotalNodes int `json:"total_nodes"`
-		TotalEdges int `json:"total_edges"`
-		Repos      int `json:"repos"`
-		Caveats    int `json:"caveats"`
+		TotalNodes int    `json:"total_nodes"`
+		TotalEdges int    `json:"total_edges"`
+		Repos      int    `json:"repos"`
+		Caveats    int    `json:"caveats"`
 		Version    string `json:"version"`
 	} `json:"stats"`
-	Kinds     []kvEntry                   `json:"kinds"`
-	Languages []kvEntry                   `json:"languages"`
-	Repos     []repoEntry                 `json:"repos"`
-	Activity  []indexer.GraphChangeEvent  `json:"activity"`
-	Caveats   []caveatEntry               `json:"caveats"`
-	Processes []processEntry              `json:"processes"`
+	Kinds     []kvEntry                  `json:"kinds"`
+	Languages []kvEntry                  `json:"languages"`
+	Repos     []repoEntry                `json:"repos"`
+	Activity  []indexer.GraphChangeEvent `json:"activity"`
+	Caveats   []caveatEntry              `json:"caveats"`
+	Processes []processEntry             `json:"processes"`
 }
 
 type kvEntry struct {

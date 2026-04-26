@@ -3,10 +3,10 @@ package languages
 import (
 	"strings"
 
-	sitter "github.com/zzet/gortex/internal/parser/tsitter"
-	"github.com/zzet/gortex/internal/parser/tsitter/bash"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/parser"
+	sitter "github.com/zzet/gortex/internal/parser/tsitter"
+	"github.com/zzet/gortex/internal/parser/tsitter/bash"
 )
 
 const (
@@ -26,10 +26,10 @@ const (
 // command attribution), so we precompile each query at init but
 // don't merge into an alternation.
 type BashExtractor struct {
-	lang        *sitter.Language
-	qFunction   *parser.PreparedQuery
-	qVariable   *parser.PreparedQuery
-	qCommand    *parser.PreparedQuery
+	lang      *sitter.Language
+	qFunction *parser.PreparedQuery
+	qVariable *parser.PreparedQuery
+	qCommand  *parser.PreparedQuery
 }
 
 func NewBashExtractor() *BashExtractor {

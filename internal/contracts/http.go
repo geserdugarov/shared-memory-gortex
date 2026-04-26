@@ -478,10 +478,10 @@ var httpPrefilterMarkers = map[string][][]byte{
 		[]byte("dio."), // lowercased dio instance
 		[]byte("Dio."), // PascalCase Dio class
 		[]byte("http."),
-		[]byte("Router"),   // shelf_router `Router()` / `router.`
-		[]byte("..get("),   // shelf_router cascade form
-		[]byte("..post("),  // idem
-		[]byte("..put("),   // idem
+		[]byte("Router"),  // shelf_router `Router()` / `router.`
+		[]byte("..get("),  // shelf_router cascade form
+		[]byte("..post("), // idem
+		[]byte("..put("),  // idem
 		[]byte("..delete("),
 		[]byte("..patch("),
 		[]byte("..head("),

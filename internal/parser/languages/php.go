@@ -4,10 +4,10 @@ import (
 	"fmt"
 	"strings"
 
-	sitter "github.com/zzet/gortex/internal/parser/tsitter"
-	"github.com/zzet/gortex/internal/parser/tsitter/php"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/parser"
+	sitter "github.com/zzet/gortex/internal/parser/tsitter"
+	"github.com/zzet/gortex/internal/parser/tsitter/php"
 )
 
 // PHPExtractor extracts PHP source files.
@@ -805,9 +805,9 @@ func (e *PHPExtractor) emitSymfonyAttributeDispatch(classNode *sitter.Node, meth
 // phpAttribute captures the parsed form of one #[Attr(...)] instance —
 // just what we need for dispatch extraction.
 type phpAttribute struct {
-	name   string
-	line   int
-	args   map[string]string // key → value (class ref / string literal)
+	name string
+	line int
+	args map[string]string // key → value (class ref / string literal)
 }
 
 // collectPhpAttributes scans a class_declaration or method_declaration

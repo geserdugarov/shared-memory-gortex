@@ -1678,12 +1678,12 @@ func (s *Server) handleEditSymbol(ctx context.Context, req mcp.CallToolRequest) 
 	newLines := strings.Count(newSource, "\n") + 1
 
 	return mcp.NewToolResultJSON(map[string]any{
-		"file":          node.FilePath,
-		"symbol":        id,
-		"lines_before":  oldLines,
-		"lines_after":   newLines,
-		"start_line":    node.StartLine,
-		"status":        "applied",
+		"file":         node.FilePath,
+		"symbol":       id,
+		"lines_before": oldLines,
+		"lines_after":  newLines,
+		"start_line":   node.StartLine,
+		"status":       "applied",
 	})
 }
 

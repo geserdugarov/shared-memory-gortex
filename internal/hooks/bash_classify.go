@@ -193,7 +193,7 @@ var grepFlagsTakingArg = map[string]bool{
 	"--include": true, "--exclude": true,
 	"--regexp": true, "--file": true,
 	"-t": true, "-T": true, // rg type / type-not
-	"-g": true,             // rg glob
+	"-g": true, // rg glob
 }
 
 // extractGrepPattern walks tokens after `grep`/`rg` and returns the search
@@ -233,7 +233,7 @@ func extractGrepPattern(tokens []string) (string, bool) {
 }
 
 // extractFindName walks tokens looking for `-name`/`-iname` and returns the
-// next token with leading/trailing `*`?`` stripped. Non-symbol-looking
+// next token with leading/trailing `*`?“ stripped. Non-symbol-looking
 // residues still return ok=true; the caller (enrichBash) gates on
 // classifyGrepPattern.
 func extractFindName(tokens []string) (string, bool) {

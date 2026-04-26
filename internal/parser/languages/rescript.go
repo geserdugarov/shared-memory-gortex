@@ -13,12 +13,12 @@ import (
 // to separate them from plain variables. Imports use `open` and
 // `include`.
 var (
-	rescriptFuncRe     = regexp.MustCompile(`(?m)^\s*let\s+(?:rec\s+)?(\w+)\s*(?::[^=]+)?=\s*\(`)
-	rescriptLetRe      = regexp.MustCompile(`(?m)^\s*let\s+(?:rec\s+)?(\w+)\s*(?::[^=]+)?=\s*\S`)
-	rescriptTypeRe     = regexp.MustCompile(`(?m)^\s*type\s+(\w+)`)
-	rescriptModuleRe   = regexp.MustCompile(`(?m)^\s*module\s+(\w+)`)
-	rescriptOpenRe     = regexp.MustCompile(`(?m)^\s*(?:open|include)\s+([\w.]+)`)
-	rescriptCallRe     = regexp.MustCompile(`\b([a-zA-Z_]\w*)\s*\(`)
+	rescriptFuncRe   = regexp.MustCompile(`(?m)^\s*let\s+(?:rec\s+)?(\w+)\s*(?::[^=]+)?=\s*\(`)
+	rescriptLetRe    = regexp.MustCompile(`(?m)^\s*let\s+(?:rec\s+)?(\w+)\s*(?::[^=]+)?=\s*\S`)
+	rescriptTypeRe   = regexp.MustCompile(`(?m)^\s*type\s+(\w+)`)
+	rescriptModuleRe = regexp.MustCompile(`(?m)^\s*module\s+(\w+)`)
+	rescriptOpenRe   = regexp.MustCompile(`(?m)^\s*(?:open|include)\s+([\w.]+)`)
+	rescriptCallRe   = regexp.MustCompile(`\b([a-zA-Z_]\w*)\s*\(`)
 )
 
 // ReScriptExtractor extracts ReScript source using regex.

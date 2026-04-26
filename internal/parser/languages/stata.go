@@ -9,9 +9,11 @@ import (
 )
 
 // Stata. User-defined programs are
-//   program define NAME
-//   ...
-//   end
+//
+//	program define NAME
+//	...
+//	end
+//
 // A `capture program drop NAME` line is bookkeeping rather than a real
 // definition — we capture the name as a variable marker. `local NAME`
 // and `global NAME` are scalar/macro variables. Data load is `use "X"`

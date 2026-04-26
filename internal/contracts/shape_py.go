@@ -8,9 +8,10 @@ import (
 // pyFieldRe captures a Python class attribute with a type annotation.
 // Pydantic V1/V2 models and plain typed dataclasses both use this
 // form. Capture groups:
-//  1: attribute name
-//  2: type expression (up to the optional `=` or end of line)
-//  3: default value expression (after `=`) — empty when no default
+//
+//	1: attribute name
+//	2: type expression (up to the optional `=` or end of line)
+//	3: default value expression (after `=`) — empty when no default
 var pyFieldRe = regexp.MustCompile(`^\s*([A-Za-z_][\w]*)\s*:\s*([^=#\n]+?)(?:\s*=\s*(.+?))?\s*(?:#\s*(.*))?$`)
 
 // pyFieldAliasRe pulls alias="wire" out of a Pydantic Field(...) call,

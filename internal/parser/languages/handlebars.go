@@ -15,10 +15,10 @@ import (
 // block helper produce call edges so get_callers still works across
 // partials; standalone interpolations (outside a block) are ignored.
 var (
-	hbsBlockOpenRe = regexp.MustCompile(`\{\{#([A-Za-z_][\w-]*)\b`)
+	hbsBlockOpenRe  = regexp.MustCompile(`\{\{#([A-Za-z_][\w-]*)\b`)
 	hbsBlockCloseRe = regexp.MustCompile(`\{\{/([A-Za-z_][\w-]*)\s*\}\}`)
-	hbsPartialRe   = regexp.MustCompile(`\{\{>\s*([A-Za-z_][\w/.-]*)`)
-	hbsHelperRe    = regexp.MustCompile(`\{\{([A-Za-z_][\w-]*)\b`)
+	hbsPartialRe    = regexp.MustCompile(`\{\{>\s*([A-Za-z_][\w/.-]*)`)
+	hbsHelperRe     = regexp.MustCompile(`\{\{([A-Za-z_][\w-]*)\b`)
 )
 
 // HandlebarsExtractor extracts Handlebars / Mustache templates.
@@ -80,10 +80,10 @@ func (e *HandlebarsExtractor) Extract(filePath string, src []byte) (*parser.Extr
 
 	// Walk all block tokens (open + close) in source order.
 	type tok struct {
-		pos   int
-		open  bool
-		name  string
-		line  int
+		pos  int
+		open bool
+		name string
+		line int
 	}
 	var toks []tok
 	for _, m := range hbsBlockOpenRe.FindAllSubmatchIndex(src, -1) {

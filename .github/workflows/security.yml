@@ -26,6 +26,7 @@ jobs:
         uses: golang/govulncheck-action@v1
         with:
           go-version-input: '1.25'
+          repo-checkout: false
 
   trivy-fs:
     runs-on: ubuntu-latest

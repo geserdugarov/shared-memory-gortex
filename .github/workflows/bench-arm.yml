@@ -1,19 +1,6 @@
 name: ARM Benchmarks
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - 'internal/**'
-      - 'pkg/**'
-      - 'cmd/**'
-      - 'go.mod'
-      - 'go.sum'
-  pull_request:
-    branches: [main]
-    paths:
-      - 'internal/**'
-      - 'pkg/**'
   workflow_dispatch:
 
 permissions:

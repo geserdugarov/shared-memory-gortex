@@ -29,6 +29,7 @@ import (
 	"github.com/zzet/gortex/internal/semantic/scip"
 	"github.com/zzet/gortex/internal/server"
 	"github.com/zzet/gortex/internal/server/hub"
+	"github.com/zzet/gortex/internal/workspace"
 )
 
 var (
@@ -108,6 +109,31 @@ func runMCP(cmd *cobra.Command, args []string) error {
 
 	logger := newLogger()
 	defer func() { _ = logger.Sync() }()
+
+	// Two-entry-point handshake. The MCP server binds at
+	// either the workspace root (`.gortex/workspace.toml` present in
+	// cwd) or a single-project root (`.gortex/` directory in cwd).
+	// Anywhere else fails the handshake with a clear message naming
+	// both supported entry points — there is no walk-up.
+	cwd, cwdErr := os.Getwd()
+	if cwdErr != nil {
+		return fmt.Errorf("resolving cwd for MCP handshake: %w", cwdErr)
+	}
+	bind, bindErr := workspace.Resolve(cwd)
+	if bindErr != nil {
+		fmt.Fprintf(os.Stderr, "[gortex] MCP handshake failed: %v\n", bindErr)
+		return bindErr
+	}
+	for _, w := range workspace.FormatMarkerWarnings(bind.Marker) {
+		fmt.Fprintf(os.Stderr, "[gortex] %s\n", w)
+	}
+	switch bind.Mode {
+	case workspace.ModeWorkspace:
+		fmt.Fprintf(os.Stderr, "[gortex] workspace mode: %s (%d members)\n",
+			bind.Root, len(bind.Members))
+	case workspace.ModeSingleProject:
+		fmt.Fprintf(os.Stderr, "[gortex] single-project mode: %s\n", bind.Root)
+	}
 
 	cfg, err := config.Load(cfgFile)
 	if err != nil {
@@ -250,6 +276,7 @@ func runMCP(cmd *cobra.Command, args []string) error {
 	eng.SetSearchProvider(idx.Search)
 	gortexmcp.Version = version
 	srv := gortexmcp.NewServer(eng, g, idx, nil, logger, cfg.Guards.Rules, multiOpts...)
+	srv.SetBind(bind)
 
 	// Wire semantic manager to MCP server for stats reporting.
 	if semMgr := idx.SemanticManager(); semMgr != nil {

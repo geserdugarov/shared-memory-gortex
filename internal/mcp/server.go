@@ -20,6 +20,7 @@ import (
 	"github.com/zzet/gortex/internal/savings"
 	"github.com/zzet/gortex/internal/semantic"
 	"github.com/zzet/gortex/internal/server/hub"
+	"github.com/zzet/gortex/internal/workspace"
 )
 
 // Version is set at build time.
@@ -112,6 +113,18 @@ type Server struct {
 	feedback         *feedbackManager
 	combo            *comboManager
 	frecency         *frecencyTracker
+
+	// bind is the active two-entry-point handshake result.
+	// nil when no handshake has been performed (legacy callers, tests
+	// that construct the server directly). Tool handlers consult it
+	// via Bind(); the per-tool scope dispatcher consults it via
+	// resolveScope.
+	bind *workspace.Bind
+
+	// toolScopes is the per-Server tool-name → ToolScope registry.
+	// Populated by registerToolWithScope as tools are added; consulted
+	// by ResolveToolScope before each handler runs.
+	toolScopes *scopeRegistry
 }
 
 // sessionFor returns the session-scoped state for the current request.
@@ -360,6 +373,7 @@ func NewServer(engine *query.Engine, g *graph.Graph, idx *indexer.Indexer, watch
 		},
 		sessions:   newSessionMap(),
 		guardRules: guardRules,
+		toolScopes: newScopeRegistry(),
 	}
 
 	// Apply multi-repo options if provided.
@@ -383,6 +397,13 @@ func NewServer(engine *query.Engine, g *graph.Graph, idx *indexer.Indexer, watch
 	if s.multiIndexer != nil || s.configManager != nil {
 		s.registerMultiRepoTools()
 	}
+
+	// Workspace-scope bootstrap tools (list_repos, workspace_info).
+	// Always registered — they degrade cleanly in single-project mode
+	// to a one-member view.
+	s.registerWorkspaceTools()
+
+	s.applyDefaultToolScopes()
 
 	return s
 }
@@ -563,6 +584,67 @@ func (s *Server) ExportContext(ctx context.Context, task, entryPoint, format str
 	req.Params.Name = "export_context"
 	_ = json.Unmarshal(argsJSON, &req.Params.Arguments)
 	return s.handleExportContext(ctx, req)
+}
+
+// SetBind installs the active workspace bind.
+// Called by the `mcp` / `server` / daemon command
+// after a successful workspace.Resolve(cwd). nil resets the bind —
+// useful for tests.
+//
+// The bind drives per-tool scope dispatch: every call to a scope: repo
+// tool resolves `repo` against bind.Members; every call to a
+// scope: workspace tool defaults to the bind's member list;
+// scope: fan-out's `["*"]` sentinel expands to bind.Members.
+func (s *Server) SetBind(b *workspace.Bind) { s.bind = b }
+
+// Bind returns the active bind, or nil if no handshake has run.
+// Exposed for tool handlers that need to enforce the
+// workspace-isolation invariant directly (e.g. `list_repos`).
+func (s *Server) Bind() *workspace.Bind { return s.bind }
+
+// RegisterToolScope records the ToolScope for toolName so the
+// dispatcher can validate `repo` per call. Tools that don't register a
+// scope behave as if unscoped — legacy single-repo behavior — until
+// every tool is migrated.
+func (s *Server) RegisterToolScope(toolName string, scope ToolScope) {
+	s.toolScopes.set(toolName, scope)
+}
+
+// ToolScope returns the registered scope for toolName and whether one
+// has been declared. Used by tests asserting that every tool has a
+// scope, and by the dispatcher.
+func (s *Server) ToolScope(toolName string) (ToolScope, bool) {
+	return s.toolScopes.get(toolName)
+}
+
+// ToolScopeMap returns a snapshot of every registered tool name →
+// scope-name mapping. Used for diagnostics and for the
+// `workspace_info`-style introspection tool (scope: workspace).
+func (s *Server) ToolScopeMap() map[string]string {
+	return s.toolScopes.snapshot()
+}
+
+// RegisteredScopedTools returns the registered tool names sorted
+// lexically. Test convenience.
+func (s *Server) RegisteredScopedTools() []string {
+	return s.toolScopes.allTools()
+}
+
+// ResolveToolScope is the public entry point used by the dispatcher:
+// looks up the tool's scope, then validates the request's `repo`
+// argument against it. Returns either the resolved repo set or a
+// structured protocol error suitable for the caller to surface
+// verbatim.
+//
+// When the tool isn't in the registry, returns a nil ScopedRepos and
+// nil error — callers treat this as "unscoped, do not enforce" so
+// gradual migration doesn't break anything.
+func (s *Server) ResolveToolScope(toolName string, repo any) (*ScopedRepos, *mcp.CallToolResult) {
+	scope, ok := s.toolScopes.get(toolName)
+	if !ok {
+		return nil, nil
+	}
+	return ResolveScopedRepos(scope, s.bind, repo)
 }
 
 // RunAnalysis performs community detection and process discovery on the current graph.

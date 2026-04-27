@@ -124,7 +124,7 @@ Expected output ends with `PASSED: SLSA verification passed`.
 
 ## From source
 
-Requires Go 1.25+ and a C toolchain (the tree-sitter extractors are CGO — no way around it).
+Requires Go 1.26+ and a C toolchain (the tree-sitter extractors are CGO — no way around it).
 
 ```bash
 git clone https://github.com/zzet/gortex.git

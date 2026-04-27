@@ -48,7 +48,7 @@ jobs:
             -w /go/src/gortex \
             -e GITHUB_TOKEN \
             -e HOMEBREW_TAP_TOKEN \
-            ghcr.io/goreleaser/goreleaser-cross:v1.25 \
+            ghcr.io/goreleaser/goreleaser-cross:v1.26 \
             release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

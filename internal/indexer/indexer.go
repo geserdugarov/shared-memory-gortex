@@ -25,6 +25,7 @@ import (
 	"github.com/zzet/gortex/internal/search"
 	"github.com/zzet/gortex/internal/codegen"
 	"github.com/zzet/gortex/internal/codeowners"
+	"github.com/zzet/gortex/internal/fixtures"
 	"github.com/zzet/gortex/internal/licenses"
 	"github.com/zzet/gortex/internal/semantic"
 	"github.com/zzet/gortex/internal/todos"
@@ -568,6 +569,29 @@ func (idx *Indexer) applyCoverageDomains(relPath, lang string, src []byte, resul
 	if !idx.config.Coverage.IsEnabled("concurrency") {
 		stripConcurrencyEdges(result)
 	}
+	if idx.config.Coverage.IsEnabled("fixtures") {
+		applyFixtureClassification(relPath, lang, result)
+	}
+}
+
+// applyFixtureClassification reclassifies the language extractor's
+// emitted file node from KindFile to KindFixture when the file
+// lives under a testdata/ directory. When the language extractor
+// produced no file node (file types without a registered
+// extractor), a standalone KindFixture node is emitted instead.
+//
+// Reference edges from test functions to fixtures are out of scope
+// for v1 — agents can already filter by kind to enumerate fixtures.
+func applyFixtureClassification(relPath, lang string, result *parser.ExtractionResult) {
+	for _, n := range result.Nodes {
+		if n.Kind == graph.KindFile && n.FilePath == relPath {
+			if fixtures.ReclassifyFileToFixture(n) {
+				return
+			}
+			break
+		}
+	}
+	result.Nodes = append(result.Nodes, fixtures.BuildGraphArtifacts(relPath, lang)...)
 }
 
 // stripConcurrencyEdges removes the EdgeSpawns / EdgeSends /

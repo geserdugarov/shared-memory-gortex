@@ -504,11 +504,13 @@ func (idx *Indexer) loadCodeownersRules() []codeowners.Rule {
 }
 
 // applyCoverageDomains runs the per-file coverage extractors
-// (todos, licenses, ownership). It appends nodes/edges to the
-// file's ExtractionResult so they go through the same
-// applyRepoPrefix / graph.AddNode pipeline as the language
-// extractor's output. Called from both the bulk index worker pool
-// (IndexCtx) and the incremental indexFile path.
+// (todos, licenses, ownership) and applies the post-extraction
+// strip pass for domains the language extractor always emits but
+// the user has gated off (function_shape). Appended/stripped
+// nodes/edges flow through the same applyRepoPrefix / graph.AddNode
+// pipeline as the language extractor's output. Called from both
+// the bulk index worker pool (IndexCtx) and the incremental
+// indexFile path.
 //
 // relPath is the unprefixed file path; lang is the detected
 // language; src is the file bytes.
@@ -535,6 +537,58 @@ func (idx *Indexer) applyCoverageDomains(relPath, lang string, src []byte, resul
 			}
 		}
 	}
+	if !idx.config.Coverage.IsEnabled("function_shape") {
+		stripFunctionShape(result)
+	}
+}
+
+// stripFunctionShape removes the param/closure/generic_param nodes
+// and their associated edges from a per-file extraction result.
+// Used when the function_shape coverage domain is gated off — the
+// language extractor always emits these for resolution-internal
+// reasons, and we drop them after the extractor returns rather than
+// wire a config dependency through the parser layer.
+func stripFunctionShape(result *parser.ExtractionResult) {
+	stripped := make(map[string]struct{})
+	keptNodes := result.Nodes[:0]
+	for _, n := range result.Nodes {
+		if isFunctionShapeNode(n.Kind) {
+			stripped[n.ID] = struct{}{}
+			continue
+		}
+		keptNodes = append(keptNodes, n)
+	}
+	result.Nodes = keptNodes
+	keptEdges := result.Edges[:0]
+	for _, e := range result.Edges {
+		if isFunctionShapeEdge(e.Kind) {
+			continue
+		}
+		if _, ok := stripped[e.From]; ok {
+			continue
+		}
+		if _, ok := stripped[e.To]; ok {
+			continue
+		}
+		keptEdges = append(keptEdges, e)
+	}
+	result.Edges = keptEdges
+}
+
+func isFunctionShapeNode(kind graph.NodeKind) bool {
+	switch kind {
+	case graph.KindParam, graph.KindClosure, graph.KindGenericParam:
+		return true
+	}
+	return false
+}
+
+func isFunctionShapeEdge(kind graph.EdgeKind) bool {
+	switch kind {
+	case graph.EdgeParamOf, graph.EdgeReturns, graph.EdgeTypedAs, graph.EdgeCaptures:
+		return true
+	}
+	return false
 }
 
 func (idx *Indexer) applyRepoPrefix(nodes []*graph.Node, edges []*graph.Edge) {

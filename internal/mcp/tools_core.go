@@ -419,6 +419,7 @@ func (s *Server) registerCoreTools() {
 			mcp.WithBoolean("compact", mcp.Description("One-line-per-symbol text output (saves 50-70% tokens)")),
 			mcp.WithString("format", mcp.Description("Output format: json (default), gcx (GCX1 compact wire format), or toon")),
 			mcp.WithString("min_tier", mcp.Description(minTierParamDescription)),
+			mcp.WithBoolean("exclude_tests", mcp.Description("Drop callers originating in test functions (set true when you want production callers only)")),
 		),
 		s.handleGetCallers,
 	)
@@ -444,6 +445,7 @@ func (s *Server) registerCoreTools() {
 			mcp.WithString("project", mcp.Description("Filter results to repositories in a specific project")),
 			mcp.WithString("ref", mcp.Description("Filter results to repositories with a specific reference tag")),
 			mcp.WithString("min_tier", mcp.Description(minTierParamDescription)),
+			mcp.WithBoolean("exclude_tests", mcp.Description("Drop references originating in test functions (set true to see only production usages)")),
 		),
 		s.handleFindUsages,
 	)
@@ -757,12 +759,13 @@ func (s *Server) handleGetCallers(_ context.Context, req mcp.CallToolRequest) (*
 	minTier := req.GetString("min_tier", "")
 	scopeWS, scopeProj := s.scopeFromRequest(&req)
 	opts := query.QueryOptions{
-		Depth:       req.GetInt("depth", 2),
-		Limit:       req.GetInt("limit", 50),
-		Detail:      "brief",
-		MinTier:     minTier,
-		WorkspaceID: scopeWS,
-		ProjectID:   scopeProj,
+		Depth:        req.GetInt("depth", 2),
+		Limit:        req.GetInt("limit", 50),
+		Detail:       "brief",
+		MinTier:      minTier,
+		WorkspaceID:  scopeWS,
+		ProjectID:    scopeProj,
+		ExcludeTests: req.GetBool("exclude_tests", false),
 	}
 	sg := s.engine.GetCallers(id, opts)
 	sg.FilterByMinTier(minTier)
@@ -820,8 +823,9 @@ func (s *Server) handleFindUsages(_ context.Context, req mcp.CallToolRequest) (*
 	projectArg := req.GetString("project", "")
 	scopeWS, scopeProj := s.resolveQueryScope(workspaceArg, projectArg)
 	sg := s.engine.FindUsagesScoped(id, query.QueryOptions{
-		WorkspaceID: scopeWS,
-		ProjectID:   scopeProj,
+		WorkspaceID:  scopeWS,
+		ProjectID:    scopeProj,
+		ExcludeTests: req.GetBool("exclude_tests", false),
 	})
 
 	// Apply repo/project/ref filter.

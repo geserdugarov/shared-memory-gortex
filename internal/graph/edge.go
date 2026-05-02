@@ -35,6 +35,22 @@ const (
 	// "find all @Deprecated" / "find all controllers" with one graph
 	// hop without duplicating contract logic.
 	EdgeAnnotated EdgeKind = "annotated"
+	// EdgeTests links a test function/method to a non-test symbol it
+	// exercises. Computed at index time as a post-extraction pass:
+	// every call edge whose source is a test function (Meta["is_test"]
+	// = true) and whose target is non-test produces an EdgeTests pair
+	// alongside the existing EdgeCalls. Lets agents answer
+	// "which tests cover X" with a single reverse-edge walk and lets
+	// `get_untested_symbols` filter public symbols whose inverse-EdgeTests
+	// set is empty.
+	//
+	// Test detection is by file naming convention plus per-language
+	// fn-name conventions (Test*/Benchmark*/Fuzz* in Go, test_* /
+	// Test* in Python, *_test.dart, etc.). Override per-repo via
+	// .gortex.yaml::test_patterns when the project uses an unusual
+	// layout — false positives are an acknowledged tradeoff (see
+	// spec-graph-detail.md §4.4 for the heuristic catalogue).
+	EdgeTests EdgeKind = "tests"
 )
 
 type Edge struct {

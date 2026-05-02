@@ -683,7 +683,29 @@ func (s *Server) handleGetTestTargets(_ context.Context, req mcp.CallToolRequest
 			continue
 		}
 
-		// Get all callers up to depth.
+		// Fast path: use the persistent EdgeTests edges that the
+		// indexer's test-edge pass attached to the graph. A direct
+		// inverse-edge walk is one hop instead of the BFS-on-EdgeCalls
+		// that this tool used to do, and it's exact (no isTestFile
+		// post-filter needed).
+		if testers := s.engine.GetTesters(id); len(testers) > 0 {
+			for _, tn := range testers {
+				if tn == nil {
+					continue
+				}
+				coveredSymbols[id] = true
+				if testFiles[tn.FilePath] == nil {
+					testFiles[tn.FilePath] = make(map[string]bool)
+				}
+				if tn.Kind == graph.KindFunction || tn.Kind == graph.KindMethod {
+					testFiles[tn.FilePath][tn.Name] = true
+				}
+			}
+			continue
+		}
+
+		// Fallback for graphs that haven't been re-indexed since the
+		// EdgeTests pass shipped, or for indirect coverage (depth > 1).
 		callers := s.engine.GetCallers(id, query.QueryOptions{Depth: depth, Limit: 100, Detail: "brief"})
 		for _, cn := range callers.Nodes {
 			if !isTestFile(cn.FilePath) {

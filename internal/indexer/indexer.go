@@ -331,6 +331,18 @@ func (idx *Indexer) RunDeferredPasses(ctx context.Context) {
 	idx.extractDIContracts(idx.pendingContractReg)
 	idx.commitContracts(idx.pendingContractReg)
 	idx.pendingContractReg = nil
+
+	// Test-edge pass: mark test functions and emit EdgeTests parallel
+	// to EdgeCalls so get_test_targets / find_usages-with-exclude-tests
+	// can answer in one hop.
+	reporter.Report("test edge pass", 0, 0)
+	marked, emitted := markTestSymbolsAndEmitEdges(idx.graph)
+	if marked > 0 || emitted > 0 {
+		idx.logger.Info("test edges emitted",
+			zap.Int("test_symbols", marked),
+			zap.Int("edges", emitted),
+		)
+	}
 }
 
 // RootPath returns the root path used for relative path computation.
@@ -749,6 +761,17 @@ func (idx *Indexer) IndexCtx(ctx context.Context, root string) (*IndexResult, er
 		idx.extractGoModContracts(contractReg)
 		idx.extractDIContracts(contractReg)
 		idx.commitContracts(contractReg)
+
+		// Test-edge pass mirrors the deferred-mode hook in
+		// RunDeferredPasses — runs once the call graph is final.
+		reporter.Report("test edge pass", 0, 0)
+		marked, emitted := markTestSymbolsAndEmitEdges(idx.graph)
+		if marked > 0 || emitted > 0 {
+			idx.logger.Info("test edges emitted",
+				zap.Int("test_symbols", marked),
+				zap.Int("edges", emitted),
+			)
+		}
 	}
 
 	// Auto-upgrade to Bleve if above threshold. Run in the background

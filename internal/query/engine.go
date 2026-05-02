@@ -116,6 +116,25 @@ func (e *Engine) GetCallers(funcID string, opts QueryOptions) *SubGraph {
 	return e.bfs(funcID, opts, false, []graph.EdgeKind{graph.EdgeCalls, graph.EdgeMatches})
 }
 
+// GetTesters returns the test functions that exercise a symbol via
+// the persistent EdgeTests edges baked at index time. Direct
+// inverse-edge walk; one hop, no BFS. Returns an empty slice when
+// the symbol has no test coverage or when the index pre-dates the
+// EdgeTests pass.
+func (e *Engine) GetTesters(symbolID string) []*graph.Node {
+	edges := e.g.GetInEdges(symbolID)
+	var out []*graph.Node
+	for _, edge := range edges {
+		if edge.Kind != graph.EdgeTests {
+			continue
+		}
+		if n := e.g.GetNode(edge.From); n != nil {
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
 // FindImplementations returns all types implementing an interface.
 func (e *Engine) FindImplementations(interfaceID string) []*graph.Node {
 	return e.FindImplementationsMinTier(interfaceID, "")
@@ -174,6 +193,9 @@ func (e *Engine) FindUsagesScoped(nodeID string, opts QueryOptions) *SubGraph {
 			edge.Kind == graph.EdgeProvides || edge.Kind == graph.EdgeConsumes {
 			from := e.g.GetNode(edge.From)
 			if opts.WorkspaceID != "" && !opts.scopeAllows(from) {
+				continue
+			}
+			if opts.ExcludeTests && isTestSource(from) {
 				continue
 			}
 			filtered = append(filtered, edge)
@@ -548,6 +570,16 @@ func (e *Engine) bfs(nodeID string, opts QueryOptions, forward bool, edgeKinds [
 				continue
 			}
 
+			// ExcludeTests drops neighbours flagged as tests during a
+			// reverse traversal — for forward traversals it's a no-op
+			// because callers asking "who depends on X" (reverse) are
+			// the only consumers of this filter today.
+			if opts.ExcludeTests && !forward && !bidir {
+				if n := e.g.GetNode(neighborID); isTestSource(n) {
+					continue
+				}
+			}
+
 			// Workspace/project scope. When opts.WorkspaceID is set,
 			// neighbours outside that scope are dropped along with the
 			// edge that pointed at them. Cross-workspace edges produced
@@ -601,6 +633,17 @@ func stripMeta(sg *SubGraph) {
 	for _, n := range sg.Nodes {
 		n.Meta = nil
 	}
+}
+
+// isTestSource reports whether a node was flagged as a test by the
+// indexer's test-edge pass. Used by QueryOptions.ExcludeTests to drop
+// callers/users that originate in tests, leaving production callers.
+func isTestSource(n *graph.Node) bool {
+	if n == nil || n.Meta == nil {
+		return false
+	}
+	v, _ := n.Meta["is_test"].(bool)
+	return v
 }
 
 func dedup(edges []*graph.Edge) []*graph.Edge {

@@ -33,6 +33,11 @@ type QueryOptions struct {
 	// be ambiguous (two workspaces could declare a project with the
 	// same name).
 	ProjectID string `json:"project_id,omitempty"`
+	// ExcludeTests, when true, drops edges originating from a function
+	// flagged as a test (Node.Meta["is_test"] = true) — set by the
+	// indexer's test-edge pass. Lets find_usages / get_callers answer
+	// "who depends on X *in production*" without test-noise dilution.
+	ExcludeTests bool `json:"exclude_tests,omitempty"`
 }
 
 // scopeAllows reports whether a node passes the workspace/project

@@ -117,6 +117,7 @@ func (e *JavaExtractor) Extract(filePath string, src []byte) (*parser.Extraction
 	result.Nodes = append(result.Nodes, fileNode)
 
 	seen := make(map[string]bool)
+	annotationSeen := make(map[string]bool)
 	ifaceMethods := make(map[string][]string) // interface name → declared method names
 
 	var calls []javaDeferredCall
@@ -126,16 +127,16 @@ func (e *JavaExtractor) Extract(filePath string, src []byte) (*parser.Extraction
 		switch {
 
 		case m.Captures["class.def"] != nil:
-			e.emitClass(m, filePath, fileID, src, result, seen)
+			e.emitClass(m, filePath, fileID, src, result, seen, annotationSeen)
 
 		case m.Captures["iface.def"] != nil:
-			e.emitInterface(m, filePath, fileID, src, result, seen)
+			e.emitInterface(m, filePath, fileID, src, result, seen, annotationSeen)
 
 		case m.Captures["enum.def"] != nil:
-			e.emitEnum(m, filePath, fileID, src, result, seen)
+			e.emitEnum(m, filePath, fileID, src, result, seen, annotationSeen)
 
 		case m.Captures["method.def"] != nil:
-			e.emitMethod(m, filePath, fileID, src, result, seen, ifaceMethods)
+			e.emitMethod(m, filePath, fileID, src, result, seen, annotationSeen, ifaceMethods)
 
 		case m.Captures["ctor.def"] != nil:
 			e.emitConstructor(m, filePath, fileID, src, result, seen)
@@ -272,7 +273,7 @@ func (e *JavaExtractor) Extract(filePath string, src []byte) (*parser.Extraction
 
 // --- Per-match emit helpers -----------------------------------------
 
-func (e *JavaExtractor) emitClass(m parser.QueryResult, filePath, fileID string, src []byte, result *parser.ExtractionResult, seen map[string]bool) {
+func (e *JavaExtractor) emitClass(m parser.QueryResult, filePath, fileID string, src []byte, result *parser.ExtractionResult, seen, annotationSeen map[string]bool) {
 	name := m.Captures["class.name"].Text
 	def := m.Captures["class.def"]
 	id := filePath + "::" + name
@@ -293,6 +294,7 @@ func (e *JavaExtractor) emitClass(m parser.QueryResult, filePath, fileID string,
 	result.Edges = append(result.Edges, &graph.Edge{
 		From: fileID, To: id, Kind: graph.EdgeDefines, FilePath: filePath, Line: def.StartLine + 1,
 	})
+	emitJavaAnnotationEdges(javaCollectAnnotations(def.Node, src), id, filePath, result, annotationSeen)
 }
 
 // javaVisibility scans the `modifiers` child of a Java declaration for
@@ -325,7 +327,7 @@ func javaVisibility(decl *sitter.Node, src []byte, defaultVis string) string {
 	return defaultVis
 }
 
-func (e *JavaExtractor) emitInterface(m parser.QueryResult, filePath, fileID string, src []byte, result *parser.ExtractionResult, seen map[string]bool) {
+func (e *JavaExtractor) emitInterface(m parser.QueryResult, filePath, fileID string, src []byte, result *parser.ExtractionResult, seen, annotationSeen map[string]bool) {
 	name := m.Captures["iface.name"].Text
 	def := m.Captures["iface.def"]
 	id := filePath + "::" + name
@@ -346,9 +348,10 @@ func (e *JavaExtractor) emitInterface(m parser.QueryResult, filePath, fileID str
 	result.Edges = append(result.Edges, &graph.Edge{
 		From: fileID, To: id, Kind: graph.EdgeDefines, FilePath: filePath, Line: def.StartLine + 1,
 	})
+	emitJavaAnnotationEdges(javaCollectAnnotations(def.Node, src), id, filePath, result, annotationSeen)
 }
 
-func (e *JavaExtractor) emitEnum(m parser.QueryResult, filePath, fileID string, src []byte, result *parser.ExtractionResult, seen map[string]bool) {
+func (e *JavaExtractor) emitEnum(m parser.QueryResult, filePath, fileID string, src []byte, result *parser.ExtractionResult, seen, annotationSeen map[string]bool) {
 	name := m.Captures["enum.name"].Text
 	def := m.Captures["enum.def"]
 	id := filePath + "::" + name
@@ -373,6 +376,7 @@ func (e *JavaExtractor) emitEnum(m parser.QueryResult, filePath, fileID string, 
 		From: fileID, To: id, Kind: graph.EdgeDefines,
 		FilePath: filePath, Line: def.StartLine + 1,
 	})
+	emitJavaAnnotationEdges(javaCollectAnnotations(def.Node, src), id, filePath, result, annotationSeen)
 }
 
 func (e *JavaExtractor) emitEnumMember(m parser.QueryResult, filePath string, src []byte, result *parser.ExtractionResult) {
@@ -402,7 +406,7 @@ func (e *JavaExtractor) emitEnumMember(m parser.QueryResult, filePath string, sr
 	})
 }
 
-func (e *JavaExtractor) emitMethod(m parser.QueryResult, filePath, fileID string, src []byte, result *parser.ExtractionResult, seen map[string]bool, ifaceMethods map[string][]string) {
+func (e *JavaExtractor) emitMethod(m parser.QueryResult, filePath, fileID string, src []byte, result *parser.ExtractionResult, seen, annotationSeen map[string]bool, ifaceMethods map[string][]string) {
 	name := m.Captures["method.name"].Text
 	def := m.Captures["method.def"]
 	startLine1 := def.StartLine + 1
@@ -476,6 +480,7 @@ func (e *JavaExtractor) emitMethod(m parser.QueryResult, filePath, fileID string
 				})
 			}
 		}
+		emitJavaAnnotationEdges(javaCollectAnnotations(def.Node, src), id, filePath, result, annotationSeen)
 		return
 	}
 
@@ -506,6 +511,7 @@ func (e *JavaExtractor) emitMethod(m parser.QueryResult, filePath, fileID string
 	result.Edges = append(result.Edges, &graph.Edge{
 		From: fileID, To: id, Kind: graph.EdgeDefines, FilePath: filePath, Line: startLine1,
 	})
+	emitJavaAnnotationEdges(javaCollectAnnotations(def.Node, src), id, filePath, result, annotationSeen)
 }
 
 func (e *JavaExtractor) emitConstructor(m parser.QueryResult, filePath, fileID string, src []byte, result *parser.ExtractionResult, seen map[string]bool) {
@@ -695,6 +701,64 @@ func javaParamsSource(methodNode *sitter.Node, src []byte) string {
 		}
 	}
 	return ""
+}
+
+// javaCollectAnnotations walks the `modifiers` child of a Java
+// declaration and returns each annotation's bare name and verbatim
+// argument text. Mirrors javaMethodHasAnnotation's traversal but
+// returns every annotation rather than checking a single name.
+func javaCollectAnnotations(decl *sitter.Node, src []byte) []javaAnnotation {
+	if decl == nil {
+		return nil
+	}
+	var out []javaAnnotation
+	for i := 0; i < int(decl.NamedChildCount()); i++ {
+		c := decl.NamedChild(i)
+		if c == nil || c.Type() != "modifiers" {
+			continue
+		}
+		for j := 0; j < int(c.NamedChildCount()); j++ {
+			m := c.NamedChild(j)
+			if m == nil {
+				continue
+			}
+			if m.Type() != "marker_annotation" && m.Type() != "annotation" {
+				continue
+			}
+			nameNode := m.ChildByFieldName("name")
+			if nameNode == nil {
+				continue
+			}
+			ann := javaAnnotation{
+				name: nameNode.Content(src),
+				line: int(m.StartPoint().Row) + 1,
+			}
+			if argNode := m.ChildByFieldName("arguments"); argNode != nil {
+				txt := argNode.Content(src)
+				if len(txt) >= 2 && txt[0] == '(' && txt[len(txt)-1] == ')' {
+					txt = txt[1 : len(txt)-1]
+				}
+				ann.args = txt
+			}
+			out = append(out, ann)
+		}
+	}
+	return out
+}
+
+type javaAnnotation struct {
+	name string
+	args string
+	line int
+}
+
+func emitJavaAnnotationEdges(anns []javaAnnotation, fromID, filePath string, result *parser.ExtractionResult, seen map[string]bool) {
+	for _, a := range anns {
+		if a.name == "" {
+			continue
+		}
+		EmitAnnotationEdge(fromID, "java", a.name, a.args, filePath, a.line, result, seen)
+	}
 }
 
 // javaMethodHasAnnotation reports whether a method_declaration node

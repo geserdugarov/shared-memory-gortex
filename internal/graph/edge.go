@@ -19,6 +19,22 @@ const (
 	// boundaries by hopping Consumer → EdgeConsumes⁻¹ → consumer-contract
 	// → EdgeMatches → provider-contract → EdgeProvides⁻¹ → handler.
 	EdgeMatches EdgeKind = "matches"
+	// EdgeAnnotated links a symbol to a synthetic annotation node
+	// representing a decorator / annotation / attribute applied to it
+	// (e.g. @Component, @Test, @Deprecated, #[derive(Debug)],
+	// [Authorize], @app.route("/x"), @Published). The annotation node's
+	// ID follows the convention "annotation::<lang>::<name>"; the edge's
+	// Meta["args"] carries the verbatim argument text (truncated) when
+	// the annotation has parentheses.
+	//
+	// Framework dispatch (NestJS @Get, Laravel middleware, Symfony
+	// AsEventListener, Spring @Bean, FastAPI @app.route, …) continues
+	// to flow through the contracts/dispatch layer with
+	// EdgeProvides/EdgeConsumes — EdgeAnnotated runs in parallel as a
+	// queryable record of the raw decorator. This lets agents answer
+	// "find all @Deprecated" / "find all controllers" with one graph
+	// hop without duplicating contract logic.
+	EdgeAnnotated EdgeKind = "annotated"
 )
 
 type Edge struct {

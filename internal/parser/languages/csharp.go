@@ -126,6 +126,7 @@ func (e *CSharpExtractor) Extract(filePath string, src []byte) (*parser.Extracti
 	result.Nodes = append(result.Nodes, fileNode)
 
 	seen := make(map[string]bool)
+	annotationSeen := make(map[string]bool)
 	ifaceMethods := make(map[string][]string) // interface name → method names
 
 	var calls []csharpDeferredCall
@@ -138,19 +139,19 @@ func (e *CSharpExtractor) Extract(filePath string, src []byte) (*parser.Extracti
 			e.emitNamespace(m, filePath, fileID, result, seen)
 
 		case m.Captures["class.def"] != nil:
-			e.emitContainer(m, "class", graph.KindType, filePath, fileID, src, result, seen)
+			e.emitContainer(m, "class", graph.KindType, filePath, fileID, src, result, seen, annotationSeen)
 
 		case m.Captures["iface.def"] != nil:
-			e.emitContainer(m, "iface", graph.KindInterface, filePath, fileID, src, result, seen)
+			e.emitContainer(m, "iface", graph.KindInterface, filePath, fileID, src, result, seen, annotationSeen)
 
 		case m.Captures["struct.def"] != nil:
-			e.emitContainer(m, "struct", graph.KindType, filePath, fileID, src, result, seen)
+			e.emitContainer(m, "struct", graph.KindType, filePath, fileID, src, result, seen, annotationSeen)
 
 		case m.Captures["enum.def"] != nil:
-			e.emitContainer(m, "enum", graph.KindType, filePath, fileID, src, result, seen)
+			e.emitContainer(m, "enum", graph.KindType, filePath, fileID, src, result, seen, annotationSeen)
 
 		case m.Captures["method.def"] != nil:
-			e.emitMethod(m, filePath, fileID, src, result, seen, ifaceMethods)
+			e.emitMethod(m, filePath, fileID, src, result, seen, annotationSeen, ifaceMethods)
 
 		case m.Captures["ctor.def"] != nil:
 			e.emitConstructor(m, filePath, fileID, src, result, seen)
@@ -286,7 +287,7 @@ func (e *CSharpExtractor) emitNamespace(m parser.QueryResult, filePath, fileID s
 // emitContainer collapses the per-kind class/interface/struct/enum
 // node emission. The capture-name prefix selects which capture set to
 // read from (the legacy code repeated this body four times).
-func (e *CSharpExtractor) emitContainer(m parser.QueryResult, kind string, nodeKind graph.NodeKind, filePath, fileID string, src []byte, result *parser.ExtractionResult, seen map[string]bool) {
+func (e *CSharpExtractor) emitContainer(m parser.QueryResult, kind string, nodeKind graph.NodeKind, filePath, fileID string, src []byte, result *parser.ExtractionResult, seen, annotationSeen map[string]bool) {
 	name := m.Captures[kind+".name"].Text
 	def := m.Captures[kind+".def"]
 	id := filePath + "::" + name
@@ -307,6 +308,7 @@ func (e *CSharpExtractor) emitContainer(m parser.QueryResult, kind string, nodeK
 	result.Edges = append(result.Edges, &graph.Edge{
 		From: fileID, To: id, Kind: graph.EdgeDefines, FilePath: filePath, Line: def.StartLine + 1,
 	})
+	emitCSharpAnnotationEdges(csharpCollectAttributes(def.Node, src), id, filePath, result, annotationSeen)
 }
 
 // csharpVisibility scans a declaration's modifier children for an
@@ -338,6 +340,61 @@ func csharpVisibility(decl *sitter.Node, src []byte, defaultVis string) string {
 	return defaultVis
 }
 
+// csharpCollectAttributes walks a declaration's children for
+// `attribute_list` nodes ([Attr1, Attr2(...)]) and returns each
+// attribute's bare name plus verbatim args. Multiple attributes can
+// appear inside one bracket pair, and multiple bracket pairs can
+// stack on the same declaration.
+func csharpCollectAttributes(decl *sitter.Node, src []byte) []javaAnnotation {
+	if decl == nil {
+		return nil
+	}
+	var out []javaAnnotation
+	for i := 0; i < int(decl.ChildCount()); i++ {
+		c := decl.Child(i)
+		if c == nil || c.Type() != "attribute_list" {
+			continue
+		}
+		for j := 0; j < int(c.ChildCount()); j++ {
+			a := c.Child(j)
+			if a == nil || a.Type() != "attribute" {
+				continue
+			}
+			var name, args string
+			line := int(a.StartPoint().Row) + 1
+			if nm := a.ChildByFieldName("name"); nm != nil {
+				name = nm.Content(src)
+			}
+			for k := 0; k < int(a.ChildCount()); k++ {
+				inner := a.Child(k)
+				if inner == nil {
+					continue
+				}
+				if inner.Type() == "attribute_argument_list" {
+					txt := inner.Content(src)
+					if len(txt) >= 2 && txt[0] == '(' && txt[len(txt)-1] == ')' {
+						txt = txt[1 : len(txt)-1]
+					}
+					args = txt
+				}
+			}
+			if name != "" {
+				out = append(out, javaAnnotation{name: name, args: args, line: line})
+			}
+		}
+	}
+	return out
+}
+
+func emitCSharpAnnotationEdges(anns []javaAnnotation, fromID, filePath string, result *parser.ExtractionResult, seen map[string]bool) {
+	for _, a := range anns {
+		if a.name == "" {
+			continue
+		}
+		EmitAnnotationEdge(fromID, "csharp", a.name, a.args, filePath, a.line, result, seen)
+	}
+}
+
 // extractCSharpDoc tries the XML-doc form first (/// <summary>…) and
 // falls back to /** … */ block comments (less common in C# but valid).
 func extractCSharpDoc(src []byte, startRow int) string {
@@ -347,7 +404,7 @@ func extractCSharpDoc(src []byte, startRow int) string {
 	return ExtractDocAbove(src, startRow, DocLangBlockStar)
 }
 
-func (e *CSharpExtractor) emitMethod(m parser.QueryResult, filePath, fileID string, src []byte, result *parser.ExtractionResult, seen map[string]bool, ifaceMethods map[string][]string) {
+func (e *CSharpExtractor) emitMethod(m parser.QueryResult, filePath, fileID string, src []byte, result *parser.ExtractionResult, seen, annotationSeen map[string]bool, ifaceMethods map[string][]string) {
 	name := m.Captures["method.name"].Text
 	def := m.Captures["method.def"]
 	startLine1 := def.StartLine + 1
@@ -398,6 +455,7 @@ func (e *CSharpExtractor) emitMethod(m parser.QueryResult, filePath, fileID stri
 	result.Edges = append(result.Edges, &graph.Edge{
 		From: id, To: ownerID, Kind: graph.EdgeMemberOf, FilePath: filePath, Line: startLine1,
 	})
+	emitCSharpAnnotationEdges(csharpCollectAttributes(def.Node, src), id, filePath, result, annotationSeen)
 }
 
 func (e *CSharpExtractor) emitConstructor(m parser.QueryResult, filePath, fileID string, src []byte, result *parser.ExtractionResult, seen map[string]bool) {

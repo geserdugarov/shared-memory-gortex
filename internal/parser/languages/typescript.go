@@ -130,6 +130,7 @@ func (e *TypeScriptExtractor) Extract(filePath string, src []byte) (*parser.Extr
 	imports := map[string]string{}
 	arrowNames := map[string]bool{}
 	tenv := make(typeEnv)
+	annotationSeen := map[string]bool{}
 
 	var calls []deferredCall
 	var vars []deferredVar
@@ -154,8 +155,10 @@ func (e *TypeScriptExtractor) Extract(filePath string, src []byte) (*parser.Extr
 
 		case m.Captures["class.def"] != nil:
 			classID := e.emitClass(m, filePath, fileID, src, result)
-			if def := m.Captures["class.def"]; def.Node != nil && classID != "" {
+			def := m.Captures["class.def"]
+			if def.Node != nil && classID != "" {
 				classCarries = append(classCarries, classCarry{node: def.Node, id: classID})
+				emitTSAnnotationEdges(classDecorators(def.Node), classID, filePath, src, result, annotationSeen)
 			}
 
 		case m.Captures["iface.def"] != nil:
@@ -171,10 +174,10 @@ func (e *TypeScriptExtractor) Extract(filePath string, src []byte) (*parser.Extr
 			e.emitImport(m, filePath, fileID, src, result, imports)
 
 		case m.Captures["method.def"] != nil:
-			e.emitMethod(m, filePath, src, result)
+			e.emitMethod(m, filePath, src, result, annotationSeen)
 
 		case m.Captures["prop.def"] != nil:
-			e.emitClassProperty(m, filePath, src, result)
+			e.emitClassProperty(m, filePath, src, result, annotationSeen)
 
 		case m.Captures["call.expr"] != nil:
 			expr := m.Captures["call.expr"]
@@ -559,7 +562,7 @@ func (e *TypeScriptExtractor) emitImport(m parser.QueryResult, filePath, fileID 
 // a `method_definition` in some grammar variants, but tree-sitter's
 // TS grammar classifies those as `pair` — in practice this branch
 // skips nothing that the legacy per-class scan caught).
-func (e *TypeScriptExtractor) emitMethod(m parser.QueryResult, filePath string, src []byte, result *parser.ExtractionResult) {
+func (e *TypeScriptExtractor) emitMethod(m parser.QueryResult, filePath string, src []byte, result *parser.ExtractionResult, annotationSeen map[string]bool) {
 	def := m.Captures["method.def"]
 	if def.Node == nil {
 		return
@@ -596,12 +599,16 @@ func (e *TypeScriptExtractor) emitMethod(m parser.QueryResult, filePath string, 
 	})
 	// NestJS-style dispatch decorators (@UseGuards/@UseInterceptors/...)
 	// are SIBLINGS of method_definition inside class_body — walk backward.
+	// Each decorator also produces an EdgeAnnotated → annotation node so
+	// agents can query "find all @<X>" without re-deriving the dispatch
+	// rules every time.
 	for sib := def.Node.PrevSibling(); sib != nil && sib.Type() == "decorator"; sib = sib.PrevSibling() {
 		emitDispatchFromDecorator(sib, src, id, filePath, result)
+		emitTSAnnotationEdges([]*sitter.Node{sib}, id, filePath, src, result, annotationSeen)
 	}
 }
 
-func (e *TypeScriptExtractor) emitClassProperty(m parser.QueryResult, filePath string, src []byte, result *parser.ExtractionResult) {
+func (e *TypeScriptExtractor) emitClassProperty(m parser.QueryResult, filePath string, src []byte, result *parser.ExtractionResult, annotationSeen map[string]bool) {
 	def := m.Captures["prop.def"]
 	if def.Node == nil {
 		return
@@ -633,6 +640,19 @@ func (e *TypeScriptExtractor) emitClassProperty(m parser.QueryResult, filePath s
 		From: id, To: classID, Kind: graph.EdgeMemberOf,
 		FilePath: filePath, Line: def.StartLine + 1,
 	})
+	// Decorators on a class field can appear two ways depending on
+	// grammar version: as previous siblings in the class body, or as
+	// direct children of the public_field_definition node. Try both
+	// locations.
+	for sib := def.Node.PrevSibling(); sib != nil && sib.Type() == "decorator"; sib = sib.PrevSibling() {
+		emitTSAnnotationEdges([]*sitter.Node{sib}, id, filePath, src, result, annotationSeen)
+	}
+	for i := 0; i < int(def.Node.ChildCount()); i++ {
+		c := def.Node.Child(i)
+		if c != nil && c.Type() == "decorator" {
+			emitTSAnnotationEdges([]*sitter.Node{c}, id, filePath, src, result, annotationSeen)
+		}
+	}
 }
 
 // findEnclosingClass walks up the parent chain looking for the nearest
@@ -980,6 +1000,60 @@ func classDecorators(classNode *sitter.Node) []*sitter.Node {
 		}
 	}
 	return decs
+}
+
+// tsDecoratorNameAndArgs reads a `decorator` AST node and returns the
+// bare decorator name (no leading "@") plus the verbatim argument
+// string between the call's outermost parens (or "" when the
+// decorator is a bare identifier with no call). Returns "", "" on
+// nodes that don't look like decorators.
+func tsDecoratorNameAndArgs(dec *sitter.Node, src []byte) (string, string) {
+	if dec == nil {
+		return "", ""
+	}
+	// The first named child of a decorator node is typically either an
+	// identifier (`@Foo`), a member_expression (`@Foo.bar`), or a
+	// call_expression (`@Foo(...)`).
+	for i := 0; i < int(dec.NamedChildCount()); i++ {
+		c := dec.NamedChild(i)
+		if c == nil {
+			continue
+		}
+		switch c.Type() {
+		case "identifier":
+			return c.Content(src), ""
+		case "member_expression":
+			return c.Content(src), ""
+		case "call_expression":
+			fn := c.ChildByFieldName("function")
+			args := c.ChildByFieldName("arguments")
+			name := ""
+			if fn != nil {
+				name = fn.Content(src)
+			}
+			argText := ""
+			if args != nil {
+				argText = args.Content(src)
+				argText = strings.TrimPrefix(argText, "(")
+				argText = strings.TrimSuffix(argText, ")")
+			}
+			return name, argText
+		}
+	}
+	return "", ""
+}
+
+// emitTSAnnotationEdges walks a slice of decorator AST nodes and emits
+// an EdgeAnnotated edge from `fromID` for each one, sharing one
+// synthetic annotation node per (lang, decorator-name) pair via `seen`.
+func emitTSAnnotationEdges(decs []*sitter.Node, fromID, filePath string, src []byte, result *parser.ExtractionResult, seen map[string]bool) {
+	for _, dec := range decs {
+		name, args := tsDecoratorNameAndArgs(dec, src)
+		if name == "" {
+			continue
+		}
+		EmitAnnotationEdge(fromID, "typescript", name, args, filePath, int(dec.StartPoint().Row)+1, result, seen)
+	}
 }
 
 func objectFieldValue(objNode *sitter.Node, src []byte, name string) *sitter.Node {

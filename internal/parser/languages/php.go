@@ -170,6 +170,8 @@ func (e *PHPExtractor) extractClass(
 	result.Edges = append(result.Edges, &graph.Edge{
 		From: fileNode.ID, To: id, Kind: graph.EdgeDefines, FilePath: filePath, Line: startLine,
 	})
+	annotationSeen := map[string]bool{}
+	emitPHPAnnotationEdgesFromAttrs(collectPhpAttributes(node, src), id, filePath, result, annotationSeen)
 
 	// Extract methods inside the class body.
 	body := e.findChildByType(node, "declaration_list")
@@ -317,6 +319,8 @@ func (e *PHPExtractor) extractMethod(
 		Language: "php",
 		Meta:     meta,
 	})
+	annotationSeen := map[string]bool{}
+	emitPHPAnnotationEdgesFromAttrs(collectPhpAttributes(node, src), id, filePath, result, annotationSeen)
 	result.Edges = append(result.Edges, &graph.Edge{
 		From: fileNode.ID, To: id, Kind: graph.EdgeDefines, FilePath: filePath, Line: startLine,
 	})
@@ -830,6 +834,31 @@ type phpAttribute struct {
 	name string
 	line int
 	args map[string]string // key → value (class ref / string literal)
+}
+
+// emitPHPAnnotationEdgesFromAttrs turns parsed phpAttribute records
+// into EdgeAnnotated edges. Args are flattened to a "k=v, k=v" string
+// for storage on the edge — preserves intent without duplicating the
+// keyed-args structure the dispatch detectors already consume.
+func emitPHPAnnotationEdgesFromAttrs(attrs []phpAttribute, fromID, filePath string, result *parser.ExtractionResult, seen map[string]bool) {
+	for _, a := range attrs {
+		if a.name == "" {
+			continue
+		}
+		var args string
+		if len(a.args) > 0 {
+			parts := make([]string, 0, len(a.args))
+			for k, v := range a.args {
+				if k == "" {
+					parts = append(parts, v)
+				} else {
+					parts = append(parts, k+"="+v)
+				}
+			}
+			args = strings.Join(parts, ", ")
+		}
+		EmitAnnotationEdge(fromID, "php", a.name, args, filePath, a.line, result, seen)
+	}
 }
 
 // collectPhpAttributes scans a class_declaration or method_declaration

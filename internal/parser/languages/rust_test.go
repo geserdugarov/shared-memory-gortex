@@ -393,3 +393,66 @@ pub trait Foo {}
 		t.Fatalf("Foo.doc = %q", foo.Meta["doc"])
 	}
 }
+
+func TestRsExtractor_AnnotationEdges(t *testing.T) {
+	src := []byte(`#[derive(Debug, Clone)]
+#[serde(rename_all = "snake_case")]
+pub struct User {
+    name: String,
+}
+
+#[test]
+fn test_user() {}
+
+#[deprecated(note = "use NewThing instead")]
+pub fn old_thing() {}
+`)
+	e := NewRustExtractor()
+	result, err := e.Extract("user.rs", src)
+	require.NoError(t, err)
+
+	annNames := map[string]bool{}
+	for _, n := range result.Nodes {
+		if v, _ := n.Meta["kind"].(string); v == "annotation" {
+			annNames[n.Name] = true
+		}
+	}
+	for _, want := range []string{"Debug", "Clone", "serde", "test", "deprecated"} {
+		if !annNames[want] {
+			t.Fatalf("missing annotation node %q (got %v)", want, annNames)
+		}
+	}
+
+	edges := map[string][]string{}
+	for _, e := range result.Edges {
+		if e.Kind != graph.EdgeAnnotated {
+			continue
+		}
+		edges[e.From] = append(edges[e.From], e.To)
+	}
+
+	userID := "user.rs::User"
+	if !rustTestContains(edges[userID], "annotation::rust::Debug") {
+		t.Fatalf("missing Debug derive on User, got %v", edges[userID])
+	}
+	if !rustTestContains(edges[userID], "annotation::rust::Clone") {
+		t.Fatalf("missing Clone derive on User, got %v", edges[userID])
+	}
+	if !rustTestContains(edges[userID], "annotation::rust::serde") {
+		t.Fatalf("missing serde on User, got %v", edges[userID])
+	}
+
+	testFnID := "user.rs::test_user"
+	if !rustTestContains(edges[testFnID], "annotation::rust::test") {
+		t.Fatalf("missing #[test] on test_user, got %v", edges[testFnID])
+	}
+}
+
+func rustTestContains(haystack []string, needle string) bool {
+	for _, h := range haystack {
+		if h == needle {
+			return true
+		}
+	}
+	return false
+}

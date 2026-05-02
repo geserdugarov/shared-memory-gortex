@@ -865,3 +865,76 @@ export class Server {
 		t.Fatalf("Server.secret.visibility = %q", secret.Meta["visibility"])
 	}
 }
+
+func TestTSExtractor_AnnotationEdges(t *testing.T) {
+	src := []byte(`@Controller("/users")
+export class UsersController {
+  @Get("/:id")
+  @UseGuards(AuthGuard)
+  findOne() {}
+
+  @Inject(USER_TOKEN)
+  private userService: UserService;
+}
+`)
+	e := NewTypeScriptExtractor()
+	result, err := e.Extract("users.ts", src)
+	require.NoError(t, err)
+
+	// Annotation nodes deduped per name.
+	annNodes := map[string]*graph.Node{}
+	for _, n := range result.Nodes {
+		if v, _ := n.Meta["kind"].(string); v == "annotation" {
+			annNodes[n.ID] = n
+		}
+	}
+	for _, want := range []string{"Controller", "Get", "UseGuards", "Inject"} {
+		id := "annotation::typescript::" + want
+		if _, ok := annNodes[id]; !ok {
+			t.Fatalf("missing annotation node %s", id)
+		}
+	}
+
+	// Edges from concrete symbols to annotation nodes.
+	edges := map[string][]string{}
+	argsByEdge := map[string]string{}
+	for _, e := range result.Edges {
+		if e.Kind != graph.EdgeAnnotated {
+			continue
+		}
+		edges[e.From] = append(edges[e.From], e.To)
+		if v, ok := e.Meta["args"].(string); ok {
+			argsByEdge[e.From+"->"+e.To] = v
+		}
+	}
+
+	classFromID := "users.ts::UsersController"
+	if !contains(edges[classFromID], "annotation::typescript::Controller") {
+		t.Fatalf("missing Controller edge from class, got %v", edges[classFromID])
+	}
+	if argsByEdge[classFromID+"->annotation::typescript::Controller"] != `"/users"` {
+		t.Fatalf("Controller args = %q", argsByEdge[classFromID+"->annotation::typescript::Controller"])
+	}
+
+	methodID := "users.ts::UsersController.findOne"
+	if !contains(edges[methodID], "annotation::typescript::Get") {
+		t.Fatalf("missing @Get on findOne, got %v", edges[methodID])
+	}
+	if !contains(edges[methodID], "annotation::typescript::UseGuards") {
+		t.Fatalf("missing @UseGuards on findOne, got %v", edges[methodID])
+	}
+
+	fieldID := "users.ts::UsersController.userService"
+	if !contains(edges[fieldID], "annotation::typescript::Inject") {
+		t.Fatalf("missing @Inject on field, got %v", edges[fieldID])
+	}
+}
+
+func contains(haystack []string, needle string) bool {
+	for _, h := range haystack {
+		if h == needle {
+			return true
+		}
+	}
+	return false
+}

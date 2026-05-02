@@ -111,6 +111,7 @@ func (e *KotlinExtractor) Extract(filePath string, src []byte) (*parser.Extracti
 	result.Nodes = append(result.Nodes, fileNode)
 
 	seen := make(map[string]bool)
+	annotationSeen := make(map[string]bool)
 
 	var calls []kotlinDeferredCall
 	var props []kotlinDeferredProperty
@@ -119,13 +120,13 @@ func (e *KotlinExtractor) Extract(filePath string, src []byte) (*parser.Extracti
 		switch {
 
 		case m.Captures["class.def"] != nil:
-			e.emitClassOrInterface(m, filePath, fileID, src, result, seen)
+			e.emitClassOrInterface(m, filePath, fileID, src, result, seen, annotationSeen)
 
 		case m.Captures["obj.def"] != nil:
-			e.emitObject(m, filePath, fileID, src, result, seen)
+			e.emitObject(m, filePath, fileID, src, result, seen, annotationSeen)
 
 		case m.Captures["func.def"] != nil:
-			e.emitFunction(m, filePath, fileID, src, result, seen)
+			e.emitFunction(m, filePath, fileID, src, result, seen, annotationSeen)
 
 		case m.Captures["tprop.def"] != nil:
 			// Tier 0 of tenv arrives via this disjoint pattern; we still
@@ -260,7 +261,7 @@ func (e *KotlinExtractor) Extract(filePath string, src []byte) (*parser.Extracti
 // or enum (KindType + Meta["kind"]="enum"). For enums it also walks
 // the enum_class_body to emit one variable node per enum_entry. This
 // replaces the legacy extractClassesAndInterfaces walkNodes pass.
-func (e *KotlinExtractor) emitClassOrInterface(m parser.QueryResult, filePath, fileID string, src []byte, result *parser.ExtractionResult, seen map[string]bool) {
+func (e *KotlinExtractor) emitClassOrInterface(m parser.QueryResult, filePath, fileID string, src []byte, result *parser.ExtractionResult, seen, annotationSeen map[string]bool) {
 	def := m.Captures["class.def"]
 	name := m.Captures["class.name"].Text
 	id := filePath + "::" + name
@@ -306,6 +307,7 @@ func (e *KotlinExtractor) emitClassOrInterface(m parser.QueryResult, filePath, f
 	result.Edges = append(result.Edges, &graph.Edge{
 		From: fileID, To: id, Kind: graph.EdgeDefines, FilePath: filePath, Line: startLine,
 	})
+	emitKotlinAnnotationEdges(kotlinCollectAnnotations(def.Node, src), id, filePath, result, annotationSeen)
 
 	if enumBody == nil {
 		return
@@ -342,7 +344,7 @@ func (e *KotlinExtractor) emitClassOrInterface(m parser.QueryResult, filePath, f
 	}
 }
 
-func (e *KotlinExtractor) emitObject(m parser.QueryResult, filePath, fileID string, src []byte, result *parser.ExtractionResult, seen map[string]bool) {
+func (e *KotlinExtractor) emitObject(m parser.QueryResult, filePath, fileID string, src []byte, result *parser.ExtractionResult, seen, annotationSeen map[string]bool) {
 	name := m.Captures["obj.name"].Text
 	def := m.Captures["obj.def"]
 	id := filePath + "::" + name
@@ -363,6 +365,7 @@ func (e *KotlinExtractor) emitObject(m parser.QueryResult, filePath, fileID stri
 	result.Edges = append(result.Edges, &graph.Edge{
 		From: fileID, To: id, Kind: graph.EdgeDefines, FilePath: filePath, Line: def.StartLine + 1,
 	})
+	emitKotlinAnnotationEdges(kotlinCollectAnnotations(def.Node, src), id, filePath, result, annotationSeen)
 }
 
 // emitFunction classifies each function_declaration by its enclosing
@@ -372,7 +375,7 @@ func (e *KotlinExtractor) emitObject(m parser.QueryResult, filePath, fileID stri
 // top-level (free) function. This mirrors the legacy nested
 // kotlinQClassMethod / kotlinQObjectMethod pair plus the
 // kotlinQFunction fallback's per-line dedupe.
-func (e *KotlinExtractor) emitFunction(m parser.QueryResult, filePath, fileID string, src []byte, result *parser.ExtractionResult, seen map[string]bool) {
+func (e *KotlinExtractor) emitFunction(m parser.QueryResult, filePath, fileID string, src []byte, result *parser.ExtractionResult, seen, annotationSeen map[string]bool) {
 	name := m.Captures["func.name"].Text
 	def := m.Captures["func.def"]
 	startLine1 := def.StartLine + 1
@@ -414,6 +417,7 @@ func (e *KotlinExtractor) emitFunction(m parser.QueryResult, filePath, fileID st
 		result.Edges = append(result.Edges, &graph.Edge{
 			From: id, To: ownerID, Kind: graph.EdgeMemberOf, FilePath: filePath, Line: startLine1,
 		})
+		emitKotlinAnnotationEdges(kotlinCollectAnnotations(def.Node, src), id, filePath, result, annotationSeen)
 		return
 	}
 
@@ -439,6 +443,76 @@ func (e *KotlinExtractor) emitFunction(m parser.QueryResult, filePath, fileID st
 	result.Edges = append(result.Edges, &graph.Edge{
 		From: fileID, To: id, Kind: graph.EdgeDefines, FilePath: filePath, Line: startLine1,
 	})
+	emitKotlinAnnotationEdges(kotlinCollectAnnotations(def.Node, src), id, filePath, result, annotationSeen)
+}
+
+// kotlinCollectAnnotations walks a Kotlin declaration's modifiers
+// child for annotation nodes and returns the bare annotation names
+// plus their args (typically `(...)` text after the annotation name).
+func kotlinCollectAnnotations(decl *sitter.Node, src []byte) []javaAnnotation {
+	if decl == nil {
+		return nil
+	}
+	var out []javaAnnotation
+	for i := 0; i < int(decl.ChildCount()); i++ {
+		c := decl.Child(i)
+		if c == nil || c.Type() != "modifiers" {
+			continue
+		}
+		for j := 0; j < int(c.ChildCount()); j++ {
+			ann := c.Child(j)
+			if ann == nil {
+				continue
+			}
+			// Kotlin grammar exposes annotations as `annotation`
+			// children containing a `user_type` (the name) and an
+			// optional `value_arguments` (the parens).
+			if ann.Type() != "annotation" {
+				continue
+			}
+			var name, args string
+			line := int(ann.StartPoint().Row) + 1
+			for k := 0; k < int(ann.ChildCount()); k++ {
+				inner := ann.Child(k)
+				if inner == nil {
+					continue
+				}
+				switch inner.Type() {
+				case "user_type", "constructor_invocation":
+					if name == "" {
+						name = strings.TrimSpace(inner.Content(src))
+					}
+				case "value_arguments":
+					txt := inner.Content(src)
+					if len(txt) >= 2 && txt[0] == '(' && txt[len(txt)-1] == ')' {
+						txt = txt[1 : len(txt)-1]
+					}
+					args = txt
+				}
+			}
+			if name == "" {
+				continue
+			}
+			// strip a "()" suffix that the grammar may wrap into the user_type.
+			if idx := strings.Index(name, "("); idx >= 0 {
+				if args == "" {
+					args = strings.TrimSuffix(name[idx+1:], ")")
+				}
+				name = name[:idx]
+			}
+			out = append(out, javaAnnotation{name: strings.TrimSpace(name), args: args, line: line})
+		}
+	}
+	return out
+}
+
+func emitKotlinAnnotationEdges(anns []javaAnnotation, fromID, filePath string, result *parser.ExtractionResult, seen map[string]bool) {
+	for _, a := range anns {
+		if a.name == "" {
+			continue
+		}
+		EmitAnnotationEdge(fromID, "kotlin", a.name, a.args, filePath, a.line, result, seen)
+	}
 }
 
 // kotlinVisibility scans a declaration's modifiers child for a

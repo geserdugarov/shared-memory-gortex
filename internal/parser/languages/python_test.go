@@ -308,3 +308,68 @@ class Server:
 		t.Fatalf("Server._stop.vis = %q", stop.Meta["visibility"])
 	}
 }
+
+func TestPythonExtractor_AnnotationEdges(t *testing.T) {
+	src := []byte(`from app import app
+from functools import lru_cache
+
+@app.route("/users/:id")
+@lru_cache
+def get_user(id):
+    return {}
+
+@dataclass
+class User:
+    name: str
+
+@deprecated
+def old_helper():
+    pass
+`)
+	e := NewPythonExtractor()
+	result, err := e.Extract("svc.py", src)
+	require.NoError(t, err)
+
+	annNames := map[string]bool{}
+	for _, n := range result.Nodes {
+		if v, _ := n.Meta["kind"].(string); v == "annotation" {
+			annNames[n.Name] = true
+		}
+	}
+	for _, want := range []string{"app.route", "lru_cache", "dataclass", "deprecated"} {
+		if !annNames[want] {
+			t.Fatalf("missing annotation node %q (got %v)", want, annNames)
+		}
+	}
+
+	edges := map[string][]string{}
+	argsByEdge := map[string]string{}
+	for _, e := range result.Edges {
+		if e.Kind != graph.EdgeAnnotated {
+			continue
+		}
+		edges[e.From] = append(edges[e.From], e.To)
+		if v, ok := e.Meta["args"].(string); ok {
+			argsByEdge[e.From+"->"+e.To] = v
+		}
+	}
+
+	if !pyContains(edges["svc.py::get_user"], "annotation::python::app.route") {
+		t.Fatalf("missing app.route edge on get_user, got %v", edges["svc.py::get_user"])
+	}
+	if argsByEdge["svc.py::get_user->annotation::python::app.route"] != `"/users/:id"` {
+		t.Fatalf("app.route args = %q", argsByEdge["svc.py::get_user->annotation::python::app.route"])
+	}
+	if !pyContains(edges["svc.py::User"], "annotation::python::dataclass") {
+		t.Fatalf("missing dataclass edge on User, got %v", edges["svc.py::User"])
+	}
+}
+
+func pyContains(haystack []string, needle string) bool {
+	for _, h := range haystack {
+		if h == needle {
+			return true
+		}
+	}
+	return false
+}

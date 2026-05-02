@@ -124,6 +124,7 @@ func (e *RustExtractor) Extract(filePath string, src []byte) (*parser.Extraction
 	result.Nodes = append(result.Nodes, fileNode)
 
 	seen := make(map[string]bool)
+	annotationSeen := make(map[string]bool)
 	traitMethods := make(map[string][]string) // trait name → declared method names
 
 	var calls []rustDeferredCall
@@ -133,19 +134,19 @@ func (e *RustExtractor) Extract(filePath string, src []byte) (*parser.Extraction
 		switch {
 
 		case m.Captures["func.def"] != nil:
-			e.emitFunction(m, filePath, fileID, src, result, seen)
+			e.emitFunction(m, filePath, fileID, src, result, seen, annotationSeen)
 
 		case m.Captures["sig.def"] != nil:
 			e.recordTraitMethod(m, src, traitMethods)
 
 		case m.Captures["struct.def"] != nil:
-			e.emitStruct(m, filePath, fileID, src, result, seen)
+			e.emitStruct(m, filePath, fileID, src, result, seen, annotationSeen)
 
 		case m.Captures["enum.def"] != nil:
-			e.emitEnum(m, filePath, fileID, src, result, seen)
+			e.emitEnum(m, filePath, fileID, src, result, seen, annotationSeen)
 
 		case m.Captures["trait.def"] != nil:
-			e.emitTrait(m, filePath, fileID, src, result, seen, traitMethods)
+			e.emitTrait(m, filePath, fileID, src, result, seen, annotationSeen, traitMethods)
 
 		case m.Captures["variant.def"] != nil:
 			e.emitVariant(m, filePath, src, result)
@@ -277,7 +278,7 @@ func (e *RustExtractor) Extract(filePath string, src []byte) (*parser.Extraction
 //     legacy parity — the old extractor's class-method query did not
 //     match trait bodies, so these landed in the free-function pass)
 //   - anything else → free function
-func (e *RustExtractor) emitFunction(m parser.QueryResult, filePath, fileID string, src []byte, result *parser.ExtractionResult, seen map[string]bool) {
+func (e *RustExtractor) emitFunction(m parser.QueryResult, filePath, fileID string, src []byte, result *parser.ExtractionResult, seen, annotationSeen map[string]bool) {
 	name := m.Captures["func.name"].Text
 	def := m.Captures["func.def"]
 	startLine1 := def.StartLine + 1
@@ -315,6 +316,7 @@ func (e *RustExtractor) emitFunction(m parser.QueryResult, filePath, fileID stri
 		result.Edges = append(result.Edges, &graph.Edge{
 			From: id, To: typeID, Kind: graph.EdgeMemberOf, FilePath: filePath, Line: startLine1,
 		})
+		emitRustAnnotationEdges(rustCollectAttributes(def.Node), id, filePath, src, result, annotationSeen)
 		return
 	}
 
@@ -340,6 +342,90 @@ func (e *RustExtractor) emitFunction(m parser.QueryResult, filePath, fileID stri
 	result.Edges = append(result.Edges, &graph.Edge{
 		From: fileID, To: id, Kind: graph.EdgeDefines, FilePath: filePath, Line: startLine1,
 	})
+	emitRustAnnotationEdges(rustCollectAttributes(def.Node), id, filePath, src, result, annotationSeen)
+}
+
+// rustCollectAttributes walks the previous siblings of an item node
+// and returns each `attribute_item` (#[...]) attached to it. Walks
+// stop on the first non-attribute sibling. Outer attributes are the
+// only form we handle — inner attributes (`#![foo]`) don't apply to a
+// specific item.
+func rustCollectAttributes(item *sitter.Node) []*sitter.Node {
+	if item == nil {
+		return nil
+	}
+	var out []*sitter.Node
+	for sib := item.PrevSibling(); sib != nil; sib = sib.PrevSibling() {
+		if sib.Type() != "attribute_item" {
+			break
+		}
+		out = append(out, sib)
+	}
+	return out
+}
+
+// emitRustAnnotationEdges turns a slice of attribute_item nodes into
+// EdgeAnnotated edges. `#[derive(Trait1, Trait2)]` is expanded into
+// one edge per trait — that's the form that lets agents query "find
+// every type that derives Debug" with one hop.
+func emitRustAnnotationEdges(attrs []*sitter.Node, fromID, filePath string, src []byte, result *parser.ExtractionResult, seen map[string]bool) {
+	for _, attr := range attrs {
+		var attrNode *sitter.Node
+		for i := 0; i < int(attr.NamedChildCount()); i++ {
+			c := attr.NamedChild(i)
+			if c != nil && c.Type() == "attribute" {
+				attrNode = c
+				break
+			}
+		}
+		if attrNode == nil {
+			continue
+		}
+		name, args := rustAttributeNameAndArgs(attrNode, src)
+		if name == "" {
+			continue
+		}
+		line := int(attr.StartPoint().Row) + 1
+		if name == "derive" && args != "" {
+			for _, t := range strings.Split(args, ",") {
+				traitName := strings.TrimSpace(t)
+				if traitName != "" {
+					EmitAnnotationEdge(fromID, "rust", traitName, "", filePath, line, result, seen)
+				}
+			}
+			continue
+		}
+		EmitAnnotationEdge(fromID, "rust", name, args, filePath, line, result, seen)
+	}
+}
+
+// rustAttributeNameAndArgs reads an `attribute` AST node (the body of
+// an attribute_item) and returns the attribute path's text plus any
+// args inside the token_tree.
+func rustAttributeNameAndArgs(attr *sitter.Node, src []byte) (string, string) {
+	if attr == nil {
+		return "", ""
+	}
+	var name, args string
+	for i := 0; i < int(attr.ChildCount()); i++ {
+		c := attr.Child(i)
+		if c == nil {
+			continue
+		}
+		switch c.Type() {
+		case "identifier", "scoped_identifier", "path":
+			if name == "" {
+				name = c.Content(src)
+			}
+		case "token_tree":
+			txt := c.Content(src)
+			if len(txt) >= 2 && txt[0] == '(' && txt[len(txt)-1] == ')' {
+				txt = txt[1 : len(txt)-1]
+			}
+			args = txt
+		}
+	}
+	return name, args
 }
 
 // rustVisibility inspects an item node for a visibility_modifier child
@@ -385,7 +471,7 @@ func (e *RustExtractor) recordTraitMethod(m parser.QueryResult, src []byte, trai
 	traitMethods[traitName] = append(traitMethods[traitName], m.Captures["sig.name"].Text)
 }
 
-func (e *RustExtractor) emitStruct(m parser.QueryResult, filePath, fileID string, src []byte, result *parser.ExtractionResult, seen map[string]bool) {
+func (e *RustExtractor) emitStruct(m parser.QueryResult, filePath, fileID string, src []byte, result *parser.ExtractionResult, seen, annotationSeen map[string]bool) {
 	name := m.Captures["struct.name"].Text
 	def := m.Captures["struct.def"]
 	id := filePath + "::" + name
@@ -406,9 +492,10 @@ func (e *RustExtractor) emitStruct(m parser.QueryResult, filePath, fileID string
 	result.Edges = append(result.Edges, &graph.Edge{
 		From: fileID, To: id, Kind: graph.EdgeDefines, FilePath: filePath, Line: def.StartLine + 1,
 	})
+	emitRustAnnotationEdges(rustCollectAttributes(def.Node), id, filePath, src, result, annotationSeen)
 }
 
-func (e *RustExtractor) emitEnum(m parser.QueryResult, filePath, fileID string, src []byte, result *parser.ExtractionResult, seen map[string]bool) {
+func (e *RustExtractor) emitEnum(m parser.QueryResult, filePath, fileID string, src []byte, result *parser.ExtractionResult, seen, annotationSeen map[string]bool) {
 	name := m.Captures["enum.name"].Text
 	def := m.Captures["enum.def"]
 	id := filePath + "::" + name
@@ -432,9 +519,10 @@ func (e *RustExtractor) emitEnum(m parser.QueryResult, filePath, fileID string, 
 	result.Edges = append(result.Edges, &graph.Edge{
 		From: fileID, To: id, Kind: graph.EdgeDefines, FilePath: filePath, Line: def.StartLine + 1,
 	})
+	emitRustAnnotationEdges(rustCollectAttributes(def.Node), id, filePath, src, result, annotationSeen)
 }
 
-func (e *RustExtractor) emitTrait(m parser.QueryResult, filePath, fileID string, src []byte, result *parser.ExtractionResult, seen map[string]bool, traitMethods map[string][]string) {
+func (e *RustExtractor) emitTrait(m parser.QueryResult, filePath, fileID string, src []byte, result *parser.ExtractionResult, seen, annotationSeen map[string]bool, traitMethods map[string][]string) {
 	name := m.Captures["trait.name"].Text
 	def := m.Captures["trait.def"]
 	id := filePath + "::" + name
@@ -457,6 +545,7 @@ func (e *RustExtractor) emitTrait(m parser.QueryResult, filePath, fileID string,
 	result.Edges = append(result.Edges, &graph.Edge{
 		From: fileID, To: id, Kind: graph.EdgeDefines, FilePath: filePath, Line: def.StartLine + 1,
 	})
+	emitRustAnnotationEdges(rustCollectAttributes(def.Node), id, filePath, src, result, annotationSeen)
 }
 
 func (e *RustExtractor) emitVariant(m parser.QueryResult, filePath string, src []byte, result *parser.ExtractionResult) {

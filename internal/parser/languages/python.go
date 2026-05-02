@@ -103,6 +103,7 @@ func (e *PythonExtractor) Extract(filePath string, src []byte) (*parser.Extracti
 	result.Nodes = append(result.Nodes, fileNode)
 
 	seen := make(map[string]bool)
+	annotationSeen := make(map[string]bool)
 	imports := map[string]string{} // alias → module path
 	tenv := make(typeEnv)
 	tenvHasExplicit := make(map[string]bool) // names with Tier 0 type, lock from Tier 1 overwrite
@@ -113,10 +114,10 @@ func (e *PythonExtractor) Extract(filePath string, src []byte) (*parser.Extracti
 		switch {
 
 		case m.Captures["func.def"] != nil:
-			e.emitFunction(m, filePath, fileID, src, result, seen)
+			e.emitFunction(m, filePath, fileID, src, result, seen, annotationSeen)
 
 		case m.Captures["class.def"] != nil:
-			e.emitClass(m, filePath, fileID, src, result, seen)
+			e.emitClass(m, filePath, fileID, src, result, seen, annotationSeen)
 
 		case m.Captures["import.def"] != nil:
 			e.emitImport(m, filePath, fileID, src, result, imports)
@@ -237,13 +238,14 @@ func (e *PythonExtractor) Extract(filePath string, src []byte) (*parser.Extracti
 // receiver-qualified methods. Decorated methods (wrapped in
 // decorated_definition) and nested functions land in the free-function
 // bucket — same as the legacy code.
-func (e *PythonExtractor) emitFunction(m parser.QueryResult, filePath, fileID string, src []byte, result *parser.ExtractionResult, seen map[string]bool) {
+func (e *PythonExtractor) emitFunction(m parser.QueryResult, filePath, fileID string, src []byte, result *parser.ExtractionResult, seen, annotationSeen map[string]bool) {
 	name := m.Captures["func.name"].Text
 	def := m.Captures["func.def"]
 	startLine1 := def.StartLine + 1
 
 	doc := pyDocstringFromDef(def.Node, src)
 	visibility := VisibilityByUnderscore(name)
+	decorators := pyDecoratorNodes(def.Node)
 
 	className := pyDirectClassParent(def.Node, src)
 	if className != "" {
@@ -277,6 +279,7 @@ func (e *PythonExtractor) emitFunction(m parser.QueryResult, filePath, fileID st
 		result.Edges = append(result.Edges, &graph.Edge{
 			From: id, To: typeID, Kind: graph.EdgeMemberOf, FilePath: filePath, Line: startLine1,
 		})
+		emitPyAnnotationEdges(decorators, id, filePath, src, result, annotationSeen)
 		return
 	}
 
@@ -301,13 +304,16 @@ func (e *PythonExtractor) emitFunction(m parser.QueryResult, filePath, fileID st
 	result.Edges = append(result.Edges, &graph.Edge{
 		From: fileID, To: id, Kind: graph.EdgeDefines, FilePath: filePath, Line: startLine1,
 	})
+	emitPyAnnotationEdges(decorators, id, filePath, src, result, annotationSeen)
 }
 
-func (e *PythonExtractor) emitClass(m parser.QueryResult, filePath, fileID string, src []byte, result *parser.ExtractionResult, seen map[string]bool) {
+func (e *PythonExtractor) emitClass(m parser.QueryResult, filePath, fileID string, src []byte, result *parser.ExtractionResult, seen, annotationSeen map[string]bool) {
 	name := m.Captures["class.name"].Text
 	def := m.Captures["class.def"]
 	id := filePath + "::" + name
+	decorators := pyDecoratorNodes(def.Node)
 	if seen[id] {
+		emitPyAnnotationEdges(decorators, id, filePath, src, result, annotationSeen)
 		return
 	}
 	seen[id] = true
@@ -324,6 +330,79 @@ func (e *PythonExtractor) emitClass(m parser.QueryResult, filePath, fileID strin
 	result.Edges = append(result.Edges, &graph.Edge{
 		From: fileID, To: id, Kind: graph.EdgeDefines, FilePath: filePath, Line: def.StartLine + 1,
 	})
+	emitPyAnnotationEdges(decorators, id, filePath, src, result, annotationSeen)
+}
+
+// pyDecoratorNodes returns the `decorator` AST nodes attached to a
+// function_definition or class_definition. In tree-sitter Python the
+// decorators wrap the def in a `decorated_definition` parent —
+// children of that parent that come before the def are the decorators.
+func pyDecoratorNodes(defNode *sitter.Node) []*sitter.Node {
+	if defNode == nil {
+		return nil
+	}
+	parent := defNode.Parent()
+	if parent == nil || parent.Type() != "decorated_definition" {
+		return nil
+	}
+	var out []*sitter.Node
+	for i := 0; i < int(parent.ChildCount()); i++ {
+		c := parent.Child(i)
+		if c != nil && c.Type() == "decorator" {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+// emitPyAnnotationEdges emits an EdgeAnnotated edge per decorator node
+// applied to the function/class identified by `fromID`. The decorator
+// expression after the `@` is taken as-is; identifier-only decorators
+// (`@deprecated`) and call decorators (`@app.route("/x")`) both map
+// to the bare callable name.
+func emitPyAnnotationEdges(decorators []*sitter.Node, fromID, filePath string, src []byte, result *parser.ExtractionResult, seen map[string]bool) {
+	for _, dec := range decorators {
+		name, args := pyDecoratorNameAndArgs(dec, src)
+		if name == "" {
+			continue
+		}
+		EmitAnnotationEdge(fromID, "python", name, args, filePath, int(dec.StartPoint().Row)+1, result, seen)
+	}
+}
+
+// pyDecoratorNameAndArgs reads a `decorator` AST node. Tree-sitter
+// Python wraps the post-`@` expression as the named child — typically
+// `identifier`, `attribute`, or `call`.
+func pyDecoratorNameAndArgs(dec *sitter.Node, src []byte) (string, string) {
+	if dec == nil {
+		return "", ""
+	}
+	for i := 0; i < int(dec.NamedChildCount()); i++ {
+		c := dec.NamedChild(i)
+		if c == nil {
+			continue
+		}
+		switch c.Type() {
+		case "identifier", "attribute", "dotted_name":
+			return c.Content(src), ""
+		case "call":
+			fn := c.ChildByFieldName("function")
+			args := c.ChildByFieldName("arguments")
+			name := ""
+			if fn != nil {
+				name = fn.Content(src)
+			}
+			argText := ""
+			if args != nil {
+				argText = args.Content(src)
+				if len(argText) >= 2 && argText[0] == '(' && argText[len(argText)-1] == ')' {
+					argText = argText[1 : len(argText)-1]
+				}
+			}
+			return name, argText
+		}
+	}
+	return "", ""
 }
 
 // pyDocstringFromDef returns the docstring of a function_definition or

@@ -126,13 +126,13 @@ func (e *JavaExtractor) Extract(filePath string, src []byte) (*parser.Extraction
 		switch {
 
 		case m.Captures["class.def"] != nil:
-			e.emitClass(m, filePath, fileID, result, seen)
+			e.emitClass(m, filePath, fileID, src, result, seen)
 
 		case m.Captures["iface.def"] != nil:
-			e.emitInterface(m, filePath, fileID, result, seen)
+			e.emitInterface(m, filePath, fileID, src, result, seen)
 
 		case m.Captures["enum.def"] != nil:
-			e.emitEnum(m, filePath, fileID, result, seen)
+			e.emitEnum(m, filePath, fileID, src, result, seen)
 
 		case m.Captures["method.def"] != nil:
 			e.emitMethod(m, filePath, fileID, src, result, seen, ifaceMethods)
@@ -272,7 +272,7 @@ func (e *JavaExtractor) Extract(filePath string, src []byte) (*parser.Extraction
 
 // --- Per-match emit helpers -----------------------------------------
 
-func (e *JavaExtractor) emitClass(m parser.QueryResult, filePath, fileID string, result *parser.ExtractionResult, seen map[string]bool) {
+func (e *JavaExtractor) emitClass(m parser.QueryResult, filePath, fileID string, src []byte, result *parser.ExtractionResult, seen map[string]bool) {
 	name := m.Captures["class.name"].Text
 	def := m.Captures["class.def"]
 	id := filePath + "::" + name
@@ -280,17 +280,52 @@ func (e *JavaExtractor) emitClass(m parser.QueryResult, filePath, fileID string,
 		return
 	}
 	seen[id] = true
+	meta := map[string]any{"visibility": javaVisibility(def.Node, src, VisibilityPackage)}
+	if doc := ExtractDocAbove(src, def.StartLine, DocLangBlockStar); doc != "" {
+		meta["doc"] = doc
+	}
 	result.Nodes = append(result.Nodes, &graph.Node{
 		ID: id, Kind: graph.KindType, Name: name,
 		FilePath: filePath, StartLine: def.StartLine + 1, EndLine: def.EndLine + 1,
 		Language: "java",
+		Meta:     meta,
 	})
 	result.Edges = append(result.Edges, &graph.Edge{
 		From: fileID, To: id, Kind: graph.EdgeDefines, FilePath: filePath, Line: def.StartLine + 1,
 	})
 }
 
-func (e *JavaExtractor) emitInterface(m parser.QueryResult, filePath, fileID string, result *parser.ExtractionResult, seen map[string]bool) {
+// javaVisibility scans the `modifiers` child of a Java declaration for
+// a public/private/protected token. Returns defaultVis when no
+// modifier is present (e.g. package-private at top level).
+func javaVisibility(decl *sitter.Node, src []byte, defaultVis string) string {
+	if decl == nil {
+		return defaultVis
+	}
+	for i := 0; i < int(decl.ChildCount()); i++ {
+		c := decl.Child(i)
+		if c == nil || c.Type() != "modifiers" {
+			continue
+		}
+		for j := 0; j < int(c.ChildCount()); j++ {
+			tok := c.Child(j)
+			if tok == nil {
+				continue
+			}
+			switch tok.Type() {
+			case "public":
+				return VisibilityPublic
+			case "private":
+				return VisibilityPrivate
+			case "protected":
+				return VisibilityProtected
+			}
+		}
+	}
+	return defaultVis
+}
+
+func (e *JavaExtractor) emitInterface(m parser.QueryResult, filePath, fileID string, src []byte, result *parser.ExtractionResult, seen map[string]bool) {
 	name := m.Captures["iface.name"].Text
 	def := m.Captures["iface.def"]
 	id := filePath + "::" + name
@@ -298,17 +333,22 @@ func (e *JavaExtractor) emitInterface(m parser.QueryResult, filePath, fileID str
 		return
 	}
 	seen[id] = true
+	meta := map[string]any{"visibility": javaVisibility(def.Node, src, VisibilityPackage)}
+	if doc := ExtractDocAbove(src, def.StartLine, DocLangBlockStar); doc != "" {
+		meta["doc"] = doc
+	}
 	result.Nodes = append(result.Nodes, &graph.Node{
 		ID: id, Kind: graph.KindInterface, Name: name,
 		FilePath: filePath, StartLine: def.StartLine + 1, EndLine: def.EndLine + 1,
 		Language: "java",
+		Meta:     meta,
 	})
 	result.Edges = append(result.Edges, &graph.Edge{
 		From: fileID, To: id, Kind: graph.EdgeDefines, FilePath: filePath, Line: def.StartLine + 1,
 	})
 }
 
-func (e *JavaExtractor) emitEnum(m parser.QueryResult, filePath, fileID string, result *parser.ExtractionResult, seen map[string]bool) {
+func (e *JavaExtractor) emitEnum(m parser.QueryResult, filePath, fileID string, src []byte, result *parser.ExtractionResult, seen map[string]bool) {
 	name := m.Captures["enum.name"].Text
 	def := m.Captures["enum.def"]
 	id := filePath + "::" + name
@@ -316,11 +356,18 @@ func (e *JavaExtractor) emitEnum(m parser.QueryResult, filePath, fileID string, 
 		return
 	}
 	seen[id] = true
+	meta := map[string]any{
+		"kind":       "enum",
+		"visibility": javaVisibility(def.Node, src, VisibilityPackage),
+	}
+	if doc := ExtractDocAbove(src, def.StartLine, DocLangBlockStar); doc != "" {
+		meta["doc"] = doc
+	}
 	result.Nodes = append(result.Nodes, &graph.Node{
 		ID: id, Kind: graph.KindType, Name: name,
 		FilePath: filePath, StartLine: def.StartLine + 1, EndLine: def.EndLine + 1,
 		Language: "java",
-		Meta:     map[string]any{"kind": "enum"},
+		Meta:     meta,
 	})
 	result.Edges = append(result.Edges, &graph.Edge{
 		From: fileID, To: id, Kind: graph.EdgeDefines,
@@ -386,12 +433,18 @@ func (e *JavaExtractor) emitMethod(m parser.QueryResult, filePath, fileID string
 			ID: id, Kind: graph.KindMethod, Name: name,
 			FilePath: filePath, StartLine: startLine1, EndLine: def.EndLine + 1,
 			Language: "java",
-			Meta:     map[string]any{"receiver": className},
+			Meta: map[string]any{
+				"receiver":   className,
+				"visibility": javaVisibility(def.Node, src, VisibilityPackage),
+			},
 		}
 		if def.Node != nil {
 			if rt := extractJavaMethodReturnType(def.Node, src); rt != "" {
 				node.Meta["return_type"] = rt
 			}
+		}
+		if doc := ExtractDocAbove(src, def.StartLine, DocLangBlockStar); doc != "" {
+			node.Meta["doc"] = doc
 		}
 		result.Nodes = append(result.Nodes, node)
 		result.Edges = append(result.Edges, &graph.Edge{

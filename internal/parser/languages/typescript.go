@@ -145,10 +145,10 @@ func (e *TypeScriptExtractor) Extract(filePath string, src []byte) (*parser.Extr
 	parser.EachMatch(e.qAll, root, src, func(m parser.QueryResult) {
 		switch {
 		case m.Captures["func.def"] != nil:
-			e.emitFunction(m, filePath, fileID, result)
+			e.emitFunction(m, filePath, fileID, src, result)
 
 		case m.Captures["arrow.def"] != nil:
-			if name := e.emitArrow(m, filePath, fileID, result); name != "" {
+			if name := e.emitArrow(m, filePath, fileID, src, result); name != "" {
 				arrowNames[name] = true
 			}
 
@@ -162,7 +162,7 @@ func (e *TypeScriptExtractor) Extract(filePath string, src []byte) (*parser.Extr
 			e.emitInterface(m, filePath, fileID, src, result)
 
 		case m.Captures["type.def"] != nil:
-			e.emitTypeAlias(m, filePath, fileID, result)
+			e.emitTypeAlias(m, filePath, fileID, src, result)
 
 		case m.Captures["enum.def"] != nil:
 			e.emitEnum(m, filePath, fileID, src, result)
@@ -313,15 +313,21 @@ func (e *TypeScriptExtractor) Extract(filePath string, src []byte) (*parser.Extr
 
 // --- per-match emit helpers ------------------------------------------
 
-func (e *TypeScriptExtractor) emitFunction(m parser.QueryResult, filePath, fileID string, result *parser.ExtractionResult) {
+func (e *TypeScriptExtractor) emitFunction(m parser.QueryResult, filePath, fileID string, src []byte, result *parser.ExtractionResult) {
 	name := m.Captures["func.name"].Text
 	def := m.Captures["func.def"]
 	id := filePath + "::" + name
+	meta := map[string]any{"signature": fmt.Sprintf("function %s()", name)}
+	docRow, exported := tsDocStartRow(def)
+	if doc := ExtractDocAbove(src, docRow, DocLangBlockStar); doc != "" {
+		meta["doc"] = doc
+	}
+	meta["visibility"] = tsTopLevelVisibility(exported)
 	result.Nodes = append(result.Nodes, &graph.Node{
 		ID: id, Kind: graph.KindFunction, Name: name,
 		FilePath: filePath, StartLine: def.StartLine + 1, EndLine: def.EndLine + 1,
 		Language: "typescript",
-		Meta:     map[string]any{"signature": fmt.Sprintf("function %s()", name)},
+		Meta:     meta,
 	})
 	result.Edges = append(result.Edges, &graph.Edge{
 		From: fileID, To: id, Kind: graph.EdgeDefines,
@@ -329,15 +335,21 @@ func (e *TypeScriptExtractor) emitFunction(m parser.QueryResult, filePath, fileI
 	})
 }
 
-func (e *TypeScriptExtractor) emitArrow(m parser.QueryResult, filePath, fileID string, result *parser.ExtractionResult) string {
+func (e *TypeScriptExtractor) emitArrow(m parser.QueryResult, filePath, fileID string, src []byte, result *parser.ExtractionResult) string {
 	name := m.Captures["arrow.name"].Text
 	def := m.Captures["arrow.def"]
 	id := filePath + "::" + name
+	meta := map[string]any{"signature": fmt.Sprintf("const %s = () =>", name)}
+	docRow, exported := tsDocStartRow(def)
+	if doc := ExtractDocAbove(src, docRow, DocLangBlockStar); doc != "" {
+		meta["doc"] = doc
+	}
+	meta["visibility"] = tsTopLevelVisibility(exported)
 	result.Nodes = append(result.Nodes, &graph.Node{
 		ID: id, Kind: graph.KindFunction, Name: name,
 		FilePath: filePath, StartLine: def.StartLine + 1, EndLine: def.EndLine + 1,
 		Language: "typescript",
-		Meta:     map[string]any{"signature": fmt.Sprintf("const %s = () =>", name)},
+		Meta:     meta,
 	})
 	result.Edges = append(result.Edges, &graph.Edge{
 		From: fileID, To: id, Kind: graph.EdgeDefines,
@@ -355,10 +367,17 @@ func (e *TypeScriptExtractor) emitClass(m parser.QueryResult, filePath, fileID s
 	name := m.Captures["class.name"].Text
 	def := m.Captures["class.def"]
 	id := filePath + "::" + name
+	meta := map[string]any{}
+	docRow, exported := tsDocStartRow(def)
+	if doc := ExtractDocAbove(src, docRow, DocLangBlockStar); doc != "" {
+		meta["doc"] = doc
+	}
+	meta["visibility"] = tsTopLevelVisibility(exported)
 	result.Nodes = append(result.Nodes, &graph.Node{
 		ID: id, Kind: graph.KindType, Name: name,
 		FilePath: filePath, StartLine: def.StartLine + 1, EndLine: def.EndLine + 1,
 		Language: "typescript",
+		Meta:     meta,
 	})
 	result.Edges = append(result.Edges, &graph.Edge{
 		From: fileID, To: id, Kind: graph.EdgeDefines,
@@ -384,11 +403,17 @@ func (e *TypeScriptExtractor) emitInterface(m parser.QueryResult, filePath, file
 	if def.Node != nil {
 		methods = extractTSInterfaceMethods(def.Node, src)
 	}
+	meta := map[string]any{"methods": methods}
+	docRow, exported := tsDocStartRow(def)
+	if doc := ExtractDocAbove(src, docRow, DocLangBlockStar); doc != "" {
+		meta["doc"] = doc
+	}
+	meta["visibility"] = tsTopLevelVisibility(exported)
 	result.Nodes = append(result.Nodes, &graph.Node{
 		ID: id, Kind: graph.KindInterface, Name: name,
 		FilePath: filePath, StartLine: def.StartLine + 1, EndLine: def.EndLine + 1,
 		Language: "typescript",
-		Meta:     map[string]any{"methods": methods},
+		Meta:     meta,
 	})
 	result.Edges = append(result.Edges, &graph.Edge{
 		From: fileID, To: id, Kind: graph.EdgeDefines,
@@ -396,14 +421,21 @@ func (e *TypeScriptExtractor) emitInterface(m parser.QueryResult, filePath, file
 	})
 }
 
-func (e *TypeScriptExtractor) emitTypeAlias(m parser.QueryResult, filePath, fileID string, result *parser.ExtractionResult) {
+func (e *TypeScriptExtractor) emitTypeAlias(m parser.QueryResult, filePath, fileID string, src []byte, result *parser.ExtractionResult) {
 	name := m.Captures["type.name"].Text
 	def := m.Captures["type.def"]
 	id := filePath + "::" + name
+	meta := map[string]any{}
+	docRow, exported := tsDocStartRow(def)
+	if doc := ExtractDocAbove(src, docRow, DocLangBlockStar); doc != "" {
+		meta["doc"] = doc
+	}
+	meta["visibility"] = tsTopLevelVisibility(exported)
 	result.Nodes = append(result.Nodes, &graph.Node{
 		ID: id, Kind: graph.KindType, Name: name,
 		FilePath: filePath, StartLine: def.StartLine + 1, EndLine: def.EndLine + 1,
 		Language: "typescript",
+		Meta:     meta,
 	})
 	result.Edges = append(result.Edges, &graph.Edge{
 		From: fileID, To: id, Kind: graph.EdgeDefines,
@@ -416,11 +448,17 @@ func (e *TypeScriptExtractor) emitEnum(m parser.QueryResult, filePath, fileID st
 	def := m.Captures["enum.def"]
 	id := filePath + "::" + name
 
+	meta := map[string]any{"kind": "enum"}
+	docRow, exported := tsDocStartRow(def)
+	if doc := ExtractDocAbove(src, docRow, DocLangBlockStar); doc != "" {
+		meta["doc"] = doc
+	}
+	meta["visibility"] = tsTopLevelVisibility(exported)
 	result.Nodes = append(result.Nodes, &graph.Node{
 		ID: id, Kind: graph.KindType, Name: name,
 		FilePath: filePath, StartLine: def.StartLine + 1, EndLine: def.EndLine + 1,
 		Language: "typescript",
-		Meta:     map[string]any{"kind": "enum"},
+		Meta:     meta,
 	})
 	result.Edges = append(result.Edges, &graph.Edge{
 		From: fileID, To: id, Kind: graph.EdgeDefines,
@@ -547,6 +585,10 @@ func (e *TypeScriptExtractor) emitMethod(m parser.QueryResult, filePath string, 
 	if rt := extractTSMethodReturnType(def.Node, src); rt != "" {
 		node.Meta["return_type"] = rt
 	}
+	if doc := ExtractDocAbove(src, def.StartLine, DocLangBlockStar); doc != "" {
+		node.Meta["doc"] = doc
+	}
+	node.Meta["visibility"] = tsMemberVisibility(def.Node, src)
 	result.Nodes = append(result.Nodes, node)
 	result.Edges = append(result.Edges, &graph.Edge{
 		From: id, To: classID, Kind: graph.EdgeMemberOf,
@@ -576,11 +618,16 @@ func (e *TypeScriptExtractor) emitClassProperty(m parser.QueryResult, filePath s
 	classID := filePath + "::" + className
 	name := m.Captures["prop.name"].Text
 	id := classID + "." + name
+	meta := map[string]any{"receiver": className, "kind": "class_property"}
+	if doc := ExtractDocAbove(src, def.StartLine, DocLangBlockStar); doc != "" {
+		meta["doc"] = doc
+	}
+	meta["visibility"] = tsMemberVisibility(def.Node, src)
 	result.Nodes = append(result.Nodes, &graph.Node{
 		ID: id, Kind: graph.KindVariable, Name: name,
 		FilePath: filePath, StartLine: def.StartLine + 1, EndLine: def.EndLine + 1,
 		Language: "typescript",
-		Meta:     map[string]any{"receiver": className, "kind": "class_property"},
+		Meta:     meta,
 	})
 	result.Edges = append(result.Edges, &graph.Edge{
 		From: id, To: classID, Kind: graph.EdgeMemberOf,
@@ -1188,6 +1235,63 @@ func normalizeTypeName(t string) string {
 		return ""
 	}
 	return t
+}
+
+// tsDocStartRow returns the 0-based row from which to scan for a doc
+// comment, plus whether the captured declaration sits inside an
+// `export_statement` (so emit* can also set visibility correctly).
+//
+// JSDoc/leading line comments live above the OUTERMOST wrapping
+// statement: when a `function_declaration` is wrapped in
+// `export_statement`, the doc block sits above the `export` keyword,
+// not above `function`. Scanning from the inner declaration's row
+// works in practice because tree-sitter's typescript grammar reports
+// the inner row as the same as the export-statement row when they
+// share a line, but for multi-line wrappers this fix-up matters.
+func tsDocStartRow(def *parser.CapturedNode) (int, bool) {
+	if def == nil || def.Node == nil {
+		if def != nil {
+			return def.StartLine, false
+		}
+		return 0, false
+	}
+	parent := def.Node.Parent()
+	if parent != nil && parent.Type() == "export_statement" {
+		return int(parent.StartPoint().Row), true
+	}
+	return def.StartLine, false
+}
+
+func tsTopLevelVisibility(exported bool) string {
+	if exported {
+		return VisibilityPublic
+	}
+	return VisibilityPrivate
+}
+
+// tsMemberVisibility inspects a class member (method_definition,
+// public_field_definition) for an accessibility modifier child. The TS
+// grammar exposes the modifier as an `accessibility_modifier` node
+// containing the keyword text.
+func tsMemberVisibility(member *sitter.Node, src []byte) string {
+	if member == nil {
+		return VisibilityPublic
+	}
+	for i := 0; i < int(member.ChildCount()); i++ {
+		c := member.Child(i)
+		if c == nil || c.Type() != "accessibility_modifier" {
+			continue
+		}
+		switch c.Content(src) {
+		case "private":
+			return VisibilityPrivate
+		case "protected":
+			return VisibilityProtected
+		case "public":
+			return VisibilityPublic
+		}
+	}
+	return VisibilityPublic
 }
 
 func extractTSMethodReturnType(methodNode *sitter.Node, src []byte) string {

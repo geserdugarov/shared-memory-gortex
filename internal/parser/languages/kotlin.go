@@ -122,7 +122,7 @@ func (e *KotlinExtractor) Extract(filePath string, src []byte) (*parser.Extracti
 			e.emitClassOrInterface(m, filePath, fileID, src, result, seen)
 
 		case m.Captures["obj.def"] != nil:
-			e.emitObject(m, filePath, fileID, result, seen)
+			e.emitObject(m, filePath, fileID, src, result, seen)
 
 		case m.Captures["func.def"] != nil:
 			e.emitFunction(m, filePath, fileID, src, result, seen)
@@ -283,12 +283,15 @@ func (e *KotlinExtractor) emitClassOrInterface(m parser.QueryResult, filePath, f
 	}
 
 	kind := graph.KindType
-	var meta map[string]any
+	meta := map[string]any{"visibility": kotlinVisibility(def.Node, src)}
 	switch {
 	case isInterface:
 		kind = graph.KindInterface
 	case enumBody != nil:
-		meta = map[string]any{"kind": "enum"}
+		meta["kind"] = "enum"
+	}
+	if doc := ExtractDocAbove(src, def.StartLine, DocLangBlockStar); doc != "" {
+		meta["doc"] = doc
 	}
 
 	seen[id] = true
@@ -339,7 +342,7 @@ func (e *KotlinExtractor) emitClassOrInterface(m parser.QueryResult, filePath, f
 	}
 }
 
-func (e *KotlinExtractor) emitObject(m parser.QueryResult, filePath, fileID string, result *parser.ExtractionResult, seen map[string]bool) {
+func (e *KotlinExtractor) emitObject(m parser.QueryResult, filePath, fileID string, src []byte, result *parser.ExtractionResult, seen map[string]bool) {
 	name := m.Captures["obj.name"].Text
 	def := m.Captures["obj.def"]
 	id := filePath + "::" + name
@@ -347,10 +350,15 @@ func (e *KotlinExtractor) emitObject(m parser.QueryResult, filePath, fileID stri
 		return
 	}
 	seen[id] = true
+	meta := map[string]any{"visibility": kotlinVisibility(def.Node, src)}
+	if doc := ExtractDocAbove(src, def.StartLine, DocLangBlockStar); doc != "" {
+		meta["doc"] = doc
+	}
 	result.Nodes = append(result.Nodes, &graph.Node{
 		ID: id, Kind: graph.KindType, Name: name,
 		FilePath: filePath, StartLine: def.StartLine + 1, EndLine: def.EndLine + 1,
 		Language: "kotlin",
+		Meta:     meta,
 	})
 	result.Edges = append(result.Edges, &graph.Edge{
 		From: fileID, To: id, Kind: graph.EdgeDefines, FilePath: filePath, Line: def.StartLine + 1,
@@ -370,6 +378,9 @@ func (e *KotlinExtractor) emitFunction(m parser.QueryResult, filePath, fileID st
 	startLine1 := def.StartLine + 1
 	endLine1 := def.EndLine + 1
 
+	doc := ExtractDocAbove(src, def.StartLine, DocLangBlockStar)
+	visibility := kotlinVisibility(def.Node, src)
+
 	owner, ownerKind := kotlinDirectMemberOwner(def.Node, src)
 	if ownerKind != "" {
 		id := filePath + "::" + owner + "." + name
@@ -380,7 +391,13 @@ func (e *KotlinExtractor) emitFunction(m parser.QueryResult, filePath, fileID st
 			return
 		}
 		seen[id] = true
-		meta := map[string]any{"receiver": owner}
+		meta := map[string]any{
+			"receiver":   owner,
+			"visibility": visibility,
+		}
+		if doc != "" {
+			meta["doc"] = doc
+		}
 		if rt := extractKotlinReturnType(def.Node, src); rt != "" {
 			meta["return_type"] = rt
 		}
@@ -409,14 +426,54 @@ func (e *KotlinExtractor) emitFunction(m parser.QueryResult, filePath, fileID st
 		return
 	}
 	seen[id] = true
+	meta := map[string]any{"visibility": visibility}
+	if doc != "" {
+		meta["doc"] = doc
+	}
 	result.Nodes = append(result.Nodes, &graph.Node{
 		ID: id, Kind: graph.KindFunction, Name: name,
 		FilePath: filePath, StartLine: startLine1, EndLine: endLine1,
 		Language: "kotlin",
+		Meta:     meta,
 	})
 	result.Edges = append(result.Edges, &graph.Edge{
 		From: fileID, To: id, Kind: graph.EdgeDefines, FilePath: filePath, Line: startLine1,
 	})
+}
+
+// kotlinVisibility scans a declaration's modifiers child for a
+// visibility modifier. Kotlin's default visibility is "public" when
+// none is declared (different from Java's package-private default).
+func kotlinVisibility(decl *sitter.Node, src []byte) string {
+	if decl == nil {
+		return VisibilityPublic
+	}
+	for i := 0; i < int(decl.ChildCount()); i++ {
+		c := decl.Child(i)
+		if c == nil || c.Type() != "modifiers" {
+			continue
+		}
+		for j := 0; j < int(c.ChildCount()); j++ {
+			tok := c.Child(j)
+			if tok == nil {
+				continue
+			}
+			if tok.Type() != "visibility_modifier" {
+				continue
+			}
+			switch strings.TrimSpace(tok.Content(src)) {
+			case "public", "open":
+				return VisibilityPublic
+			case "private":
+				return VisibilityPrivate
+			case "protected":
+				return VisibilityProtected
+			case "internal":
+				return VisibilityInternal
+			}
+		}
+	}
+	return VisibilityPublic
 }
 
 func (e *KotlinExtractor) emitImport(m parser.QueryResult, filePath, fileID string, result *parser.ExtractionResult) {

@@ -238,3 +238,73 @@ def handler(x = Depends(lambda: 42), y = Depends(obj.method)):
 		}
 	}
 }
+
+func TestPythonExtractor_DocAndVisibility(t *testing.T) {
+	src := []byte(`def foo():
+    """Foo does the thing.
+
+    Some details.
+    """
+    return 1
+
+
+def _helper():
+    """Internal helper."""
+    return 2
+
+
+class Server:
+    """The server."""
+
+    def start(self):
+        """Start it."""
+        return None
+
+    def _stop(self):
+        return None
+`)
+	e := NewPythonExtractor()
+	result, err := e.Extract("server.py", src)
+	require.NoError(t, err)
+
+	byID := map[string]*graph.Node{}
+	for _, n := range result.Nodes {
+		byID[n.ID] = n
+	}
+
+	foo := byID["server.py::foo"]
+	require.NotNil(t, foo)
+	if foo.Meta["doc"] != "Foo does the thing." {
+		t.Fatalf("foo.doc = %q", foo.Meta["doc"])
+	}
+	if foo.Meta["visibility"] != "public" {
+		t.Fatalf("foo.vis = %q", foo.Meta["visibility"])
+	}
+
+	helper := byID["server.py::_helper"]
+	require.NotNil(t, helper)
+	if helper.Meta["visibility"] != "private" {
+		t.Fatalf("_helper.vis = %q", helper.Meta["visibility"])
+	}
+
+	server := byID["server.py::Server"]
+	require.NotNil(t, server)
+	if server.Meta["doc"] != "The server." {
+		t.Fatalf("Server.doc = %q", server.Meta["doc"])
+	}
+	if server.Meta["visibility"] != "public" {
+		t.Fatalf("Server.vis = %q", server.Meta["visibility"])
+	}
+
+	start := byID["server.py::Server.start"]
+	require.NotNil(t, start)
+	if start.Meta["doc"] != "Start it." {
+		t.Fatalf("Server.start.doc = %q", start.Meta["doc"])
+	}
+
+	stop := byID["server.py::Server._stop"]
+	require.NotNil(t, stop)
+	if stop.Meta["visibility"] != "private" {
+		t.Fatalf("Server._stop.vis = %q", stop.Meta["visibility"])
+	}
+}

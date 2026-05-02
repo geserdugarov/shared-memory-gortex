@@ -117,13 +117,13 @@ func (e *SwiftExtractor) Extract(filePath string, src []byte) (*parser.Extractio
 			e.emitTypeContainer(m, "enum", filePath, fileID, src, result, seen, &typeRanges, bodyNode)
 
 		case m.Captures["proto.def"] != nil:
-			e.emitProtocol(m, filePath, fileID, result, seen)
+			e.emitProtocol(m, filePath, fileID, src, result, seen)
 
 		case m.Captures["protomethod.def"] != nil:
 			e.recordProtocolMethod(m, src, protoMethods)
 
 		case m.Captures["func.def"] != nil:
-			e.emitFunction(m, filePath, fileID, result, seen, typeRanges)
+			e.emitFunction(m, filePath, fileID, src, result, seen, typeRanges)
 
 		case m.Captures["import.def"] != nil:
 			e.emitImport(m, filePath, fileID, result)
@@ -199,9 +199,12 @@ func (e *SwiftExtractor) emitTypeContainer(m parser.QueryResult, prefix, filePat
 
 	if !seen[id] {
 		seen[id] = true
-		var meta map[string]any
+		meta := map[string]any{"visibility": swiftVisibility(def.Node, src)}
 		if prefix == "enum" {
-			meta = map[string]any{"kind": "enum"}
+			meta["kind"] = "enum"
+		}
+		if doc := ExtractDocAbove(src, def.StartLine, DocLangSlashSlash); doc != "" {
+			meta["doc"] = doc
 		}
 		result.Nodes = append(result.Nodes, &graph.Node{
 			ID: id, Kind: graph.KindType, Name: name,
@@ -283,7 +286,7 @@ func (e *SwiftExtractor) recordProtocolMethod(m parser.QueryResult, src []byte, 
 	protoMethods[nameNode.Content(src)] = append(protoMethods[nameNode.Content(src)], m.Captures["protomethod.name"].Text)
 }
 
-func (e *SwiftExtractor) emitProtocol(m parser.QueryResult, filePath, fileID string, result *parser.ExtractionResult, seen map[string]bool) {
+func (e *SwiftExtractor) emitProtocol(m parser.QueryResult, filePath, fileID string, src []byte, result *parser.ExtractionResult, seen map[string]bool) {
 	name := m.Captures["proto.name"].Text
 	def := m.Captures["proto.def"]
 	id := filePath + "::" + name
@@ -291,20 +294,28 @@ func (e *SwiftExtractor) emitProtocol(m parser.QueryResult, filePath, fileID str
 		return
 	}
 	seen[id] = true
+	meta := map[string]any{"visibility": swiftVisibility(def.Node, src)}
+	if doc := ExtractDocAbove(src, def.StartLine, DocLangSlashSlash); doc != "" {
+		meta["doc"] = doc
+	}
 	result.Nodes = append(result.Nodes, &graph.Node{
 		ID: id, Kind: graph.KindInterface, Name: name,
 		FilePath: filePath, StartLine: def.StartLine + 1, EndLine: def.EndLine + 1,
 		Language: "swift",
+		Meta:     meta,
 	})
 	result.Edges = append(result.Edges, &graph.Edge{
 		From: fileID, To: id, Kind: graph.EdgeDefines, FilePath: filePath, Line: def.StartLine + 1,
 	})
 }
 
-func (e *SwiftExtractor) emitFunction(m parser.QueryResult, filePath, fileID string, result *parser.ExtractionResult, seen map[string]bool, typeRanges []swiftTypeRange) {
+func (e *SwiftExtractor) emitFunction(m parser.QueryResult, filePath, fileID string, src []byte, result *parser.ExtractionResult, seen map[string]bool, typeRanges []swiftTypeRange) {
 	name := m.Captures["func.name"].Text
 	def := m.Captures["func.def"]
 	startLine := def.StartLine
+
+	doc := ExtractDocAbove(src, def.StartLine, DocLangSlashSlash)
+	visibility := swiftVisibility(def.Node, src)
 
 	if typeName, ok := findEnclosingSwiftType(typeRanges, startLine); ok {
 		id := filePath + "::" + typeName + "." + name
@@ -312,13 +323,18 @@ func (e *SwiftExtractor) emitFunction(m parser.QueryResult, filePath, fileID str
 			return
 		}
 		seen[id] = true
+		meta := map[string]any{
+			"receiver":   typeName,
+			"signature":  "func " + name + "(...)",
+			"visibility": visibility,
+		}
+		if doc != "" {
+			meta["doc"] = doc
+		}
 		result.Nodes = append(result.Nodes, &graph.Node{
 			ID: id, Kind: graph.KindMethod, Name: name,
 			FilePath: filePath, StartLine: def.StartLine + 1, EndLine: def.EndLine + 1,
-			Language: "swift", Meta: map[string]any{
-				"receiver":  typeName,
-				"signature": "func " + name + "(...)",
-			},
+			Language: "swift", Meta: meta,
 		})
 		result.Edges = append(result.Edges, &graph.Edge{
 			From: fileID, To: id, Kind: graph.EdgeDefines, FilePath: filePath, Line: def.StartLine + 1,
@@ -335,14 +351,61 @@ func (e *SwiftExtractor) emitFunction(m parser.QueryResult, filePath, fileID str
 		return
 	}
 	seen[id] = true
+	meta := map[string]any{
+		"signature":  "func " + name + "(...)",
+		"visibility": visibility,
+	}
+	if doc != "" {
+		meta["doc"] = doc
+	}
 	result.Nodes = append(result.Nodes, &graph.Node{
 		ID: id, Kind: graph.KindFunction, Name: name,
 		FilePath: filePath, StartLine: def.StartLine + 1, EndLine: def.EndLine + 1,
-		Language: "swift", Meta: map[string]any{"signature": "func " + name + "(...)"},
+		Language: "swift", Meta: meta,
 	})
 	result.Edges = append(result.Edges, &graph.Edge{
 		From: fileID, To: id, Kind: graph.EdgeDefines, FilePath: filePath, Line: def.StartLine + 1,
 	})
+}
+
+// swiftVisibility scans a declaration's leading modifier children for
+// an access-level keyword. Swift's default is "internal" when no
+// modifier is present. The grammar emits modifiers as plain keyword
+// children of the declaration node (visibility_modifier etc.).
+func swiftVisibility(decl *sitter.Node, src []byte) string {
+	if decl == nil {
+		return VisibilityInternal
+	}
+	for i := 0; i < int(decl.ChildCount()); i++ {
+		c := decl.Child(i)
+		if c == nil {
+			continue
+		}
+		// Stop scanning once we pass the leading modifier band — once
+		// we hit `func` / `class` / `struct` / `protocol` etc. there
+		// are no more access modifiers ahead.
+		t := c.Type()
+		if t == "modifiers" {
+			// Some grammar versions wrap modifiers; recurse.
+			if v := swiftVisibility(c, src); v != VisibilityInternal {
+				return v
+			}
+			continue
+		}
+		switch strings.TrimSpace(c.Content(src)) {
+		case "public":
+			return VisibilityPublic
+		case "open":
+			return VisibilityPublic
+		case "private":
+			return VisibilityPrivate
+		case "fileprivate":
+			return VisibilityPrivate
+		case "internal":
+			return VisibilityInternal
+		}
+	}
+	return VisibilityInternal
 }
 
 func (e *SwiftExtractor) emitImport(m parser.QueryResult, filePath, fileID string, result *parser.ExtractionResult) {

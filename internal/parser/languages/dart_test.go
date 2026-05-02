@@ -315,3 +315,63 @@ void main() {
 	require.Len(t, funcs, 1)
 	assert.Equal(t, "main", funcs[0].Name)
 }
+
+func TestDartExtractor_DocAndVisibility(t *testing.T) {
+	src := []byte(`/// The greeter widget.
+class Greeter {
+  /// Builds the widget.
+  Widget build() => Container();
+
+  void _privateHelper() {}
+}
+
+/// Top-level helper.
+void hello() {}
+
+void _internal() {}
+`)
+	e := NewDartExtractor()
+	result, err := e.Extract("greeter.dart", src)
+	require.NoError(t, err)
+
+	byID := map[string]*graph.Node{}
+	for _, n := range result.Nodes {
+		byID[n.ID] = n
+	}
+
+	greeter := byID["greeter.dart::Greeter"]
+	require.NotNil(t, greeter)
+	if greeter.Meta["visibility"] != "public" {
+		t.Fatalf("Greeter.vis = %q", greeter.Meta["visibility"])
+	}
+	if greeter.Meta["doc"] != "The greeter widget." {
+		t.Fatalf("Greeter.doc = %q", greeter.Meta["doc"])
+	}
+
+	build := byID["greeter.dart::Greeter.build"]
+	require.NotNil(t, build)
+	if build.Meta["doc"] != "Builds the widget." {
+		t.Fatalf("build.doc = %q", build.Meta["doc"])
+	}
+	if build.Meta["visibility"] != "public" {
+		t.Fatalf("build.vis = %q", build.Meta["visibility"])
+	}
+
+	priv := byID["greeter.dart::Greeter._privateHelper"]
+	require.NotNil(t, priv)
+	if priv.Meta["visibility"] != "private" {
+		t.Fatalf("_privateHelper.vis = %q", priv.Meta["visibility"])
+	}
+
+	hello := byID["greeter.dart::hello"]
+	require.NotNil(t, hello)
+	if hello.Meta["doc"] != "Top-level helper." {
+		t.Fatalf("hello.doc = %q", hello.Meta["doc"])
+	}
+
+	internalFn := byID["greeter.dart::_internal"]
+	require.NotNil(t, internalFn)
+	if internalFn.Meta["visibility"] != "private" {
+		t.Fatalf("_internal.vis = %q", internalFn.Meta["visibility"])
+	}
+}

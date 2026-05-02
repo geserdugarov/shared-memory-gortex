@@ -122,10 +122,15 @@ func (e *DartExtractor) extractTypes(
 
 		startLine := int(node.StartPoint().Row) + 1
 		endLine := int(node.EndPoint().Row) + 1
+		meta := map[string]any{"visibility": VisibilityByUnderscore(name)}
+		if doc := ExtractDocAbove(src, int(node.StartPoint().Row), DocLangSlashSlash); doc != "" {
+			meta["doc"] = doc
+		}
 		result.Nodes = append(result.Nodes, &graph.Node{
 			ID: id, Kind: kind, Name: name,
 			FilePath: filePath, StartLine: startLine, EndLine: endLine,
 			Language: "dart",
+			Meta:     meta,
 		})
 		result.Edges = append(result.Edges, &graph.Edge{
 			From: fileNode.ID, To: id, Kind: graph.EdgeDefines, FilePath: filePath, Line: startLine,
@@ -191,11 +196,18 @@ func (e *DartExtractor) extractMethods(
 			endLine = int(body.EndPoint().Row)
 		}
 
+		methodMeta := map[string]any{
+			"receiver":   typeName,
+			"visibility": VisibilityByUnderscore(name),
+		}
+		if doc := ExtractDocAbove(src, startLine, DocLangSlashSlash); doc != "" {
+			methodMeta["doc"] = doc
+		}
 		result.Nodes = append(result.Nodes, &graph.Node{
 			ID: methodID, Kind: graph.KindMethod, Name: name,
 			FilePath: filePath, StartLine: startLine + 1, EndLine: endLine + 1,
 			Language: "dart",
-			Meta:     map[string]any{"receiver": typeName},
+			Meta:     methodMeta,
 		})
 		result.Edges = append(result.Edges, &graph.Edge{
 			From: fileNode.ID, To: methodID, Kind: graph.EdgeDefines, FilePath: filePath, Line: startLine + 1,
@@ -265,10 +277,15 @@ func (e *DartExtractor) extractTopLevelFunctions(
 		}
 		seen[id] = true
 
+		fnMeta := map[string]any{"visibility": VisibilityByUnderscore(name)}
+		if doc := ExtractDocAbove(src, startLine-1, DocLangSlashSlash); doc != "" {
+			fnMeta["doc"] = doc
+		}
 		result.Nodes = append(result.Nodes, &graph.Node{
 			ID: id, Kind: graph.KindFunction, Name: name,
 			FilePath: filePath, StartLine: startLine, EndLine: endLine,
 			Language: "dart",
+			Meta:     fnMeta,
 		})
 		result.Edges = append(result.Edges, &graph.Edge{
 			From: fileNode.ID, To: id, Kind: graph.EdgeDefines, FilePath: filePath, Line: startLine,

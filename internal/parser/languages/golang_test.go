@@ -498,6 +498,59 @@ func (u *User) Name() string { return "" }
 	}
 }
 
+func TestGoExtractor_DocAndVisibility(t *testing.T) {
+	src := []byte(`package main
+
+// Hello greets the user.
+// It also returns nothing.
+func Hello() {}
+
+// helper is internal.
+func helper() {}
+
+// Server is the HTTP server.
+type Server struct{}
+
+// Start brings the server up.
+func (s *Server) Start() {}
+
+// MaxRetries is the cap.
+const MaxRetries = 3
+`)
+	e := NewGoExtractor()
+	result, err := e.Extract("main.go", src)
+	require.NoError(t, err)
+
+	byID := map[string]*graph.Node{}
+	for _, n := range result.Nodes {
+		byID[n.ID] = n
+	}
+
+	hello := byID["main.go::Hello"]
+	require.NotNil(t, hello)
+	assert.Equal(t, "Hello greets the user. It also returns nothing.", hello.Meta["doc"])
+	assert.Equal(t, "public", hello.Meta["visibility"])
+
+	helper := byID["main.go::helper"]
+	require.NotNil(t, helper)
+	assert.Equal(t, "helper is internal.", helper.Meta["doc"])
+	assert.Equal(t, "package", helper.Meta["visibility"])
+
+	server := byID["main.go::Server"]
+	require.NotNil(t, server)
+	assert.Equal(t, "Server is the HTTP server.", server.Meta["doc"])
+	assert.Equal(t, "public", server.Meta["visibility"])
+
+	start := byID["main.go::Server.Start"]
+	require.NotNil(t, start)
+	assert.Equal(t, "Start brings the server up.", start.Meta["doc"])
+	assert.Equal(t, "public", start.Meta["visibility"])
+
+	mr := byID["main.go::MaxRetries"]
+	require.NotNil(t, mr)
+	assert.Equal(t, "public", mr.Meta["visibility"])
+}
+
 // --- helpers ---
 
 func nodesOfKind(nodes []*graph.Node, kind graph.NodeKind) []*graph.Node {

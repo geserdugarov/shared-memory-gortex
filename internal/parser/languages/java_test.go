@@ -332,3 +332,64 @@ public class X {
 	assert.Contains(t, params, "Clock")
 	assert.Contains(t, params, "foo")
 }
+
+func TestJavaExtractor_DocAndVisibility(t *testing.T) {
+	src := []byte(`package x;
+
+/**
+ * Greeter is the public greeter.
+ */
+public class Greeter {
+    /**
+     * Says hi.
+     */
+    public void hello() {}
+
+    private void secret() {}
+}
+
+/** Internal worker. */
+class Worker {}
+`)
+	e := NewJavaExtractor()
+	result, err := e.Extract("Greeter.java", src)
+	require.NoError(t, err)
+
+	byID := map[string]*graph.Node{}
+	for _, n := range result.Nodes {
+		byID[n.ID] = n
+	}
+
+	greeter := byID["Greeter.java::Greeter"]
+	require.NotNil(t, greeter)
+	if greeter.Meta["visibility"] != "public" {
+		t.Fatalf("Greeter.vis = %q", greeter.Meta["visibility"])
+	}
+	if greeter.Meta["doc"] != "Greeter is the public greeter." {
+		t.Fatalf("Greeter.doc = %q", greeter.Meta["doc"])
+	}
+
+	hello := byID["Greeter.java::Greeter.hello"]
+	require.NotNil(t, hello)
+	if hello.Meta["visibility"] != "public" {
+		t.Fatalf("hello.vis = %q", hello.Meta["visibility"])
+	}
+	if hello.Meta["doc"] != "Says hi." {
+		t.Fatalf("hello.doc = %q", hello.Meta["doc"])
+	}
+
+	secret := byID["Greeter.java::Greeter.secret"]
+	require.NotNil(t, secret)
+	if secret.Meta["visibility"] != "private" {
+		t.Fatalf("secret.vis = %q", secret.Meta["visibility"])
+	}
+
+	worker := byID["Greeter.java::Worker"]
+	require.NotNil(t, worker)
+	if worker.Meta["visibility"] != "package" {
+		t.Fatalf("Worker.vis = %q", worker.Meta["visibility"])
+	}
+	if worker.Meta["doc"] != "Internal worker." {
+		t.Fatalf("Worker.doc = %q", worker.Meta["doc"])
+	}
+}

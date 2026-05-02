@@ -138,16 +138,16 @@ func (e *CSharpExtractor) Extract(filePath string, src []byte) (*parser.Extracti
 			e.emitNamespace(m, filePath, fileID, result, seen)
 
 		case m.Captures["class.def"] != nil:
-			e.emitContainer(m, "class", graph.KindType, filePath, fileID, result, seen)
+			e.emitContainer(m, "class", graph.KindType, filePath, fileID, src, result, seen)
 
 		case m.Captures["iface.def"] != nil:
-			e.emitContainer(m, "iface", graph.KindInterface, filePath, fileID, result, seen)
+			e.emitContainer(m, "iface", graph.KindInterface, filePath, fileID, src, result, seen)
 
 		case m.Captures["struct.def"] != nil:
-			e.emitContainer(m, "struct", graph.KindType, filePath, fileID, result, seen)
+			e.emitContainer(m, "struct", graph.KindType, filePath, fileID, src, result, seen)
 
 		case m.Captures["enum.def"] != nil:
-			e.emitContainer(m, "enum", graph.KindType, filePath, fileID, result, seen)
+			e.emitContainer(m, "enum", graph.KindType, filePath, fileID, src, result, seen)
 
 		case m.Captures["method.def"] != nil:
 			e.emitMethod(m, filePath, fileID, src, result, seen, ifaceMethods)
@@ -286,7 +286,7 @@ func (e *CSharpExtractor) emitNamespace(m parser.QueryResult, filePath, fileID s
 // emitContainer collapses the per-kind class/interface/struct/enum
 // node emission. The capture-name prefix selects which capture set to
 // read from (the legacy code repeated this body four times).
-func (e *CSharpExtractor) emitContainer(m parser.QueryResult, kind string, nodeKind graph.NodeKind, filePath, fileID string, result *parser.ExtractionResult, seen map[string]bool) {
+func (e *CSharpExtractor) emitContainer(m parser.QueryResult, kind string, nodeKind graph.NodeKind, filePath, fileID string, src []byte, result *parser.ExtractionResult, seen map[string]bool) {
 	name := m.Captures[kind+".name"].Text
 	def := m.Captures[kind+".def"]
 	id := filePath + "::" + name
@@ -294,14 +294,57 @@ func (e *CSharpExtractor) emitContainer(m parser.QueryResult, kind string, nodeK
 		return
 	}
 	seen[id] = true
+	meta := map[string]any{"visibility": csharpVisibility(def.Node, src, VisibilityInternal)}
+	if doc := extractCSharpDoc(src, def.StartLine); doc != "" {
+		meta["doc"] = doc
+	}
 	result.Nodes = append(result.Nodes, &graph.Node{
 		ID: id, Kind: nodeKind, Name: name,
 		FilePath: filePath, StartLine: def.StartLine + 1, EndLine: def.EndLine + 1,
 		Language: "csharp",
+		Meta:     meta,
 	})
 	result.Edges = append(result.Edges, &graph.Edge{
 		From: fileID, To: id, Kind: graph.EdgeDefines, FilePath: filePath, Line: def.StartLine + 1,
 	})
+}
+
+// csharpVisibility scans a declaration's modifier children for an
+// access modifier. C# defaults are container-dependent — defaultVis is
+// "internal" for top-level types and "private" for class members.
+func csharpVisibility(decl *sitter.Node, src []byte, defaultVis string) string {
+	if decl == nil {
+		return defaultVis
+	}
+	for i := 0; i < int(decl.ChildCount()); i++ {
+		c := decl.Child(i)
+		if c == nil {
+			continue
+		}
+		if c.Type() != "modifier" {
+			continue
+		}
+		switch strings.TrimSpace(c.Content(src)) {
+		case "public":
+			return VisibilityPublic
+		case "private":
+			return VisibilityPrivate
+		case "protected":
+			return VisibilityProtected
+		case "internal":
+			return VisibilityInternal
+		}
+	}
+	return defaultVis
+}
+
+// extractCSharpDoc tries the XML-doc form first (/// <summary>…) and
+// falls back to /** … */ block comments (less common in C# but valid).
+func extractCSharpDoc(src []byte, startRow int) string {
+	if d := ExtractDocAbove(src, startRow, DocLangCSharpXML); d != "" {
+		return d
+	}
+	return ExtractDocAbove(src, startRow, DocLangBlockStar)
 }
 
 func (e *CSharpExtractor) emitMethod(m parser.QueryResult, filePath, fileID string, src []byte, result *parser.ExtractionResult, seen map[string]bool, ifaceMethods map[string][]string) {
@@ -332,9 +375,15 @@ func (e *CSharpExtractor) emitMethod(m parser.QueryResult, filePath, fileID stri
 		return
 	}
 	seen[id] = true
-	meta := map[string]any{"receiver": owner.name}
+	meta := map[string]any{
+		"receiver":   owner.name,
+		"visibility": csharpVisibility(def.Node, src, VisibilityPrivate),
+	}
 	if rt := extractCSharpMethodReturnType(def.Node, src, name); rt != "" {
 		meta["return_type"] = rt
+	}
+	if doc := extractCSharpDoc(src, def.StartLine); doc != "" {
+		meta["doc"] = doc
 	}
 	result.Nodes = append(result.Nodes, &graph.Node{
 		ID: id, Kind: graph.KindMethod, Name: name,

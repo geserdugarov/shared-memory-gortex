@@ -352,3 +352,60 @@ public class App {
 	require.NotNil(t, toStringCall.Meta, "expected Meta on ToString call edge")
 	assert.Equal(t, "Order", toStringCall.Meta["receiver_type"])
 }
+
+func TestCSharpExtractor_DocAndVisibility(t *testing.T) {
+	src := []byte(`namespace X
+{
+    /// <summary>
+    /// Greeter wraps the greeting.
+    /// </summary>
+    public class Greeter
+    {
+        /// <summary>Says hi.</summary>
+        public void Hello() {}
+
+        private void Secret() {}
+    }
+
+    class Internal {}
+}
+`)
+	e := NewCSharpExtractor()
+	result, err := e.Extract("Greeter.cs", src)
+	require.NoError(t, err)
+
+	byID := map[string]*graph.Node{}
+	for _, n := range result.Nodes {
+		byID[n.ID] = n
+	}
+
+	greeter := byID["Greeter.cs::Greeter"]
+	require.NotNil(t, greeter)
+	if greeter.Meta["visibility"] != "public" {
+		t.Fatalf("Greeter.vis = %q", greeter.Meta["visibility"])
+	}
+	if greeter.Meta["doc"] != "Greeter wraps the greeting." {
+		t.Fatalf("Greeter.doc = %q", greeter.Meta["doc"])
+	}
+
+	hello := byID["Greeter.cs::Greeter.Hello"]
+	require.NotNil(t, hello)
+	if hello.Meta["visibility"] != "public" {
+		t.Fatalf("Hello.vis = %q", hello.Meta["visibility"])
+	}
+	if hello.Meta["doc"] != "Says hi." {
+		t.Fatalf("Hello.doc = %q", hello.Meta["doc"])
+	}
+
+	secret := byID["Greeter.cs::Greeter.Secret"]
+	require.NotNil(t, secret)
+	if secret.Meta["visibility"] != "private" {
+		t.Fatalf("Secret.vis = %q", secret.Meta["visibility"])
+	}
+
+	internalT := byID["Greeter.cs::Internal"]
+	require.NotNil(t, internalT)
+	if internalT.Meta["visibility"] != "internal" {
+		t.Fatalf("Internal.vis = %q", internalT.Meta["visibility"])
+	}
+}

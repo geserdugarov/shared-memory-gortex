@@ -139,13 +139,13 @@ func (e *RustExtractor) Extract(filePath string, src []byte) (*parser.Extraction
 			e.recordTraitMethod(m, src, traitMethods)
 
 		case m.Captures["struct.def"] != nil:
-			e.emitStruct(m, filePath, fileID, result, seen)
+			e.emitStruct(m, filePath, fileID, src, result, seen)
 
 		case m.Captures["enum.def"] != nil:
-			e.emitEnum(m, filePath, fileID, result, seen)
+			e.emitEnum(m, filePath, fileID, src, result, seen)
 
 		case m.Captures["trait.def"] != nil:
-			e.emitTrait(m, filePath, fileID, result, seen, traitMethods)
+			e.emitTrait(m, filePath, fileID, src, result, seen, traitMethods)
 
 		case m.Captures["variant.def"] != nil:
 			e.emitVariant(m, filePath, src, result)
@@ -282,6 +282,9 @@ func (e *RustExtractor) emitFunction(m parser.QueryResult, filePath, fileID stri
 	def := m.Captures["func.def"]
 	startLine1 := def.StartLine + 1
 
+	doc := ExtractDocAbove(src, def.StartLine, DocLangSlashSlash)
+	visibility := rustVisibility(def.Node, src)
+
 	implType := rustImplMethodReceiver(def.Node, src)
 	if implType != "" {
 		id := filePath + "::" + implType + "." + name
@@ -290,8 +293,12 @@ func (e *RustExtractor) emitFunction(m parser.QueryResult, filePath, fileID stri
 		}
 		seen[id] = true
 		meta := map[string]any{
-			"receiver":  implType,
-			"signature": "fn " + name + "(...)",
+			"receiver":   implType,
+			"signature":  "fn " + name + "(...)",
+			"visibility": visibility,
+		}
+		if doc != "" {
+			meta["doc"] = doc
 		}
 		if rt := extractRustReturnType(def.Node, src); rt != "" {
 			meta["return_type"] = rt
@@ -318,14 +325,51 @@ func (e *RustExtractor) emitFunction(m parser.QueryResult, filePath, fileID stri
 		return
 	}
 	seen[id] = true
+	meta := map[string]any{
+		"signature":  "fn " + name + "(...)",
+		"visibility": visibility,
+	}
+	if doc != "" {
+		meta["doc"] = doc
+	}
 	result.Nodes = append(result.Nodes, &graph.Node{
 		ID: id, Kind: graph.KindFunction, Name: name,
 		FilePath: filePath, StartLine: startLine1, EndLine: def.EndLine + 1,
-		Language: "rust", Meta: map[string]any{"signature": "fn " + name + "(...)"},
+		Language: "rust", Meta: meta,
 	})
 	result.Edges = append(result.Edges, &graph.Edge{
 		From: fileID, To: id, Kind: graph.EdgeDefines, FilePath: filePath, Line: startLine1,
 	})
+}
+
+// rustVisibility inspects an item node for a visibility_modifier child
+// and returns the canonical visibility string. Default for items
+// without a modifier is "private" (Rust default).
+func rustVisibility(item *sitter.Node, src []byte) string {
+	if item == nil {
+		return VisibilityPrivate
+	}
+	for i := 0; i < int(item.ChildCount()); i++ {
+		c := item.Child(i)
+		if c == nil {
+			continue
+		}
+		if c.Type() != "visibility_modifier" {
+			continue
+		}
+		text := strings.TrimSpace(c.Content(src))
+		switch {
+		case text == "pub":
+			return VisibilityPublic
+		case strings.HasPrefix(text, "pub(crate"):
+			return VisibilityInternal
+		case strings.HasPrefix(text, "pub(super"), strings.HasPrefix(text, "pub(in"):
+			return VisibilityInternal
+		case strings.HasPrefix(text, "pub("):
+			return VisibilityPublic
+		}
+	}
+	return VisibilityPrivate
 }
 
 func (e *RustExtractor) recordTraitMethod(m parser.QueryResult, src []byte, traitMethods map[string][]string) {
@@ -341,7 +385,7 @@ func (e *RustExtractor) recordTraitMethod(m parser.QueryResult, src []byte, trai
 	traitMethods[traitName] = append(traitMethods[traitName], m.Captures["sig.name"].Text)
 }
 
-func (e *RustExtractor) emitStruct(m parser.QueryResult, filePath, fileID string, result *parser.ExtractionResult, seen map[string]bool) {
+func (e *RustExtractor) emitStruct(m parser.QueryResult, filePath, fileID string, src []byte, result *parser.ExtractionResult, seen map[string]bool) {
 	name := m.Captures["struct.name"].Text
 	def := m.Captures["struct.def"]
 	id := filePath + "::" + name
@@ -349,17 +393,22 @@ func (e *RustExtractor) emitStruct(m parser.QueryResult, filePath, fileID string
 		return
 	}
 	seen[id] = true
+	meta := map[string]any{"visibility": rustVisibility(def.Node, src)}
+	if doc := ExtractDocAbove(src, def.StartLine, DocLangSlashSlash); doc != "" {
+		meta["doc"] = doc
+	}
 	result.Nodes = append(result.Nodes, &graph.Node{
 		ID: id, Kind: graph.KindType, Name: name,
 		FilePath: filePath, StartLine: def.StartLine + 1, EndLine: def.EndLine + 1,
 		Language: "rust",
+		Meta:     meta,
 	})
 	result.Edges = append(result.Edges, &graph.Edge{
 		From: fileID, To: id, Kind: graph.EdgeDefines, FilePath: filePath, Line: def.StartLine + 1,
 	})
 }
 
-func (e *RustExtractor) emitEnum(m parser.QueryResult, filePath, fileID string, result *parser.ExtractionResult, seen map[string]bool) {
+func (e *RustExtractor) emitEnum(m parser.QueryResult, filePath, fileID string, src []byte, result *parser.ExtractionResult, seen map[string]bool) {
 	name := m.Captures["enum.name"].Text
 	def := m.Captures["enum.def"]
 	id := filePath + "::" + name
@@ -367,18 +416,25 @@ func (e *RustExtractor) emitEnum(m parser.QueryResult, filePath, fileID string, 
 		return
 	}
 	seen[id] = true
+	meta := map[string]any{
+		"kind":       "enum",
+		"visibility": rustVisibility(def.Node, src),
+	}
+	if doc := ExtractDocAbove(src, def.StartLine, DocLangSlashSlash); doc != "" {
+		meta["doc"] = doc
+	}
 	result.Nodes = append(result.Nodes, &graph.Node{
 		ID: id, Kind: graph.KindType, Name: name,
 		FilePath: filePath, StartLine: def.StartLine + 1, EndLine: def.EndLine + 1,
 		Language: "rust",
-		Meta:     map[string]any{"kind": "enum"},
+		Meta:     meta,
 	})
 	result.Edges = append(result.Edges, &graph.Edge{
 		From: fileID, To: id, Kind: graph.EdgeDefines, FilePath: filePath, Line: def.StartLine + 1,
 	})
 }
 
-func (e *RustExtractor) emitTrait(m parser.QueryResult, filePath, fileID string, result *parser.ExtractionResult, seen map[string]bool, traitMethods map[string][]string) {
+func (e *RustExtractor) emitTrait(m parser.QueryResult, filePath, fileID string, src []byte, result *parser.ExtractionResult, seen map[string]bool, traitMethods map[string][]string) {
 	name := m.Captures["trait.name"].Text
 	def := m.Captures["trait.def"]
 	id := filePath + "::" + name
@@ -386,9 +442,12 @@ func (e *RustExtractor) emitTrait(m parser.QueryResult, filePath, fileID string,
 		return
 	}
 	seen[id] = true
-	meta := map[string]any{}
+	meta := map[string]any{"visibility": rustVisibility(def.Node, src)}
 	if methods, ok := traitMethods[name]; ok {
 		meta["methods"] = methods
+	}
+	if doc := ExtractDocAbove(src, def.StartLine, DocLangSlashSlash); doc != "" {
+		meta["doc"] = doc
 	}
 	result.Nodes = append(result.Nodes, &graph.Node{
 		ID: id, Kind: graph.KindInterface, Name: name,

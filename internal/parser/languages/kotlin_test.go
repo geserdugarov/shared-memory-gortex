@@ -388,3 +388,58 @@ fun main() {
 	require.NotNil(t, toStringCall.Meta, "expected Meta on toString call edge")
 	assert.Equal(t, "Order", toStringCall.Meta["receiver_type"])
 }
+
+func TestKotlinExtractor_DocAndVisibility(t *testing.T) {
+	src := []byte(`package x
+
+/**
+ * Greeter does the thing.
+ */
+class Greeter {
+    /** Says hi. */
+    fun hello() {}
+
+    private fun secret() {}
+}
+
+internal fun helper() {}
+`)
+	e := NewKotlinExtractor()
+	result, err := e.Extract("Greeter.kt", src)
+	require.NoError(t, err)
+
+	byID := map[string]*graph.Node{}
+	for _, n := range result.Nodes {
+		byID[n.ID] = n
+	}
+
+	greeter := byID["Greeter.kt::Greeter"]
+	require.NotNil(t, greeter)
+	if greeter.Meta["visibility"] != "public" {
+		t.Fatalf("Greeter.vis = %q", greeter.Meta["visibility"])
+	}
+	if greeter.Meta["doc"] != "Greeter does the thing." {
+		t.Fatalf("Greeter.doc = %q", greeter.Meta["doc"])
+	}
+
+	hello := byID["Greeter.kt::Greeter.hello"]
+	require.NotNil(t, hello)
+	if hello.Meta["visibility"] != "public" {
+		t.Fatalf("hello.vis = %q", hello.Meta["visibility"])
+	}
+	if hello.Meta["doc"] != "Says hi." {
+		t.Fatalf("hello.doc = %q", hello.Meta["doc"])
+	}
+
+	secret := byID["Greeter.kt::Greeter.secret"]
+	require.NotNil(t, secret)
+	if secret.Meta["visibility"] != "private" {
+		t.Fatalf("secret.vis = %q", secret.Meta["visibility"])
+	}
+
+	helper := byID["Greeter.kt::helper"]
+	require.NotNil(t, helper)
+	if helper.Meta["visibility"] != "internal" {
+		t.Fatalf("helper.vis = %q", helper.Meta["visibility"])
+	}
+}

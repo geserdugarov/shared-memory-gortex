@@ -116,7 +116,7 @@ func (e *PythonExtractor) Extract(filePath string, src []byte) (*parser.Extracti
 			e.emitFunction(m, filePath, fileID, src, result, seen)
 
 		case m.Captures["class.def"] != nil:
-			e.emitClass(m, filePath, fileID, result, seen)
+			e.emitClass(m, filePath, fileID, src, result, seen)
 
 		case m.Captures["import.def"] != nil:
 			e.emitImport(m, filePath, fileID, src, result, imports)
@@ -242,6 +242,9 @@ func (e *PythonExtractor) emitFunction(m parser.QueryResult, filePath, fileID st
 	def := m.Captures["func.def"]
 	startLine1 := def.StartLine + 1
 
+	doc := pyDocstringFromDef(def.Node, src)
+	visibility := VisibilityByUnderscore(name)
+
 	className := pyDirectClassParent(def.Node, src)
 	if className != "" {
 		id := filePath + "::" + className + "." + name
@@ -253,9 +256,13 @@ func (e *PythonExtractor) emitFunction(m parser.QueryResult, filePath, fileID st
 			ID: id, Kind: graph.KindMethod, Name: name,
 			FilePath: filePath, StartLine: startLine1, EndLine: def.EndLine + 1,
 			Language: "python", Meta: map[string]any{
-				"receiver":  className,
-				"signature": "def " + name + "(...)",
+				"receiver":   className,
+				"signature":  "def " + name + "(...)",
+				"visibility": visibility,
 			},
+		}
+		if doc != "" {
+			node.Meta["doc"] = doc
 		}
 		if def.Node != nil {
 			if rt := extractPyReturnType(def.Node, src); rt != "" {
@@ -279,17 +286,24 @@ func (e *PythonExtractor) emitFunction(m parser.QueryResult, filePath, fileID st
 		return
 	}
 	seen[id] = true
+	meta := map[string]any{
+		"signature":  "def " + name + "(...)",
+		"visibility": visibility,
+	}
+	if doc != "" {
+		meta["doc"] = doc
+	}
 	result.Nodes = append(result.Nodes, &graph.Node{
 		ID: id, Kind: graph.KindFunction, Name: name,
 		FilePath: filePath, StartLine: startLine1, EndLine: def.EndLine + 1,
-		Language: "python", Meta: map[string]any{"signature": "def " + name + "(...)"},
+		Language: "python", Meta: meta,
 	})
 	result.Edges = append(result.Edges, &graph.Edge{
 		From: fileID, To: id, Kind: graph.EdgeDefines, FilePath: filePath, Line: startLine1,
 	})
 }
 
-func (e *PythonExtractor) emitClass(m parser.QueryResult, filePath, fileID string, result *parser.ExtractionResult, seen map[string]bool) {
+func (e *PythonExtractor) emitClass(m parser.QueryResult, filePath, fileID string, src []byte, result *parser.ExtractionResult, seen map[string]bool) {
 	name := m.Captures["class.name"].Text
 	def := m.Captures["class.def"]
 	id := filePath + "::" + name
@@ -297,14 +311,53 @@ func (e *PythonExtractor) emitClass(m parser.QueryResult, filePath, fileID strin
 		return
 	}
 	seen[id] = true
+	meta := map[string]any{"visibility": VisibilityByUnderscore(name)}
+	if doc := pyDocstringFromDef(def.Node, src); doc != "" {
+		meta["doc"] = doc
+	}
 	result.Nodes = append(result.Nodes, &graph.Node{
 		ID: id, Kind: graph.KindType, Name: name,
 		FilePath: filePath, StartLine: def.StartLine + 1, EndLine: def.EndLine + 1,
 		Language: "python",
+		Meta:     meta,
 	})
 	result.Edges = append(result.Edges, &graph.Edge{
 		From: fileID, To: id, Kind: graph.EdgeDefines, FilePath: filePath, Line: def.StartLine + 1,
 	})
+}
+
+// pyDocstringFromDef returns the docstring of a function_definition or
+// class_definition node — the first string literal in the body block —
+// or "" when none is present. Returns "" for nil nodes.
+func pyDocstringFromDef(defNode *sitter.Node, src []byte) string {
+	if defNode == nil {
+		return ""
+	}
+	body := defNode.ChildByFieldName("body")
+	if body == nil {
+		return ""
+	}
+	for i := 0; i < int(body.NamedChildCount()); i++ {
+		stmt := body.NamedChild(i)
+		if stmt == nil {
+			continue
+		}
+		if stmt.Type() != "expression_statement" {
+			return ""
+		}
+		// Walk into expression_statement to find a string literal.
+		for j := 0; j < int(stmt.NamedChildCount()); j++ {
+			c := stmt.NamedChild(j)
+			if c == nil {
+				continue
+			}
+			if c.Type() == "string" {
+				return ExtractPyDocstring(c.Content(src))
+			}
+		}
+		return ""
+	}
+	return ""
 }
 
 // emitImport handles `import os`, `import os.path`, `import numpy as np`.

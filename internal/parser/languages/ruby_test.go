@@ -202,3 +202,42 @@ end
 	assert.True(t, names["instance"])
 	assert.True(t, names["class_method"])
 }
+
+func TestRubyExtractor_DocAndVisibility(t *testing.T) {
+	src := []byte(`# Greeter handles welcomes.
+class Greeter
+  # Says hi to the user.
+  def hello
+  end
+
+  def silent
+  end
+end
+`)
+	e := NewRubyExtractor()
+	result, err := e.Extract("greeter.rb", src)
+	require.NoError(t, err)
+
+	byID := map[string]*graph.Node{}
+	for _, n := range result.Nodes {
+		byID[n.ID] = n
+	}
+
+	greeter := byID["greeter.rb::Greeter"]
+	require.NotNil(t, greeter)
+	if greeter.Meta["visibility"] != "public" {
+		t.Fatalf("Greeter.vis = %q", greeter.Meta["visibility"])
+	}
+	if greeter.Meta["doc"] != "Greeter handles welcomes." {
+		t.Fatalf("Greeter.doc = %q", greeter.Meta["doc"])
+	}
+
+	hello := byID["greeter.rb::Greeter.hello"]
+	require.NotNil(t, hello)
+	if hello.Meta["doc"] != "Says hi to the user." {
+		t.Fatalf("hello.doc = %q", hello.Meta["doc"])
+	}
+	if hello.Meta["visibility"] != "public" {
+		t.Fatalf("hello.vis = %q", hello.Meta["visibility"])
+	}
+}

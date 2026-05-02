@@ -159,3 +159,65 @@ func TestSwiftExtractor_FreeFunction(t *testing.T) {
 	require.Len(t, funcs, 1)
 	assert.Equal(t, "greet", funcs[0].Name)
 }
+
+func TestSwiftExtractor_DocAndVisibility(t *testing.T) {
+	src := []byte(`/// The greeter.
+public class Greeter {
+    /// Says hi.
+    public func hello() {}
+
+    private func secret() {}
+}
+
+/// A protocol.
+public protocol Friendly {
+    func wave()
+}
+
+func internalHelper() {}
+`)
+	e := NewSwiftExtractor()
+	result, err := e.Extract("greeter.swift", src)
+	require.NoError(t, err)
+
+	byID := map[string]*graph.Node{}
+	for _, n := range result.Nodes {
+		byID[n.ID] = n
+	}
+
+	greeter := byID["greeter.swift::Greeter"]
+	require.NotNil(t, greeter)
+	if greeter.Meta["visibility"] != "public" {
+		t.Fatalf("Greeter.vis = %q", greeter.Meta["visibility"])
+	}
+	if greeter.Meta["doc"] != "The greeter." {
+		t.Fatalf("Greeter.doc = %q", greeter.Meta["doc"])
+	}
+
+	hello := byID["greeter.swift::Greeter.hello"]
+	require.NotNil(t, hello)
+	if hello.Meta["visibility"] != "public" {
+		t.Fatalf("hello.vis = %q", hello.Meta["visibility"])
+	}
+	if hello.Meta["doc"] != "Says hi." {
+		t.Fatalf("hello.doc = %q", hello.Meta["doc"])
+	}
+
+	secret := byID["greeter.swift::Greeter.secret"]
+	require.NotNil(t, secret)
+	if secret.Meta["visibility"] != "private" {
+		t.Fatalf("secret.vis = %q", secret.Meta["visibility"])
+	}
+
+	friendly := byID["greeter.swift::Friendly"]
+	require.NotNil(t, friendly)
+	if friendly.Meta["visibility"] != "public" {
+		t.Fatalf("Friendly.vis = %q", friendly.Meta["visibility"])
+	}
+
+	internalFn := byID["greeter.swift::internalHelper"]
+	require.NotNil(t, internalFn)
+	if internalFn.Meta["visibility"] != "internal" {
+		t.Fatalf("internalHelper.vis = %q", internalFn.Meta["visibility"])
+	}
+}

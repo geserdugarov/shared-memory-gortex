@@ -326,3 +326,70 @@ fn main() {
 	require.NotNil(t, totalCall.Meta, "expected Meta on total call edge")
 	assert.Equal(t, "Order", totalCall.Meta["receiver_type"])
 }
+
+func TestRsExtractor_DocAndVisibility(t *testing.T) {
+	src := []byte(`/// The greeter.
+///
+/// Used everywhere.
+pub fn greet() {}
+
+/// Internal helper.
+fn helper() {}
+
+/// Crate-only.
+pub(crate) fn restricted() {}
+
+/// The Server type.
+pub struct Server {}
+
+/// Trait Foo.
+pub trait Foo {}
+`)
+	e := NewRustExtractor()
+	result, err := e.Extract("lib.rs", src)
+	require.NoError(t, err)
+
+	byID := map[string]*graph.Node{}
+	for _, n := range result.Nodes {
+		byID[n.ID] = n
+	}
+
+	greet := byID["lib.rs::greet"]
+	require.NotNil(t, greet)
+	if greet.Meta["visibility"] != "public" {
+		t.Fatalf("greet.vis = %q", greet.Meta["visibility"])
+	}
+	if greet.Meta["doc"] != "The greeter." {
+		t.Fatalf("greet.doc = %q", greet.Meta["doc"])
+	}
+
+	helper := byID["lib.rs::helper"]
+	require.NotNil(t, helper)
+	if helper.Meta["visibility"] != "private" {
+		t.Fatalf("helper.vis = %q", helper.Meta["visibility"])
+	}
+
+	restricted := byID["lib.rs::restricted"]
+	require.NotNil(t, restricted)
+	if restricted.Meta["visibility"] != "internal" {
+		t.Fatalf("restricted.vis = %q", restricted.Meta["visibility"])
+	}
+
+	server := byID["lib.rs::Server"]
+	require.NotNil(t, server)
+	if server.Meta["visibility"] != "public" {
+		t.Fatalf("Server.vis = %q", server.Meta["visibility"])
+	}
+	if server.Meta["doc"] != "The Server type." {
+		t.Fatalf("Server.doc = %q", server.Meta["doc"])
+	}
+
+	foo := byID["lib.rs::Foo"]
+	require.NotNil(t, foo)
+	if foo.Meta["visibility"] != "public" {
+		t.Fatalf("Foo.vis = %q", foo.Meta["visibility"])
+	}
+	if foo.Meta["doc"] != "Trait Foo." {
+		t.Fatalf("Foo.doc = %q", foo.Meta["doc"])
+	}
+}

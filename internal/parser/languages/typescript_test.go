@@ -792,3 +792,76 @@ export class X {
 	// Should not panic; no assertion needed beyond parse cleanliness.
 	_ = result
 }
+
+func TestTSExtractor_DocAndVisibility(t *testing.T) {
+	src := []byte(`/**
+ * Greets the world.
+ */
+export function hello() {}
+
+/** internal helper. */
+function helper() {}
+
+/**
+ * Server class.
+ *
+ * @remarks fancy.
+ */
+export class Server {
+  private secret = "x";
+
+  /** start it up. */
+  public start() {}
+}
+`)
+	e := NewTypeScriptExtractor()
+	result, err := e.Extract("server.ts", src)
+	require.NoError(t, err)
+
+	byID := map[string]*graph.Node{}
+	for _, n := range result.Nodes {
+		byID[n.ID] = n
+	}
+
+	hello := byID["server.ts::hello"]
+	require.NotNil(t, hello)
+	if hello.Meta["doc"] != "Greets the world." {
+		t.Fatalf("hello.doc = %q", hello.Meta["doc"])
+	}
+	if hello.Meta["visibility"] != "public" {
+		t.Fatalf("hello.visibility = %q", hello.Meta["visibility"])
+	}
+
+	helper := byID["server.ts::helper"]
+	require.NotNil(t, helper)
+	if helper.Meta["visibility"] != "private" {
+		t.Fatalf("helper.visibility = %q", helper.Meta["visibility"])
+	}
+	if helper.Meta["doc"] != "internal helper." {
+		t.Fatalf("helper.doc = %q", helper.Meta["doc"])
+	}
+
+	server := byID["server.ts::Server"]
+	require.NotNil(t, server)
+	if server.Meta["visibility"] != "public" {
+		t.Fatalf("Server.visibility = %q", server.Meta["visibility"])
+	}
+	if server.Meta["doc"] != "Server class." {
+		t.Fatalf("Server.doc = %q", server.Meta["doc"])
+	}
+
+	start := byID["server.ts::Server.start"]
+	require.NotNil(t, start)
+	if start.Meta["visibility"] != "public" {
+		t.Fatalf("Server.start.visibility = %q", start.Meta["visibility"])
+	}
+	if start.Meta["doc"] != "start it up." {
+		t.Fatalf("Server.start.doc = %q", start.Meta["doc"])
+	}
+
+	secret := byID["server.ts::Server.secret"]
+	require.NotNil(t, secret)
+	if secret.Meta["visibility"] != "private" {
+		t.Fatalf("Server.secret.visibility = %q", secret.Meta["visibility"])
+	}
+}

@@ -157,10 +157,15 @@ func (e *PHPExtractor) extractClass(
 	seen[id] = true
 	startLine := int(node.StartPoint().Row) + 1
 	endLine := int(node.EndPoint().Row) + 1
+	meta := map[string]any{"visibility": VisibilityPublic}
+	if doc := ExtractDocAbove(src, int(node.StartPoint().Row), DocLangBlockStar); doc != "" {
+		meta["doc"] = doc
+	}
 	result.Nodes = append(result.Nodes, &graph.Node{
 		ID: id, Kind: graph.KindType, Name: className,
 		FilePath: filePath, StartLine: startLine, EndLine: endLine,
 		Language: "php",
+		Meta:     meta,
 	})
 	result.Edges = append(result.Edges, &graph.Edge{
 		From: fileNode.ID, To: id, Kind: graph.EdgeDefines, FilePath: filePath, Line: startLine,
@@ -213,10 +218,15 @@ func (e *PHPExtractor) extractInterface(
 	seen[id] = true
 	startLine := int(node.StartPoint().Row) + 1
 	endLine := int(node.EndPoint().Row) + 1
+	meta := map[string]any{"visibility": VisibilityPublic}
+	if doc := ExtractDocAbove(src, int(node.StartPoint().Row), DocLangBlockStar); doc != "" {
+		meta["doc"] = doc
+	}
 	result.Nodes = append(result.Nodes, &graph.Node{
 		ID: id, Kind: graph.KindInterface, Name: ifaceName,
 		FilePath: filePath, StartLine: startLine, EndLine: endLine,
 		Language: "php",
+		Meta:     meta,
 	})
 	result.Edges = append(result.Edges, &graph.Edge{
 		From: fileNode.ID, To: id, Kind: graph.EdgeDefines, FilePath: filePath, Line: startLine,
@@ -252,10 +262,15 @@ func (e *PHPExtractor) extractFunction(
 	seen[id] = true
 	startLine := int(node.StartPoint().Row) + 1
 	endLine := int(node.EndPoint().Row) + 1
+	meta := map[string]any{"visibility": VisibilityPublic}
+	if doc := ExtractDocAbove(src, int(node.StartPoint().Row), DocLangBlockStar); doc != "" {
+		meta["doc"] = doc
+	}
 	result.Nodes = append(result.Nodes, &graph.Node{
 		ID: id, Kind: graph.KindFunction, Name: funcName,
 		FilePath: filePath, StartLine: startLine, EndLine: endLine,
 		Language: "php",
+		Meta:     meta,
 	})
 	result.Edges = append(result.Edges, &graph.Edge{
 		From: fileNode.ID, To: id, Kind: graph.EdgeDefines, FilePath: filePath, Line: startLine,
@@ -289,11 +304,18 @@ func (e *PHPExtractor) extractMethod(
 		return
 	}
 	seen[id] = true
+	meta := map[string]any{
+		"receiver":   className,
+		"visibility": phpMemberVisibility(node, src),
+	}
+	if doc := ExtractDocAbove(src, int(node.StartPoint().Row), DocLangBlockStar); doc != "" {
+		meta["doc"] = doc
+	}
 	result.Nodes = append(result.Nodes, &graph.Node{
 		ID: id, Kind: graph.KindMethod, Name: methodName,
 		FilePath: filePath, StartLine: startLine, EndLine: endLine,
 		Language: "php",
-		Meta:     map[string]any{"receiver": className},
+		Meta:     meta,
 	})
 	result.Edges = append(result.Edges, &graph.Edge{
 		From: fileNode.ID, To: id, Kind: graph.EdgeDefines, FilePath: filePath, Line: startLine,
@@ -944,4 +966,31 @@ func emitAttributeEdges(attrs []phpAttribute, fromID, filePath string, fallbackL
 			},
 		})
 	}
+}
+
+// phpMemberVisibility returns the access modifier for a PHP class
+// member (method or property). PHP defaults to "public" when no
+// visibility modifier is present.
+func phpMemberVisibility(member *sitter.Node, src []byte) string {
+	if member == nil {
+		return VisibilityPublic
+	}
+	for i := 0; i < int(member.ChildCount()); i++ {
+		c := member.Child(i)
+		if c == nil {
+			continue
+		}
+		if c.Type() != "visibility_modifier" {
+			continue
+		}
+		switch strings.TrimSpace(c.Content(src)) {
+		case "public":
+			return VisibilityPublic
+		case "private":
+			return VisibilityPrivate
+		case "protected":
+			return VisibilityProtected
+		}
+	}
+	return VisibilityPublic
 }

@@ -100,10 +100,10 @@ func (e *RubyExtractor) Extract(filePath string, src []byte) (*parser.Extraction
 		switch {
 
 		case m.Captures["class.def"] != nil:
-			e.emitClass(m, filePath, fileID, result, seen)
+			e.emitClass(m, filePath, fileID, src, result, seen)
 
 		case m.Captures["mod.def"] != nil:
-			e.emitModule(m, filePath, fileID, result, seen)
+			e.emitModule(m, filePath, fileID, src, result, seen)
 
 		case m.Captures["method.def"] != nil:
 			e.emitMethod(m, filePath, fileID, src, result, seen)
@@ -163,7 +163,7 @@ func (e *RubyExtractor) Extract(filePath string, src []byte) (*parser.Extraction
 
 // --- Per-match emit helpers -----------------------------------------
 
-func (e *RubyExtractor) emitClass(m parser.QueryResult, filePath, fileID string, result *parser.ExtractionResult, seen map[string]bool) {
+func (e *RubyExtractor) emitClass(m parser.QueryResult, filePath, fileID string, src []byte, result *parser.ExtractionResult, seen map[string]bool) {
 	name := m.Captures["class.name"].Text
 	def := m.Captures["class.def"]
 	id := filePath + "::" + name
@@ -171,17 +171,22 @@ func (e *RubyExtractor) emitClass(m parser.QueryResult, filePath, fileID string,
 		return
 	}
 	seen[id] = true
+	meta := map[string]any{"visibility": VisibilityPublic}
+	if doc := ExtractDocAbove(src, def.StartLine, DocLangHash); doc != "" {
+		meta["doc"] = doc
+	}
 	result.Nodes = append(result.Nodes, &graph.Node{
 		ID: id, Kind: graph.KindType, Name: name,
 		FilePath: filePath, StartLine: def.StartLine + 1, EndLine: def.EndLine + 1,
 		Language: "ruby",
+		Meta:     meta,
 	})
 	result.Edges = append(result.Edges, &graph.Edge{
 		From: fileID, To: id, Kind: graph.EdgeDefines, FilePath: filePath, Line: def.StartLine + 1,
 	})
 }
 
-func (e *RubyExtractor) emitModule(m parser.QueryResult, filePath, fileID string, result *parser.ExtractionResult, seen map[string]bool) {
+func (e *RubyExtractor) emitModule(m parser.QueryResult, filePath, fileID string, src []byte, result *parser.ExtractionResult, seen map[string]bool) {
 	name := m.Captures["mod.name"].Text
 	def := m.Captures["mod.def"]
 	id := filePath + "::" + name
@@ -189,10 +194,15 @@ func (e *RubyExtractor) emitModule(m parser.QueryResult, filePath, fileID string
 		return
 	}
 	seen[id] = true
+	meta := map[string]any{"visibility": VisibilityPublic}
+	if doc := ExtractDocAbove(src, def.StartLine, DocLangHash); doc != "" {
+		meta["doc"] = doc
+	}
 	result.Nodes = append(result.Nodes, &graph.Node{
 		ID: id, Kind: graph.KindPackage, Name: name,
 		FilePath: filePath, StartLine: def.StartLine + 1, EndLine: def.EndLine + 1,
 		Language: "ruby",
+		Meta:     meta,
 	})
 	result.Edges = append(result.Edges, &graph.Edge{
 		From: fileID, To: id, Kind: graph.EdgeDefines, FilePath: filePath, Line: def.StartLine + 1,
@@ -215,13 +225,18 @@ func (e *RubyExtractor) emitMethod(m parser.QueryResult, filePath, fileID string
 			return
 		}
 		seen[id] = true
+		meta := map[string]any{
+			"receiver":   className,
+			"signature":  "def " + name,
+			"visibility": VisibilityPublic,
+		}
+		if doc := ExtractDocAbove(src, def.StartLine, DocLangHash); doc != "" {
+			meta["doc"] = doc
+		}
 		result.Nodes = append(result.Nodes, &graph.Node{
 			ID: id, Kind: graph.KindMethod, Name: name,
 			FilePath: filePath, StartLine: startLine1, EndLine: def.EndLine + 1,
-			Language: "ruby", Meta: map[string]any{
-				"receiver":  className,
-				"signature": "def " + name,
-			},
+			Language: "ruby", Meta: meta,
 		})
 		result.Edges = append(result.Edges, &graph.Edge{
 			From: fileID, To: id, Kind: graph.EdgeDefines, FilePath: filePath, Line: startLine1,
@@ -238,10 +253,17 @@ func (e *RubyExtractor) emitMethod(m parser.QueryResult, filePath, fileID string
 		return
 	}
 	seen[id] = true
+	meta := map[string]any{
+		"signature":  "def " + name,
+		"visibility": VisibilityPublic,
+	}
+	if doc := ExtractDocAbove(src, def.StartLine, DocLangHash); doc != "" {
+		meta["doc"] = doc
+	}
 	result.Nodes = append(result.Nodes, &graph.Node{
 		ID: id, Kind: graph.KindFunction, Name: name,
 		FilePath: filePath, StartLine: startLine1, EndLine: def.EndLine + 1,
-		Language: "ruby", Meta: map[string]any{"signature": "def " + name},
+		Language: "ruby", Meta: meta,
 	})
 	result.Edges = append(result.Edges, &graph.Edge{
 		From: fileID, To: id, Kind: graph.EdgeDefines, FilePath: filePath, Line: startLine1,

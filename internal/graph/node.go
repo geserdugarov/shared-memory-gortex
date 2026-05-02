@@ -67,6 +67,22 @@ func (n *Node) Brief() map[string]any {
 	if n.ProjectID != "" {
 		b["project_id"] = n.ProjectID
 	}
+	// Surface visibility and a short doc snippet when present — Brief
+	// is the listing projection used by search_symbols and find_usages,
+	// where these two fields meaningfully sharpen the result so the
+	// agent can decide without a follow-up get_symbol_source call.
+	if v, ok := n.Meta["visibility"].(string); ok && v != "" {
+		b["visibility"] = v
+	}
+	if d, ok := n.Meta["doc"].(string); ok && d != "" {
+		// Truncate doc to 80 chars in Brief — the full doc is on the
+		// node, this is just the listing teaser.
+		const briefDocCap = 80
+		if len(d) > briefDocCap {
+			d = d[:briefDocCap] + "…"
+		}
+		b["doc"] = d
+	}
 	return b
 }
 

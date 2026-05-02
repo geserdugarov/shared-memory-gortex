@@ -252,3 +252,60 @@ class MethodLevel {
 	assert.True(t, hasMethod)
 	assert.True(t, hasClass)
 }
+
+func TestPHPExtractor_DocAndVisibility(t *testing.T) {
+	src := []byte(`<?php
+
+/**
+ * Greeter does the thing.
+ */
+class Greeter {
+    /**
+     * Says hi.
+     */
+    public function hello() {}
+
+    private function secret() {}
+
+    protected function helper() {}
+}
+`)
+	e := NewPHPExtractor()
+	result, err := e.Extract("Greeter.php", src)
+	require.NoError(t, err)
+
+	byID := map[string]*graph.Node{}
+	for _, n := range result.Nodes {
+		byID[n.ID] = n
+	}
+
+	greeter := byID["Greeter.php::Greeter"]
+	require.NotNil(t, greeter)
+	if greeter.Meta["visibility"] != "public" {
+		t.Fatalf("Greeter.vis = %q", greeter.Meta["visibility"])
+	}
+	if greeter.Meta["doc"] != "Greeter does the thing." {
+		t.Fatalf("Greeter.doc = %q", greeter.Meta["doc"])
+	}
+
+	hello := byID["Greeter.php::Greeter.hello"]
+	require.NotNil(t, hello)
+	if hello.Meta["visibility"] != "public" {
+		t.Fatalf("hello.vis = %q", hello.Meta["visibility"])
+	}
+	if hello.Meta["doc"] != "Says hi." {
+		t.Fatalf("hello.doc = %q", hello.Meta["doc"])
+	}
+
+	secret := byID["Greeter.php::Greeter.secret"]
+	require.NotNil(t, secret)
+	if secret.Meta["visibility"] != "private" {
+		t.Fatalf("secret.vis = %q", secret.Meta["visibility"])
+	}
+
+	helper := byID["Greeter.php::Greeter.helper"]
+	require.NotNil(t, helper)
+	if helper.Meta["visibility"] != "protected" {
+		t.Fatalf("helper.vis = %q", helper.Meta["visibility"])
+	}
+}

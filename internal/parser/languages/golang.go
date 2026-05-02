@@ -204,7 +204,7 @@ func (e *GoExtractor) Extract(filePath string, src []byte) (*parser.ExtractionRe
 			e.emitTypeDecl(m, filePath, fileID, src, result, seenTypeName)
 
 		case m.Captures["alias.def"] != nil:
-			e.emitTypeAlias(m, filePath, fileID, result, seenTypeName)
+			e.emitTypeAlias(m, filePath, fileID, src, result, seenTypeName)
 
 		case m.Captures["import.spec"] != nil:
 			e.emitImport(m, filePath, fileID, result, imports)
@@ -467,6 +467,10 @@ func (e *GoExtractor) emitFunction(m parser.QueryResult, filePath, fileID string
 			node.Meta["return_type"] = rt
 		}
 	}
+	if doc := ExtractDocAbove(src, def.StartLine, DocLangSlashSlash); doc != "" {
+		node.Meta["doc"] = doc
+	}
+	node.Meta["visibility"] = VisibilityByCase(name)
 	scanGoPragmas(src, def.StartLine, node)
 	result.Nodes = append(result.Nodes, node)
 	result.Edges = append(result.Edges, &graph.Edge{
@@ -499,6 +503,10 @@ func (e *GoExtractor) emitMethod(m parser.QueryResult, filePath, fileID string, 
 			node.Meta["return_type"] = rt
 		}
 	}
+	if doc := ExtractDocAbove(src, def.StartLine, DocLangSlashSlash); doc != "" {
+		node.Meta["doc"] = doc
+	}
+	node.Meta["visibility"] = VisibilityByCase(name)
 	scanGoPragmas(src, def.StartLine, node)
 	result.Nodes = append(result.Nodes, node)
 	result.Edges = append(result.Edges, &graph.Edge{
@@ -534,14 +542,19 @@ func (e *GoExtractor) emitTypeDecl(m parser.QueryResult, filePath, fileID string
 		node.Meta = map[string]any{"methods": extractInterfaceMethods(body.Node, src)}
 	} else {
 		node.Kind = graph.KindType
+		node.Meta = map[string]any{}
 	}
+	if doc := ExtractDocAbove(src, def.StartLine, DocLangSlashSlash); doc != "" {
+		node.Meta["doc"] = doc
+	}
+	node.Meta["visibility"] = VisibilityByCase(name)
 	result.Nodes = append(result.Nodes, node)
 	result.Edges = append(result.Edges, &graph.Edge{
 		From: fileID, To: id, Kind: graph.EdgeDefines, FilePath: filePath, Line: def.StartLine + 1,
 	})
 }
 
-func (e *GoExtractor) emitTypeAlias(m parser.QueryResult, filePath, fileID string, result *parser.ExtractionResult, seen map[string]bool) {
+func (e *GoExtractor) emitTypeAlias(m parser.QueryResult, filePath, fileID string, src []byte, result *parser.ExtractionResult, seen map[string]bool) {
 	name := m.Captures["alias.name"].Text
 	if seen[name] {
 		return
@@ -549,11 +562,17 @@ func (e *GoExtractor) emitTypeAlias(m parser.QueryResult, filePath, fileID strin
 	seen[name] = true
 	def := m.Captures["alias.def"]
 	id := filePath + "::" + name
-	result.Nodes = append(result.Nodes, &graph.Node{
+	node := &graph.Node{
 		ID: id, Kind: graph.KindType, Name: name,
 		FilePath: filePath, StartLine: def.StartLine + 1, EndLine: def.EndLine + 1,
 		Language: "go",
-	})
+		Meta:     map[string]any{},
+	}
+	if doc := ExtractDocAbove(src, def.StartLine, DocLangSlashSlash); doc != "" {
+		node.Meta["doc"] = doc
+	}
+	node.Meta["visibility"] = VisibilityByCase(name)
+	result.Nodes = append(result.Nodes, node)
 	result.Edges = append(result.Edges, &graph.Edge{
 		From: fileID, To: id, Kind: graph.EdgeDefines, FilePath: filePath, Line: def.StartLine + 1,
 	})
@@ -601,6 +620,7 @@ func (e *GoExtractor) emitVar(m parser.QueryResult, filePath, fileID string, res
 		ID: id, Kind: graph.KindVariable, Name: name,
 		FilePath: filePath, StartLine: def.StartLine + 1, EndLine: def.EndLine + 1,
 		Language: "go",
+		Meta:     map[string]any{"visibility": VisibilityByCase(name)},
 	})
 	result.Edges = append(result.Edges, &graph.Edge{
 		From: fileID, To: id, Kind: graph.EdgeDefines, FilePath: filePath, Line: def.StartLine + 1,
@@ -624,6 +644,7 @@ func (e *GoExtractor) emitConst(m parser.QueryResult, filePath, fileID string, r
 		ID: id, Kind: graph.KindVariable, Name: name,
 		FilePath: filePath, StartLine: def.StartLine + 1, EndLine: def.EndLine + 1,
 		Language: "go",
+		Meta:     map[string]any{"visibility": VisibilityByCase(name)},
 	})
 	result.Edges = append(result.Edges, &graph.Edge{
 		From: fileID, To: id, Kind: graph.EdgeDefines, FilePath: filePath, Line: def.StartLine + 1,

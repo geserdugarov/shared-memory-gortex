@@ -7,6 +7,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"time"
 	"sort"
 	"strings"
 
@@ -107,8 +108,8 @@ func (s *Server) registerEnhancementTools() {
 	// analyze — unified graph analysis tool (dead_code, hotspots, cycles, would_create_cycle)
 	s.mcpServer.AddTool(
 		mcp.NewTool("analyze",
-			mcp.WithDescription("Unified graph analysis. kind=dead_code: symbols with zero incoming edges. kind=hotspots: high-complexity symbols by fan-in/out. kind=cycles: circular dependency chains. kind=would_create_cycle: check if a new edge would form a cycle (requires from_id, to_id). kind=todos: list KindTodo nodes with optional tag/assignee/ticket/has_assignee filters. kind=blame: run `git blame` against the indexed repo and stamp meta.last_authored on every symbol-level node. kind=coverage: parse a Go cover.out profile (path via `profile` arg) and stamp meta.coverage_pct on every executable symbol."),
-			mcp.WithString("kind", mcp.Required(), mcp.Description("Analysis kind: dead_code | hotspots | cycles | would_create_cycle | todos | blame | coverage")),
+			mcp.WithDescription("Unified graph analysis. kind=dead_code: symbols with zero incoming edges. kind=hotspots: high-complexity symbols by fan-in/out. kind=cycles: circular dependency chains. kind=would_create_cycle: check if a new edge would form a cycle (requires from_id, to_id). kind=todos: list KindTodo nodes with optional tag/assignee/ticket/has_assignee filters. kind=blame: run `git blame` against the indexed repo and stamp meta.last_authored on every symbol-level node. kind=coverage: parse a Go cover.out profile (path via `profile` arg) and stamp meta.coverage_pct on every executable symbol. kind=stale_code: list symbols whose meta.last_authored is older than the threshold (requires blame-enriched graph)."),
+			mcp.WithString("kind", mcp.Required(), mcp.Description("Analysis kind: dead_code | hotspots | cycles | would_create_cycle | todos | blame | coverage | stale_code")),
 			mcp.WithBoolean("compact", mcp.Description("One-line-per-result text output")),
 			mcp.WithString("format", mcp.Description("Output format: json (default) or gcx (GCX1 compact wire format, per-kind hand-tuned encoder)")),
 			mcp.WithBoolean("include_variables", mcp.Description("(dead_code) Include variable nodes (default false — usually false positives without data-flow analysis)")),
@@ -117,6 +118,9 @@ func (s *Server) registerEnhancementTools() {
 			mcp.WithString("from_id", mcp.Description("(would_create_cycle) Source symbol ID")),
 			mcp.WithString("to_id", mcp.Description("(would_create_cycle) Target symbol ID")),
 			mcp.WithString("profile", mcp.Description("(coverage) Path to a Go cover.out profile, absolute or relative to the indexed repo root")),
+			mcp.WithNumber("older_than", mcp.Description("(stale_code) Symbols last touched more than this many days ago — default 365")),
+			mcp.WithString("email", mcp.Description("(stale_code) Filter to a single author email")),
+			mcp.WithString("kinds", mcp.Description("(stale_code) Comma-separated kinds — default function,method; pass 'all' for every blame-eligible kind")),
 			mcp.WithString("tag", mcp.Description("(todos) Filter by tag — TODO / FIXME / HACK / XXX / NOTE — case-insensitive")),
 			mcp.WithString("assignee", mcp.Description("(todos) Filter by exact assignee — case-sensitive")),
 			mcp.WithString("ticket", mcp.Description("(todos) Filter by exact ticket reference — e.g. PROJ-42")),
@@ -608,8 +612,10 @@ func (s *Server) handleAnalyze(ctx context.Context, req mcp.CallToolRequest) (*m
 		return s.handleAnalyzeBlame(ctx, req)
 	case "coverage":
 		return s.handleAnalyzeCoverage(ctx, req)
+	case "stale_code":
+		return s.handleAnalyzeStaleCode(ctx, req)
 	default:
-		return mcp.NewToolResultError("unknown analyze kind: " + kind + " (expected: dead_code, hotspots, cycles, would_create_cycle, todos, blame, coverage)"), nil
+		return mcp.NewToolResultError("unknown analyze kind: " + kind + " (expected: dead_code, hotspots, cycles, would_create_cycle, todos, blame, coverage, stale_code)"), nil
 	}
 }
 
@@ -755,6 +761,145 @@ func (s *Server) handleAnalyzeCoverage(_ context.Context, req mcp.CallToolReques
 		"profile":      profileArg,
 		"module_path":  modulePath,
 	})
+}
+
+// handleAnalyzeStaleCode lists symbols whose meta.last_authored is
+// older than the threshold. Requires that blame enrichment has
+// already run (either through analyze kind=blame or `gortex enrich
+// blame`); symbols without authorship metadata are silently
+// skipped — they're either unenriched or hand-authored without git
+// history (test fixtures, generated code), and lumping them in
+// with "unchanged for ages" would be a lie.
+//
+// Filters:
+//
+//   - older_than: days, default 365. Symbols with a last-author
+//     timestamp older than now - older_than days are included.
+//   - email: exact author email match — useful for "find code
+//     authored by someone who has left the team."
+//   - kinds: comma-separated list, default function,method. Pass
+//     "all" to include every blame-eligible kind.
+//
+// Sorted oldest-first so the cleanup loop sees the staleness
+// gradient at a glance.
+func (s *Server) handleAnalyzeStaleCode(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	args := req.GetArguments()
+	olderThanDays := 365.0
+	if v, ok := args["older_than"].(float64); ok && v > 0 {
+		olderThanDays = v
+	}
+	emailFilter := strings.TrimSpace(stringArg(args, "email"))
+
+	allowedKinds := map[graph.NodeKind]struct{}{
+		graph.KindFunction: {},
+		graph.KindMethod:   {},
+	}
+	if k := strings.TrimSpace(stringArg(args, "kinds")); k != "" {
+		allowedKinds = parseAnalyzeKindsFilter(k)
+	}
+
+	cutoffSec := time.Now().Add(-time.Duration(olderThanDays*24) * time.Hour).Unix()
+
+	type staleRow struct {
+		ID        string `json:"id"`
+		File      string `json:"file"`
+		Line      int    `json:"line"`
+		Email     string `json:"email"`
+		Commit    string `json:"commit"`
+		Timestamp int64  `json:"timestamp"`
+		AgeDays   int    `json:"age_days"`
+	}
+	var rows []staleRow
+	for _, n := range s.graph.AllNodes() {
+		if _, ok := allowedKinds[n.Kind]; !ok {
+			continue
+		}
+		la, ok := n.Meta["last_authored"].(map[string]any)
+		if !ok {
+			continue
+		}
+		ts, ok := la["timestamp"].(int64)
+		if !ok {
+			// JSON unmarshal lands ints as float64 in some paths;
+			// accept both shapes so the analyzer works on graphs
+			// loaded from snapshots and graphs enriched in-process.
+			if f, isFloat := la["timestamp"].(float64); isFloat {
+				ts = int64(f)
+			} else {
+				continue
+			}
+		}
+		if ts > cutoffSec {
+			continue
+		}
+		email, _ := la["email"].(string)
+		if emailFilter != "" && email != emailFilter {
+			continue
+		}
+		commit, _ := la["commit"].(string)
+		ageSec := time.Now().Unix() - ts
+		rows = append(rows, staleRow{
+			ID:        n.ID,
+			File:      n.FilePath,
+			Line:      n.StartLine,
+			Email:     email,
+			Commit:    commit,
+			Timestamp: ts,
+			AgeDays:   int(ageSec / (24 * 3600)),
+		})
+	}
+	sort.Slice(rows, func(i, j int) bool {
+		return rows[i].Timestamp < rows[j].Timestamp
+	})
+
+	if isCompact(req) {
+		var b strings.Builder
+		for _, r := range rows {
+			fmt.Fprintf(&b, "%dd %s:%d", r.AgeDays, r.File, r.Line)
+			if r.Email != "" {
+				fmt.Fprintf(&b, " @%s", r.Email)
+			}
+			fmt.Fprintf(&b, " %s\n", r.ID)
+		}
+		if len(rows) == 0 {
+			b.WriteString("no stale code matched\n")
+		}
+		return mcp.NewToolResultText(b.String()), nil
+	}
+	return mcp.NewToolResultJSON(map[string]any{
+		"stale":          rows,
+		"total":          len(rows),
+		"older_than_day": olderThanDays,
+	})
+}
+
+// parseAnalyzeKindsFilter parses a comma-separated kinds argument
+// into the set used by handleAnalyzeStaleCode. The literal "all"
+// returns the broadest blame-eligible kind set so callers can drop
+// the default function/method scope when they want types and
+// fields included too.
+func parseAnalyzeKindsFilter(arg string) map[graph.NodeKind]struct{} {
+	out := map[graph.NodeKind]struct{}{}
+	for _, k := range strings.Split(arg, ",") {
+		k = strings.TrimSpace(strings.ToLower(k))
+		if k == "" {
+			continue
+		}
+		if k == "all" {
+			return map[graph.NodeKind]struct{}{
+				graph.KindFunction:    {},
+				graph.KindMethod:      {},
+				graph.KindType:        {},
+				graph.KindInterface:   {},
+				graph.KindField:       {},
+				graph.KindVariable:    {},
+				graph.KindConstant:    {},
+				graph.KindEnumMember:  {},
+			}
+		}
+		out[graph.NodeKind(k)] = struct{}{}
+	}
+	return out
 }
 
 // handleAnalyzeBlame runs `git blame -p` against the indexed

@@ -566,6 +566,24 @@ func (h *HTTPExtractor) Extract(filePath string, src []byte, nodes []*graph.Node
 			}
 			path = text[m[pat.pathGrp*2]:m[pat.pathGrp*2+1]]
 
+			// Go's net/http stdlib mux treats a trailing slash as a
+			// subtree match — `mux.HandleFunc("POST /v1/tools/", h)`
+			// serves every POST under /v1/tools/. Without this fix
+			// NormalizeHTTPPath strips the trailing slash and the ID
+			// becomes "http::POST::/v1/tools", which never pairs with
+			// per-route consumers like `fetch('/v1/tools/${name}')`
+			// (normalised to /v1/tools/{p1}). Append a parametric tail
+			// so the subtree shape matches parametric consumers in the
+			// same workspace. Limit to net/http: gin/echo/chi/fiber
+			// treat trailing slash as a distinct literal route, not a
+			// subtree.
+			subtree := false
+			if pat.role == RoleProvider && lang == "go" && pat.framework == "net/http" &&
+				len(path) > 1 && strings.HasSuffix(path, "/") {
+				path = strings.TrimRight(path, "/") + "/{rest}"
+				subtree = true
+			}
+
 			normPath := NormalizeHTTPPath(path)
 			contractID := fmt.Sprintf("http::%s::%s", method, normPath)
 
@@ -628,6 +646,9 @@ func (h *HTTPExtractor) Extract(filePath string, src []byte, nodes []*graph.Node
 			}
 			if handlerTrail != "" {
 				meta["handler_trail"] = handlerTrail
+			}
+			if subtree {
+				meta["subtree"] = true
 			}
 
 			c := Contract{

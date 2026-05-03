@@ -560,6 +560,139 @@ func wire(mux *http.ServeMux, h *Handler) {
 	}
 }
 
+// TestHTTPExtractor_Go_StdlibMux_Subtree pins the trailing-slash
+// rewrite. `mux.HandleFunc("POST /v1/tools/", h)` is Go's net/http
+// subtree-match form — every POST under /v1/tools/ hits this handler.
+// The contract ID must encode that as a parametric tail so it pairs
+// with consumers calling per-route paths like /v1/tools/{name} from a
+// sibling repo in the same workspace.
+func TestHTTPExtractor_Go_StdlibMux_Subtree(t *testing.T) {
+	src := []byte(`package main
+
+import "net/http"
+
+func wire(mux *http.ServeMux, h *Handler) {
+	mux.HandleFunc("POST /v1/tools/", h.handleToolCall)
+	mux.HandleFunc("GET /v1/static/", h.handleStatic)
+	mux.HandleFunc("GET /v1/health", h.handleHealth)
+	mux.Handle("/", root)
+}
+`)
+	nodes := makeNodes("main.go", []struct {
+		name       string
+		start, end int
+	}{
+		{"wire", 5, 10},
+	})
+	ext := &HTTPExtractor{}
+	contracts := ext.Extract("main.go", src, nodes, nil)
+	byID := make(map[string]Contract)
+	for _, c := range contracts {
+		byID[c.ID] = c
+	}
+
+	// Subtree handlers get a parametric tail and a meta.subtree marker.
+	for _, id := range []string{"http::POST::/v1/tools/{p1}", "http::GET::/v1/static/{p1}"} {
+		c, ok := byID[id]
+		if !ok {
+			t.Errorf("missing subtree contract %s; have: %v", id, keysOf(byID))
+			continue
+		}
+		if c.Meta["subtree"] != true {
+			t.Errorf("%s: meta.subtree want true, got %v", id, c.Meta["subtree"])
+		}
+	}
+
+	// Literal-path handlers stay literal — no parametric tail, no
+	// subtree marker.
+	if c, ok := byID["http::GET::/v1/health"]; !ok {
+		t.Errorf("literal contract /v1/health was rewritten; have: %v", keysOf(byID))
+	} else if c.Meta["subtree"] == true {
+		t.Errorf("/v1/health: meta.subtree should be unset, got true")
+	}
+
+	// Root-only Handle("/", root) must NOT become "/{p1}" — that's
+	// not a subtree, it's the catchall route.
+	if _, ok := byID["http::ANY::/{p1}"]; ok {
+		t.Errorf("root path / was wrongly rewritten as subtree; have: %v", keysOf(byID))
+	}
+}
+
+// TestHTTPExtractor_Go_Subtree_PairsWithParametricConsumer is the
+// end-to-end pin for the cross-repo bridge that motivated the
+// trailing-slash rewrite. A `gortex` provider declares
+// `mux.HandleFunc("POST /v1/tools/", h)` (subtree) and a `web`
+// consumer in the same workspace calls `fetch('/v1/tools/${name}')`
+// (parametric). Before the fix the IDs were `/v1/tools` vs
+// `/v1/tools/{p1}` and the matcher kept both as orphans. After the
+// fix they share `/v1/tools/{p1}` and pair as a CrossRepo link.
+func TestHTTPExtractor_Go_Subtree_PairsWithParametricConsumer(t *testing.T) {
+	providerSrc := []byte(`package main
+
+import "net/http"
+
+func wire(mux *http.ServeMux, h *Handler) {
+	mux.HandleFunc("POST /v1/tools/", h.handleToolCall)
+}
+`)
+	providerNodes := makeNodes("server.go", []struct {
+		name       string
+		start, end int
+	}{
+		{"wire", 5, 7},
+	})
+
+	consumerSrc := []byte(`async function callTool(name) {
+  return fetch(` + "`/v1/tools/${name}`" + `, { method: 'POST' });
+}
+`)
+	consumerNodes := makeNodes("api.ts", []struct {
+		name       string
+		start, end int
+	}{
+		{"callTool", 1, 3},
+	})
+
+	ext := &HTTPExtractor{}
+	provContracts := ext.Extract("server.go", providerSrc, providerNodes, nil)
+	consContracts := ext.Extract("api.ts", consumerSrc, consumerNodes, nil)
+
+	reg := NewRegistry()
+	for _, c := range provContracts {
+		c.RepoPrefix = "gortex"
+		c.WorkspaceID = "gortex"
+		c.ProjectID = "gortex"
+		reg.Add(c)
+	}
+	for _, c := range consContracts {
+		c.RepoPrefix = "web"
+		c.WorkspaceID = "gortex"
+		c.ProjectID = "gortex"
+		reg.Add(c)
+	}
+
+	result := Match(reg)
+
+	var paired *CrossLink
+	for i, m := range result.Matched {
+		if m.ContractID == "http::POST::/v1/tools/{p1}" {
+			paired = &result.Matched[i]
+			break
+		}
+	}
+	if paired == nil {
+		t.Fatalf("expected POST /v1/tools/{p1} pair; matches=%d, orphan_providers=%d, orphan_consumers=%d",
+			len(result.Matched), len(result.OrphanProviders), len(result.OrphanConsumers))
+	}
+	if !paired.CrossRepo {
+		t.Errorf("expected CrossRepo=true (provider in gortex, consumer in web)")
+	}
+	if paired.Provider.RepoPrefix != "gortex" || paired.Consumer.RepoPrefix != "web" {
+		t.Errorf("wrong repo wiring: provider=%s consumer=%s",
+			paired.Provider.RepoPrefix, paired.Consumer.RepoPrefix)
+	}
+}
+
 // keysOf returns the keys of a map of Contracts for failure diagnostics.
 func keysOf(m map[string]Contract) []string {
 	out := make([]string, 0, len(m))

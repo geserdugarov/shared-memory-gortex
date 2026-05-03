@@ -27,6 +27,11 @@ snapshots where the daemon isn't running. Equivalent to invoking the
 index.`,
 }
 
+var (
+	enrichBlameSnapshot    string
+	enrichCoverageSnapshot string
+)
+
 var enrichBlameCmd = &cobra.Command{
 	Use:   "blame [path]",
 	Short: "Stamp meta.last_authored on every symbol via git blame",
@@ -42,6 +47,10 @@ var enrichCoverageCmd = &cobra.Command{
 }
 
 func init() {
+	enrichBlameCmd.Flags().StringVar(&enrichBlameSnapshot, "snapshot", "",
+		"write the enriched graph as a gob.gz snapshot to this path")
+	enrichCoverageCmd.Flags().StringVar(&enrichCoverageSnapshot, "snapshot", "",
+		"write the enriched graph as a gob.gz snapshot to this path")
 	enrichCmd.AddCommand(enrichBlameCmd)
 	enrichCmd.AddCommand(enrichCoverageCmd)
 	rootCmd.AddCommand(enrichCmd)
@@ -75,10 +84,17 @@ func runEnrichBlame(_ *cobra.Command, args []string) error {
 		return fmt.Errorf("blame: %w", err)
 	}
 
-	return printEnrichResult(map[string]any{
+	result := map[string]any{
 		"enriched": count,
 		"root":     idx.RootPath(),
-	})
+	}
+	if enrichBlameSnapshot != "" {
+		if err := saveSnapshotTo(g, nil, nil, "gortex-enrich-blame", enrichBlameSnapshot, logger); err != nil {
+			return fmt.Errorf("write snapshot %s: %w", enrichBlameSnapshot, err)
+		}
+		result["snapshot"] = enrichBlameSnapshot
+	}
+	return printEnrichResult(result)
 }
 
 func runEnrichCoverage(_ *cobra.Command, args []string) error {
@@ -112,13 +128,20 @@ func runEnrichCoverage(_ *cobra.Command, args []string) error {
 	modulePath := coverage.ReadModulePath(idx.RootPath())
 	count := coverage.EnrichGraph(g, segments, modulePath)
 
-	return printEnrichResult(map[string]any{
+	result := map[string]any{
 		"enriched":    count,
 		"segments":    len(segments),
 		"profile":     profilePath,
 		"module_path": modulePath,
 		"root":        idx.RootPath(),
-	})
+	}
+	if enrichCoverageSnapshot != "" {
+		if err := saveSnapshotTo(g, nil, nil, "gortex-enrich-coverage", enrichCoverageSnapshot, logger); err != nil {
+			return fmt.Errorf("write snapshot %s: %w", enrichCoverageSnapshot, err)
+		}
+		result["snapshot"] = enrichCoverageSnapshot
+	}
+	return printEnrichResult(result)
 }
 
 // printEnrichResult emits the enrichment summary as JSON when stdout

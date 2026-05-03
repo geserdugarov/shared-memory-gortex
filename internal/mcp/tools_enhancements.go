@@ -108,8 +108,8 @@ func (s *Server) registerEnhancementTools() {
 	// analyze — unified graph analysis tool (dead_code, hotspots, cycles, would_create_cycle)
 	s.mcpServer.AddTool(
 		mcp.NewTool("analyze",
-			mcp.WithDescription("Unified graph analysis. kind=dead_code: symbols with zero incoming edges. kind=hotspots: high-complexity symbols by fan-in/out. kind=cycles: circular dependency chains. kind=would_create_cycle: check if a new edge would form a cycle (requires from_id, to_id). kind=todos: list KindTodo nodes with optional tag/assignee/ticket/has_assignee filters. kind=blame: run `git blame` against the indexed repo and stamp meta.last_authored on every symbol-level node. kind=coverage: parse a Go cover.out profile (path via `profile` arg) and stamp meta.coverage_pct on every executable symbol. kind=stale_code: list symbols whose meta.last_authored is older than the threshold (requires blame-enriched graph)."),
-			mcp.WithString("kind", mcp.Required(), mcp.Description("Analysis kind: dead_code | hotspots | cycles | would_create_cycle | todos | blame | coverage | stale_code")),
+			mcp.WithDescription("Unified graph analysis. kind=dead_code: symbols with zero incoming edges. kind=hotspots: high-complexity symbols by fan-in/out. kind=cycles: circular dependency chains. kind=would_create_cycle: check if a new edge would form a cycle (requires from_id, to_id). kind=todos: list KindTodo nodes with optional tag/assignee/ticket/has_assignee filters. kind=blame: run `git blame` against the indexed repo and stamp meta.last_authored on every symbol-level node. kind=coverage: parse a Go cover.out profile (path via `profile` arg) and stamp meta.coverage_pct on every executable symbol. kind=stale_code: list symbols whose meta.last_authored is older than the threshold (requires blame-enriched graph). kind=ownership: group blame metadata by author email — symbol count, files touched, oldest/newest timestamps; supports path_prefix scoping (requires blame-enriched graph)."),
+			mcp.WithString("kind", mcp.Required(), mcp.Description("Analysis kind: dead_code | hotspots | cycles | would_create_cycle | todos | blame | coverage | stale_code | ownership")),
 			mcp.WithBoolean("compact", mcp.Description("One-line-per-result text output")),
 			mcp.WithString("format", mcp.Description("Output format: json (default) or gcx (GCX1 compact wire format, per-kind hand-tuned encoder)")),
 			mcp.WithBoolean("include_variables", mcp.Description("(dead_code) Include variable nodes (default false — usually false positives without data-flow analysis)")),
@@ -120,7 +120,9 @@ func (s *Server) registerEnhancementTools() {
 			mcp.WithString("profile", mcp.Description("(coverage) Path to a Go cover.out profile, absolute or relative to the indexed repo root")),
 			mcp.WithNumber("older_than", mcp.Description("(stale_code) Symbols last touched more than this many days ago — default 365")),
 			mcp.WithString("email", mcp.Description("(stale_code) Filter to a single author email")),
-			mcp.WithString("kinds", mcp.Description("(stale_code) Comma-separated kinds — default function,method; pass 'all' for every blame-eligible kind")),
+			mcp.WithString("kinds", mcp.Description("(stale_code, ownership) Comma-separated kinds — default function,method; pass 'all' for every blame-eligible kind")),
+			mcp.WithNumber("min_symbols", mcp.Description("(ownership) Drop authors with fewer than this many symbols — default 1")),
+			mcp.WithString("path_prefix", mcp.Description("(ownership) Scope to nodes under this file-path prefix — e.g. 'internal/auth/'")),
 			mcp.WithString("tag", mcp.Description("(todos) Filter by tag — TODO / FIXME / HACK / XXX / NOTE — case-insensitive")),
 			mcp.WithString("assignee", mcp.Description("(todos) Filter by exact assignee — case-sensitive")),
 			mcp.WithString("ticket", mcp.Description("(todos) Filter by exact ticket reference — e.g. PROJ-42")),
@@ -614,8 +616,10 @@ func (s *Server) handleAnalyze(ctx context.Context, req mcp.CallToolRequest) (*m
 		return s.handleAnalyzeCoverage(ctx, req)
 	case "stale_code":
 		return s.handleAnalyzeStaleCode(ctx, req)
+	case "ownership":
+		return s.handleAnalyzeOwnership(ctx, req)
 	default:
-		return mcp.NewToolResultError("unknown analyze kind: " + kind + " (expected: dead_code, hotspots, cycles, would_create_cycle, todos, blame, coverage, stale_code)"), nil
+		return mcp.NewToolResultError("unknown analyze kind: " + kind + " (expected: dead_code, hotspots, cycles, would_create_cycle, todos, blame, coverage, stale_code, ownership)"), nil
 	}
 }
 
@@ -900,6 +904,138 @@ func parseAnalyzeKindsFilter(arg string) map[graph.NodeKind]struct{} {
 		out[graph.NodeKind(k)] = struct{}{}
 	}
 	return out
+}
+
+// handleAnalyzeOwnership groups blame metadata by author email and
+// returns one row per author with the symbol count, files
+// touched, and the oldest/newest last-authored timestamp seen.
+// Requires a blame-enriched graph (analyze kind=blame or `gortex
+// enrich blame`) — symbols without authorship metadata are
+// silently skipped, same as handleAnalyzeStaleCode.
+//
+// Filters:
+//
+//   - min_symbols: drop authors below this symbol count (default 1).
+//     Useful for excluding drive-by contributions on large repos.
+//   - kinds: comma-separated kind list, default function,method.
+//     Pass "all" to include every blame-eligible kind.
+//   - path_prefix: scope to nodes under this file-path prefix —
+//     e.g. "internal/auth/" to ask "who owns the auth package".
+//
+// Sorted descending by symbol count so the top owners appear
+// first. The combination (path_prefix + min_symbols + sorted
+// output) is the cleanup-loop's "who do I ping for review on
+// this area" query without needing a CODEOWNERS file.
+func (s *Server) handleAnalyzeOwnership(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	args := req.GetArguments()
+	minSymbols := 1
+	if v, ok := args["min_symbols"].(float64); ok && v > 0 {
+		minSymbols = int(v)
+	}
+	pathPrefix := strings.TrimSpace(stringArg(args, "path_prefix"))
+
+	allowedKinds := map[graph.NodeKind]struct{}{
+		graph.KindFunction: {},
+		graph.KindMethod:   {},
+	}
+	if k := strings.TrimSpace(stringArg(args, "kinds")); k != "" {
+		allowedKinds = parseAnalyzeKindsFilter(k)
+	}
+
+	type ownerStats struct {
+		Email     string `json:"email"`
+		Symbols   int    `json:"symbols"`
+		Files     int    `json:"files"`
+		OldestTS  int64  `json:"oldest_timestamp"`
+		NewestTS  int64  `json:"newest_timestamp"`
+		fileSet   map[string]struct{}
+	}
+	byEmail := map[string]*ownerStats{}
+
+	for _, n := range s.graph.AllNodes() {
+		if _, ok := allowedKinds[n.Kind]; !ok {
+			continue
+		}
+		if pathPrefix != "" && !strings.HasPrefix(n.FilePath, pathPrefix) {
+			continue
+		}
+		la, ok := n.Meta["last_authored"].(map[string]any)
+		if !ok {
+			continue
+		}
+		email, _ := la["email"].(string)
+		if email == "" {
+			continue
+		}
+		ts := tsFromMeta(la["timestamp"])
+		if ts == 0 {
+			continue
+		}
+		stats, ok := byEmail[email]
+		if !ok {
+			stats = &ownerStats{
+				Email:    email,
+				OldestTS: ts,
+				NewestTS: ts,
+				fileSet:  map[string]struct{}{},
+			}
+			byEmail[email] = stats
+		}
+		stats.Symbols++
+		stats.fileSet[n.FilePath] = struct{}{}
+		if ts < stats.OldestTS {
+			stats.OldestTS = ts
+		}
+		if ts > stats.NewestTS {
+			stats.NewestTS = ts
+		}
+	}
+
+	rows := make([]*ownerStats, 0, len(byEmail))
+	for _, s := range byEmail {
+		s.Files = len(s.fileSet)
+		s.fileSet = nil // hide from JSON output
+		if s.Symbols < minSymbols {
+			continue
+		}
+		rows = append(rows, s)
+	}
+	sort.Slice(rows, func(i, j int) bool {
+		if rows[i].Symbols != rows[j].Symbols {
+			return rows[i].Symbols > rows[j].Symbols
+		}
+		return rows[i].Email < rows[j].Email
+	})
+
+	if isCompact(req) {
+		var b strings.Builder
+		for _, r := range rows {
+			fmt.Fprintf(&b, "%-5d %-3d %s\n", r.Symbols, r.Files, r.Email)
+		}
+		if len(rows) == 0 {
+			b.WriteString("no owners matched\n")
+		}
+		return mcp.NewToolResultText(b.String()), nil
+	}
+	return mcp.NewToolResultJSON(map[string]any{
+		"owners": rows,
+		"total":  len(rows),
+	})
+}
+
+// tsFromMeta normalises the timestamp field across the int64
+// (in-process enrichment) and float64 (gob-decoded snapshot)
+// shapes. Returns 0 when the value is missing or the wrong type
+// — callers treat 0 as "skip this node" since blame timestamps
+// are always positive.
+func tsFromMeta(raw any) int64 {
+	switch v := raw.(type) {
+	case int64:
+		return v
+	case float64:
+		return int64(v)
+	}
+	return 0
 }
 
 // handleAnalyzeBlame runs `git blame -p` against the indexed

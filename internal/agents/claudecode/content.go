@@ -196,9 +196,33 @@ Quick reference for all Gortex MCP tools and the knowledge graph schema.
 ### Code Quality
 | Tool | What it gives you |
 |------|-------------------|
-| analyze | Unified graph analysis. kind=dead_code, hotspots, cycles, or would_create_cycle |
+| analyze | Unified graph analysis. Supported kinds: dead_code, hotspots, cycles, would_create_cycle, todos, blame, coverage, stale_code, ownership, coverage_gaps, coverage_summary, stale_flags, releases, cgo_users, wasm_users, orphan_tables, unreferenced_tables, channel_ops, goroutine_spawns, field_writers, annotation_users, config_readers, event_emitters, error_surface |
+| analyze kind=dead_code | Symbols with zero incoming edges (excludes entry points, tests, exports) |
+| analyze kind=hotspots | Over-coupled symbols ranked by fan-in, fan-out, and community crossings |
+| analyze kind=cycles | Tarjan's SCC with severity classification |
+| analyze kind=would_create_cycle | Pre-flight check before adding a new dependency |
+| analyze kind=todos | KindTodo nodes; filter by tag/assignee/ticket |
+| analyze kind=blame | Stamps meta.last_authored on every blame-eligible node |
+| analyze kind=coverage | Stamps meta.coverage_pct on executable symbols from cover.out |
+| analyze kind=stale_code | Symbols whose last-author timestamp is older than ` + "`older_than`" + ` days |
+| analyze kind=ownership | Per-author rollup with symbol/file counts and oldest/newest TS |
+| analyze kind=coverage_gaps | Symbols inside [min_pct, max_pct) — undertested code |
+| analyze kind=coverage_summary | Per-directory coverage rollup (avg, covered, partial, uncovered) |
+| analyze kind=stale_flags | Feature flags whose every toggling caller is older than ` + "`older_than`" + ` days |
+| analyze kind=releases | Stamps meta.added_in on file nodes from git tags |
+| analyze kind=cgo_users / wasm_users | Files that import C / use #[wasm_bindgen] |
+| analyze kind=orphan_tables | Tables queried (EdgeQueries) but missing a migration (EdgeProvides) |
+| analyze kind=unreferenced_tables | Tables provided by a migration but with zero EdgeQueries |
+| analyze kind=channel_ops | Channels grouped by EdgeSends / EdgeRecvs — producer/consumer mismatches |
+| analyze kind=goroutine_spawns | EdgeSpawns grouped by spawned target + mode (goroutine/async/promise) |
+| analyze kind=field_writers | Mutability hotspots — fields ranked by EdgeWrites; pass ` + "`id`" + ` for one field |
+| analyze kind=annotation_users | EdgeAnnotated rollup; pass ` + "`id`" + ` or ` + "`name`" + ` to scope (e.g. @Deprecated) |
+| analyze kind=config_readers | config_key nodes grouped by EdgeReadsConfig; ` + "`name`" + ` filter |
+| analyze kind=event_emitters | Event/log/metric emit sites grouped by EdgeEmits; ` + "`level`" + `, ` + "`name`" + ` filters |
+| analyze kind=error_surface | Function/method nodes with their EdgeThrows targets — refactor blast radius |
 | index_health | Health score, parse failures, stale files, language coverage |
 | get_symbol_history | Symbols modified this session with counts; flags churning (3+ edits) |
+| gortex enrich blame\|coverage\|releases\|all (CLI) | Bulk-stamp the graph with the metadata that stale_*/coverage_*/ownership/releases analyzers need |
 
 ### Code Generation
 | Tool | What it gives you |
@@ -234,8 +258,15 @@ Quick reference for all Gortex MCP tools and the knowledge graph schema.
 
 ## Graph Schema
 
-**Node kinds:** file, function, method, type, interface, variable, import, package, contract
-**Edge kinds:** calls, imports, defines, implements, extends, references, member_of, instantiates, provides, consumes
+**Node kinds:**
+- Code structure: file, package, function, method, type, interface, field, variable, constant, import, contract, param, closure, enum_member, generic_param
+- Coverage extensions: module (ecosystem deps), table / column (db schema), config_key (env/viper/cli), flag (feature flags), event (logs/metrics/spans), migration, fixture (test data), todo (TODO/FIXME comments), team (CODEOWNERS), license, release (tag boundaries)
+
+**Edge kinds:**
+- Calls / structure: calls, imports, defines, implements, extends, references, member_of, instantiates, provides, consumes, composes, aliases, typed_as, returns, captures, param_of
+- Concurrency: spawns (goroutine/async/promise), sends / recvs (channels)
+- Mutation: reads / writes (fields), reads_config / writes_config
+- Metadata: annotated (decorators), emits (events), throws (errors), queries (SQL), reads_col / writes_col, toggles_flag, depends_on_module, matches (fixtures), generated_by, tests (test → tested symbol), covered_by, owns (CODEOWNERS), authored, licensed_as
 `
 
 const commandExplore = `# Exploring Codebases with Gortex
@@ -283,15 +314,21 @@ const commandDebug = `# Debugging with Gortex
 
 ## Debugging Patterns
 
-| Symptom              | Gortex Approach |
-| -------------------- | --------------- |
-| Error message        | search_symbols for error-related names -> get_callers on throw sites |
-| Wrong return value   | get_call_chain on the function -> trace callees for data flow |
-| Intermittent failure | get_editing_context -> look for external calls, async deps |
-| Performance issue    | find_usages -> find symbols with many callers (hot paths) |
-| Recent regression    | detect_changes -> see what your changes affect. get_symbol_history flags symbols edited 3+ times this session |
-| Flaky test           | get_untested_symbols near the suspect -> find coverage gaps the flake may hide |
-| Stale index suspect  | index_health -> parse failures and stale files can mask the real bug |
+| Symptom                 | Gortex Approach |
+| ----------------------- | --------------- |
+| Error message           | search_symbols for error-related names -> get_callers on throw sites; analyze kind=error_surface to map who throws what |
+| Wrong return value      | get_call_chain on the function -> trace callees for data flow |
+| Intermittent failure    | get_editing_context -> look for external calls, async deps; analyze kind=goroutine_spawns to find unowned background work |
+| Channel deadlock        | analyze kind=channel_ops -> channels with sends but no receivers (or vice versa) |
+| Performance issue       | find_usages -> find symbols with many callers (hot paths) |
+| Recent regression       | detect_changes -> see what your changes affect. get_symbol_history flags symbols edited 3+ times this session |
+| Flaky test              | get_untested_symbols near the suspect -> find coverage gaps the flake may hide |
+| Stale index suspect     | index_health -> parse failures and stale files can mask the real bug |
+| Stale-flag suspect      | analyze kind=stale_flags -> flags with every caller untouched for ` + "`older_than`" + ` days are dead-rollout candidates |
+| Config drift            | analyze kind=config_readers -> who reads this env/viper key? Surfaces forgotten readers |
+| Event/log volume spike  | analyze kind=event_emitters with level=error -> find every site that logs an error |
+| Mutation race suspicion | analyze kind=field_writers id=<field> -> every function that writes the contended field |
+| Annotation drift        | analyze kind=annotation_users name=Deprecated -> every site still using a deprecated API |
 `
 
 const commandImpact = `# Impact Analysis with Gortex
@@ -302,13 +339,16 @@ const commandImpact = `# Impact Analysis with Gortex
 1. search_symbols({query: "X"})                                     -> Find the symbol ID
 2. explain_change_impact({ids: "<id1>, <id2>"})                     -> Risk-tiered blast radius
 3. get_dependents({id: "<symbol-id>", depth: 3})                    -> Detailed dependent tree
-4. verify_change({id: "<id>", new_signature: "..."})                -> Check callers + interface implementors for signature-level breaks
-5. contracts({action: "check"})                                     -> Cross-repo API breakage (HTTP/gRPC/GraphQL/topics)
-6. analyze({kind: "would_create_cycle", from: "<a>", to: "<b>"})    -> Before adding a new dep
-7. get_test_targets({ids: ["<id1>", "<id2>"]})                      -> Tests to re-run (includes cross-repo)
-8. check_guards({ids: ["<id1>"]})                                   -> Project guard rules from .gortex.yaml
-9. detect_changes({scope: "staged"})                                -> Pre-commit scope check
-10. diff_context({scope: "staged"})                                 -> Graph-enriched diff for review
+4. analyze({kind: "ownership", path_prefix: "<dir>/"})              -> Who owns this area (review pinging)
+5. verify_change({id: "<id>", new_signature: "..."})                -> Check callers + interface implementors for signature-level breaks
+6. contracts({action: "check"})                                     -> Cross-repo API breakage (HTTP/gRPC/GraphQL/topics)
+7. analyze({kind: "would_create_cycle", from: "<a>", to: "<b>"})    -> Before adding a new dep
+8. analyze({kind: "error_surface", path_prefix: "<dir>/"})          -> What error surface does this area produce — widening risk
+9. get_test_targets({ids: ["<id1>", "<id2>"]})                      -> Tests to re-run (includes cross-repo)
+10. analyze({kind: "coverage_gaps", path_prefix: "<dir>/"})         -> Undertested code in the change area — extra-risky refactor zones
+11. check_guards({ids: ["<id1>"]})                                  -> Project guard rules from .gortex.yaml
+12. detect_changes({scope: "staged"})                               -> Pre-commit scope check
+13. diff_context({scope: "staged"})                                 -> Graph-enriched diff for review
 ` + "```" + `
 
 ## Understanding Output
@@ -326,8 +366,11 @@ const commandImpact = `# Impact Analysis with Gortex
 - Review risk level (LOW/MEDIUM/HIGH/CRITICAL)
 - Check by_depth: d=1 items WILL BREAK
 - Note affected_processes and affected_communities
+- analyze kind=ownership path_prefix=<dir>/ — who should review (pinging policy without CODEOWNERS)
 - verify_change for every signature change (catches contract violations across repos)
 - contracts action=check when changing HTTP routes, gRPC methods, topics, env contracts
+- analyze kind=error_surface path_prefix=<dir>/ — confirm the change does not widen the error surface
+- analyze kind=coverage_gaps path_prefix=<dir>/ — areas with weak coverage need extra scrutiny
 - check_guards so team conventions from .gortex.yaml block bad changes early
 - get_test_targets to see which test files need re-running
 - Before commit: detect_changes to verify scope, diff_context for graph-enriched review
@@ -340,14 +383,16 @@ const commandRefactor = `# Refactoring with Gortex
 ` + "```" + `
 1. search_symbols({query: "X"})                                     -> Find the symbol ID
 2. explain_change_impact({ids: "<id>"})                             -> Map blast radius
-3. verify_change({id: "<id>", new_signature: "..."})                -> Catch contract violations in callers + implementors
-4. get_editing_context({path: "<file>"})                            -> See all symbols and relationships
-5. find_usages({id: "<id>"})                                        -> Every reference to change
-6. get_edit_plan({ids: ["<id1>", "<id2>"]})                         -> Dependency-ordered file list
-7. batch_edit({edits: [...]})                                       -> Apply edits in order, re-indexing between steps
-8. check_guards({ids: [...]})                                       -> Post-edit: team conventions from .gortex.yaml
-9. get_test_targets({ids: [...]})                                   -> Tests to re-run (cross-repo aware)
-10. detect_changes({scope: "all"})                                  -> Verify scope; diff_context for review
+3. analyze({kind: "ownership", path_prefix: "<dir>/"})              -> Who should review (pinging policy)
+4. analyze({kind: "coverage_gaps", path_prefix: "<dir>/"})          -> Where is the refactor risky (poor coverage)
+5. verify_change({id: "<id>", new_signature: "..."})                -> Catch contract violations in callers + implementors
+6. get_editing_context({path: "<file>"})                            -> See all symbols and relationships
+7. find_usages({id: "<id>"})                                        -> Every reference to change
+8. get_edit_plan({ids: ["<id1>", "<id2>"]})                         -> Dependency-ordered file list
+9. batch_edit({edits: [...]})                                       -> Apply edits in order, re-indexing between steps
+10. check_guards({ids: [...]})                                      -> Post-edit: team conventions from .gortex.yaml
+11. get_test_targets({ids: [...]})                                  -> Tests to re-run (cross-repo aware)
+12. detect_changes({scope: "all"})                                  -> Verify scope; diff_context for review
 ` + "```" + `
 
 ## Rename Symbol

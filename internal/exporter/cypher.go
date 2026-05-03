@@ -87,7 +87,7 @@ func writeCypherNode(w io.Writer, n *graph.Node) error {
 		if isReservedNodeKey(e.Key) {
 			continue
 		}
-		props = append(props, propPair{e.Key, e.Value})
+		props = append(props, propPair(e))
 	}
 
 	_, err := fmt.Fprintf(w, "CREATE (:%s:GortexNode %s);\n", label, cypherProps(props))
@@ -121,7 +121,7 @@ func writeCypherEdge(w io.Writer, e *graph.Edge) error {
 		if isReservedEdgeKey(m.Key) {
 			continue
 		}
-		props = append(props, propPair{m.Key, m.Value})
+		props = append(props, propPair(m))
 	}
 
 	_, err := fmt.Fprintf(w,

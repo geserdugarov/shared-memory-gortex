@@ -119,6 +119,25 @@ func buildPostTaskBriefing(port int) string {
 		sb.WriteString("\n")
 	}
 
+	// Coverage gaps among changed symbols. Silent when the graph carries
+	// no coverage_pct meta (the analyzer returns "no coverage gaps
+	// matched" or just an empty body) — we don't want to nag when the
+	// repo simply doesn't run `gortex enrich coverage`.
+	if gaps := renderCoverageGapsHits(port, ids); gaps != "" {
+		sb.WriteString("### Coverage Gaps (among changed symbols)\n\n")
+		sb.WriteString(gaps)
+		sb.WriteString("\n")
+	}
+
+	// Stale-flag regression check. Silent unless one of the changed
+	// symbols is itself a flag site or toggles one — pointing the agent
+	// at flag rollouts they may have just touched.
+	if flags := renderStaleFlagHits(port, ids); flags != "" {
+		sb.WriteString("### Stale Flag Sites Touched\n\n")
+		sb.WriteString(flags)
+		sb.WriteString("\n")
+	}
+
 	// Contract mismatches.
 	if contracts := renderContractMismatches(port); contracts != "" {
 		sb.WriteString("### API Contract Issues\n\n")
@@ -181,6 +200,87 @@ func renderDeadCodeHits(port int, ids []string) string {
 		}
 		// Each compact line starts with the symbol descriptor including the
 		// file path — we substring-match any of the changed IDs.
+		for id := range idSet {
+			if strings.Contains(line, id) {
+				hits = append(hits, line)
+				break
+			}
+		}
+	}
+	if len(hits) == 0 {
+		return ""
+	}
+	if len(hits) > 8 {
+		hits = hits[:8]
+	}
+	return strings.Join(hits, "\n") + "\n"
+}
+
+// renderCoverageGapsHits filters analyze:coverage_gaps results to
+// the intersection with currently-changed symbols. Silent when no
+// changed symbol carries coverage_pct (i.e. coverage hasn't been
+// hydrated for this graph) or none of the changed symbols are
+// undertested. The agent gets a nudge precisely when a coverage
+// gap was just touched — not a noisy package-wide rollup.
+func renderCoverageGapsHits(port int, ids []string) string {
+	raw := callServerTool(port, "analyze", map[string]any{
+		"kind":    "coverage_gaps",
+		"compact": true,
+	})
+	raw = strings.TrimSpace(raw)
+	if raw == "" || strings.HasPrefix(raw, "no coverage gaps") {
+		return ""
+	}
+
+	idSet := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		idSet[id] = true
+	}
+	var hits []string
+	for _, line := range strings.Split(raw, "\n") {
+		if line == "" {
+			continue
+		}
+		for id := range idSet {
+			if strings.Contains(line, id) {
+				hits = append(hits, line)
+				break
+			}
+		}
+	}
+	if len(hits) == 0 {
+		return ""
+	}
+	if len(hits) > 8 {
+		hits = hits[:8]
+	}
+	return strings.Join(hits, "\n") + "\n"
+}
+
+// renderStaleFlagHits filters analyze:stale_flags results to the
+// intersection with currently-changed symbols. Silent unless one
+// of the changed symbols is a flag site (its id appears in the
+// stale_flags output). Useful for catching a refactor that
+// inadvertently touched a flag rollout that's been quiet for ages.
+func renderStaleFlagHits(port int, ids []string) string {
+	raw := callServerTool(port, "analyze", map[string]any{
+		"kind":    "stale_flags",
+		"compact": true,
+	})
+	raw = strings.TrimSpace(raw)
+	if raw == "" || strings.HasPrefix(raw, "no stale flags") {
+		return ""
+	}
+
+	idSet := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		idSet[id] = true
+	}
+	var hits []string
+	for _, line := range strings.Split(raw, "\n") {
+		if line == "" {
+			continue
+		}
 		for id := range idSet {
 			if strings.Contains(line, id) {
 				hits = append(hits, line)

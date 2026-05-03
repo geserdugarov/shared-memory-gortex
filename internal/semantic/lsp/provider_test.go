@@ -104,7 +104,7 @@ func (f *fakeLSPServer) run(in *bufio.Reader, out io.Writer) {
 		if err != nil {
 			continue
 		}
-		fmt.Fprintf(out, "Content-Length: %d\r\n\r\n", len(data))
+		_, _ = fmt.Fprintf(out, "Content-Length: %d\r\n\r\n", len(data))
 		_, _ = out.Write(data)
 	}
 }

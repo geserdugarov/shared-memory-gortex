@@ -381,6 +381,102 @@ func encodeAnalyze(kind string, payload any) ([]byte, error) {
 			}
 		}
 		return buf.Bytes(), enc.Close()
+	case "channel_ops":
+		items, _ := payload.([]channelOpItem)
+		enc := newGCX(&buf, "analyze.channel_ops",
+			[]string{"channel", "sends", "recvs", "senders", "receivers"},
+			"count", fmt.Sprintf("%d", len(items)),
+		)
+		for _, it := range items {
+			if err := enc.WriteRow(it.Channel, it.Sends, it.Recvs, it.Senders, it.Receivers); err != nil {
+				return nil, err
+			}
+		}
+		return buf.Bytes(), enc.Close()
+	case "goroutine_spawns":
+		items, _ := payload.([]spawnItem)
+		enc := newGCX(&buf, "analyze.goroutine_spawns",
+			[]string{"target", "mode", "spawns", "spawners"},
+			"count", fmt.Sprintf("%d", len(items)),
+		)
+		for _, it := range items {
+			if err := enc.WriteRow(it.Target, it.Mode, it.Spawns, it.Spawners); err != nil {
+				return nil, err
+			}
+		}
+		return buf.Bytes(), enc.Close()
+	case "field_writers":
+		items, _ := payload.([]fieldWriterItem)
+		enc := newGCX(&buf, "analyze.field_writers",
+			[]string{"field", "writes", "writers"},
+			"count", fmt.Sprintf("%d", len(items)),
+		)
+		for _, it := range items {
+			if err := enc.WriteRow(it.Field, it.Writes, it.Writers); err != nil {
+				return nil, err
+			}
+		}
+		return buf.Bytes(), enc.Close()
+	case "annotation_users":
+		items, _ := payload.([]annotatedItem)
+		enc := newGCX(&buf, "analyze.annotation_users",
+			[]string{"symbol", "file", "line", "args"},
+			"count", fmt.Sprintf("%d", len(items)),
+		)
+		for _, it := range items {
+			if err := enc.WriteRow(it.Symbol, it.File, it.Line, it.Args); err != nil {
+				return nil, err
+			}
+		}
+		return buf.Bytes(), enc.Close()
+	case "annotation_users.list":
+		items, _ := payload.([]annotationItem)
+		enc := newGCX(&buf, "analyze.annotation_users.list",
+			[]string{"id", "name", "users"},
+			"count", fmt.Sprintf("%d", len(items)),
+		)
+		for _, it := range items {
+			if err := enc.WriteRow(it.ID, it.Name, it.Users); err != nil {
+				return nil, err
+			}
+		}
+		return buf.Bytes(), enc.Close()
+	case "config_readers":
+		items, _ := payload.([]configReaderItem)
+		enc := newGCX(&buf, "analyze.config_readers",
+			[]string{"id", "name", "source", "reads", "readers"},
+			"count", fmt.Sprintf("%d", len(items)),
+		)
+		for _, it := range items {
+			if err := enc.WriteRow(it.ID, it.Name, it.Source, it.Reads, it.Readers); err != nil {
+				return nil, err
+			}
+		}
+		return buf.Bytes(), enc.Close()
+	case "event_emitters":
+		items, _ := payload.([]eventEmitterItem)
+		enc := newGCX(&buf, "analyze.event_emitters",
+			[]string{"id", "name", "event_kind", "emits", "emitters"},
+			"count", fmt.Sprintf("%d", len(items)),
+		)
+		for _, it := range items {
+			if err := enc.WriteRow(it.ID, it.Name, it.Kind, it.Emits, it.Emitters); err != nil {
+				return nil, err
+			}
+		}
+		return buf.Bytes(), enc.Close()
+	case "error_surface":
+		items, _ := payload.([]errorSurfaceItem)
+		enc := newGCX(&buf, "analyze.error_surface",
+			[]string{"symbol", "file", "line", "throws", "errors"},
+			"count", fmt.Sprintf("%d", len(items)),
+		)
+		for _, it := range items {
+			if err := enc.WriteRow(it.Symbol, it.File, it.Line, it.Throws, it.Errors); err != nil {
+				return nil, err
+			}
+		}
+		return buf.Bytes(), enc.Close()
 	default:
 		// Fall back to generic so analyze variants without a hand-tuned
 		// encoder still produce valid GCX instead of failing.
@@ -410,6 +506,67 @@ type cycleItem struct {
 	Size     int
 	Severity string
 	Nodes    []string
+}
+
+// Row contracts for the edge-driven analyzers (see
+// tools_analyze_edges.go). Values are pre-flattened (slices joined)
+// so the GCX encoder writes one scalar column per field.
+type channelOpItem struct {
+	Channel   string
+	Sends     int
+	Recvs     int
+	Senders   string
+	Receivers string
+}
+
+type spawnItem struct {
+	Target   string
+	Mode     string
+	Spawns   int
+	Spawners string
+}
+
+type fieldWriterItem struct {
+	Field   string
+	Writes  int
+	Writers string
+}
+
+type annotatedItem struct {
+	Symbol string
+	File   string
+	Line   int
+	Args   string
+}
+
+type annotationItem struct {
+	ID    string
+	Name  string
+	Users int
+}
+
+type configReaderItem struct {
+	ID      string
+	Name    string
+	Source  string
+	Reads   int
+	Readers string
+}
+
+type eventEmitterItem struct {
+	ID       string
+	Name     string
+	Kind     string
+	Emits    int
+	Emitters string
+}
+
+type errorSurfaceItem struct {
+	Symbol string
+	File   string
+	Line   int
+	Throws int
+	Errors string
 }
 
 // --------------------------------------------------------------------

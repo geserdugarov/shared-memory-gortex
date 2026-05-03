@@ -287,6 +287,8 @@ func defaultGrepGuidance() string {
 	b.WriteString("  - To find all references: use `find_usages` (zero false positives)\n")
 	b.WriteString("  - To find callers: use `get_callers`\n")
 	b.WriteString("  - To find implementations: use `find_implementations`\n")
+	b.WriteString("  - For TODO / FIXME / HACK / XXX / NOTE patterns: use `analyze kind=todos` (filter by tag/assignee/ticket)\n")
+	b.WriteString("  - For HTTP route / handler patterns (e.g. `app.get`, `func.*Handler`, `@RequestMapping`): use `contracts` (action=list to enumerate, action=check to match cross-repo)\n")
 	b.WriteString(gcxTip)
 	return b.String()
 }
@@ -433,6 +435,7 @@ func defaultGlobGuidance() string {
 		"  - To find files containing a symbol: use `search_symbols` (returns file paths)\n" +
 		"  - To understand file structure: use `get_file_summary`\n" +
 		"  - For task-level file discovery: use `smart_context`\n" +
+		"  - For migration / SQL globs (`db/migrations/*.sql`, `**/*.sql`): use `analyze kind=orphan_tables` and `kind=unreferenced_tables` to find queried-but-undeclared and provided-but-unused tables\n" +
 		gcxTip
 }
 

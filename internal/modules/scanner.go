@@ -354,7 +354,7 @@ func parseYarnHeaderNames(header string) []string {
 		// scope @ at position 0. Scoped packages start with @ —
 		// we want the second @, or the first when the package
 		// is unscoped.
-		atIdx := -1
+		var atIdx int
 		if strings.HasPrefix(p, "@") {
 			// scoped: skip past the leading @ then find the next
 			// one.
@@ -428,7 +428,7 @@ func ParsePnpmLock(source []byte) []Spec {
 		key = strings.TrimSuffix(key, "(") // strip peer-suffix start when present
 		// The version is the last `@` segment, accounting for
 		// scoped packages (which start with `@scope/`).
-		atIdx := -1
+		var atIdx int
 		if strings.HasPrefix(key, "@") {
 			atIdx = strings.LastIndex(key, "@")
 		} else {

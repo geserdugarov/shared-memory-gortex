@@ -293,14 +293,27 @@ func tsWrapperConsumerDetect(body string, fileNodes []*graph.Node) schemaHints {
 	if m := tsGenericCallRe.FindStringSubmatch(body); len(m) > 1 {
 		t := cleanTSTypeExpr(m[1])
 		if t != "" && t != "void" && t != "unknown" && t != "any" {
-			h.ResponseType = resolveTypeInFile(stripGenerics(t), fileNodes)
+			bare, repeated := stripTSArraySuffix(stripGenerics(t))
+			h.ResponseType = resolveTypeInFile(bare, fileNodes)
+			h.ResponseRepeated = repeated
 		}
 	}
 	if h.ResponseType == "" {
-		if m := tsPromiseReturnRe.FindStringSubmatch(body); len(m) > 1 {
+		// Try the inline-object pattern first: `Promise<{ x: T[] }>`
+		// → envelope rows. The downstream `Promise<X>` regex would
+		// fail on the leading `{` (capture must start with [A-Za-z_$])
+		// so the user lost every `{ key: Type }` shaped response in
+		// the dashboard. Parse the inner type literal here and emit
+		// the same response_envelope shape Go's map-literal extractor
+		// produces.
+		if env := tsPromiseInlineEnvelope(body, fileNodes); len(env) > 0 {
+			h.ResponseEnvelope = env
+		} else if m := tsPromiseReturnRe.FindStringSubmatch(body); len(m) > 1 {
 			t := cleanTSTypeExpr(m[1])
 			if t != "" && t != "void" && t != "unknown" && t != "any" {
-				h.ResponseType = resolveTypeInFile(stripGenerics(t), fileNodes)
+				bare, repeated := stripTSArraySuffix(stripGenerics(t))
+				h.ResponseType = resolveTypeInFile(bare, fileNodes)
+				h.ResponseRepeated = repeated
 			}
 		}
 	}
@@ -387,4 +400,157 @@ func stripGenerics(s string) string {
 		return strings.TrimSpace(s[:idx])
 	}
 	return s
+}
+
+// tsPromiseInlineObjectRe captures the body of an inline-object
+// Promise return type:
+//
+//	(): Promise<{ guards: Guard[]; total: number }> => {
+//	             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+//	             capture
+//
+// `[^{}]*` rules out nested objects in the same capture (rare in
+// API surfaces); the broader `tsPromiseReturnRe` handles bare
+// identifiers like `Promise<Foo>` after this fails.
+var tsPromiseInlineObjectRe = regexp.MustCompile(
+	`\)\s*:\s*Promise\s*<\s*\{\s*([^{}]*?)\s*\}\s*>\s*[{=]`,
+)
+
+// tsPromiseInlineEnvelope extracts an envelope row per top-level key
+// in a `Promise<{ k1: T1; k2: T2 }>` return type. Returns nil when
+// the body has no such inline-object Promise.
+//
+// Each row carries:
+//   - Name: the JSON key
+//   - Type: the bare type name (resolved to a graph node ID when
+//     the type lives in the same file; bare otherwise so the
+//     module-wide upgrade pass can land it later)
+//   - Repeated: true for `T[]` and `Array<T>`
+func tsPromiseInlineEnvelope(body string, fileNodes []*graph.Node) []envelopeField {
+	m := tsPromiseInlineObjectRe.FindStringSubmatch(body)
+	if len(m) < 2 {
+		return nil
+	}
+	inner := strings.TrimSpace(m[1])
+	if inner == "" {
+		return nil
+	}
+	out := make([]envelopeField, 0, 4)
+	for _, entry := range splitTSObjectEntries(inner) {
+		key, typeExpr, ok := splitTSObjectField(entry)
+		if !ok {
+			continue
+		}
+		bare, repeated := stripTSArraySuffix(stripGenerics(cleanTSTypeExpr(typeExpr)))
+		row := envelopeField{Name: key, Expr: typeExpr}
+		if bare != "" {
+			row.Type = resolveTypeInFile(bare, fileNodes)
+		}
+		row.Repeated = repeated
+		out = append(out, row)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// splitTSObjectEntries splits an object-literal-type body on
+// top-level `;` or `,` separators while ignoring commas inside
+// `<...>`, `[...]`, and `(...)` so generic-argument lists stay
+// intact: `useFoo<A, B>` is one token.
+func splitTSObjectEntries(s string) []string {
+	var out []string
+	depth := 0
+	start := 0
+	for i := 0; i < len(s); i++ {
+		switch s[i] {
+		case '<', '[', '(':
+			depth++
+		case '>', ']', ')':
+			if depth > 0 {
+				depth--
+			}
+		case ';', ',':
+			if depth == 0 {
+				if part := strings.TrimSpace(s[start:i]); part != "" {
+					out = append(out, part)
+				}
+				start = i + 1
+			}
+		}
+	}
+	if part := strings.TrimSpace(s[start:]); part != "" {
+		out = append(out, part)
+	}
+	return out
+}
+
+// splitTSObjectField parses one `key (?) : typeExpr` entry into its
+// (key, typeExpr) parts. Returns ok=false when the entry doesn't
+// match the expected shape (e.g. method-shorthand syntax which we
+// don't yet handle).
+func splitTSObjectField(entry string) (string, string, bool) {
+	colon := strings.Index(entry, ":")
+	if colon < 0 {
+		return "", "", false
+	}
+	key := strings.TrimSpace(entry[:colon])
+	typ := strings.TrimSpace(entry[colon+1:])
+	// Strip trailing `?` from the key (optional marker).
+	key = strings.TrimSuffix(key, "?")
+	// Strip surrounding quotes if the key was quoted.
+	if len(key) >= 2 {
+		first, last := key[0], key[len(key)-1]
+		if (first == '"' || first == '\'') && first == last {
+			key = key[1 : len(key)-1]
+		}
+	}
+	if key == "" || typ == "" {
+		return "", "", false
+	}
+	// Reject method-shorthand entries like `compute(x: number): number`
+	// — the regex captured `compute(x` as the key, which isn't a JSON
+	// key. A simple identifier-only check filters these out.
+	for _, r := range key {
+		if !(r == '_' || r == '-' ||
+			(r >= 'a' && r <= 'z') ||
+			(r >= 'A' && r <= 'Z') ||
+			(r >= '0' && r <= '9') ||
+			r == '$') {
+			return "", "", false
+		}
+	}
+	return key, typ, true
+}
+
+// stripTSArraySuffix peels list shapes off a TypeScript type
+// expression and reports whether the original was a list. Recognises:
+//
+//	Foo[]          → ("Foo", true)
+//	Foo[][]        → ("Foo", true)   // multi-dim collapsed to "list"
+//	Array<Foo>     → ("Foo", true)
+//	ReadonlyArray<Foo> → ("Foo", true)
+//	Foo            → ("Foo", false)
+//
+// Without this, response_type for `tools: () => Promise<ToolInfo[]>`
+// stays as "ToolInfo[]" — a string with no graph node, so the
+// downstream type-shape lookup (snapshotContractShapes) silently
+// skips it and the dashboard renders a bare string instead of the
+// expanded ToolInfo fields.
+func stripTSArraySuffix(s string) (string, bool) {
+	s = strings.TrimSpace(s)
+	repeated := false
+	for strings.HasSuffix(s, "[]") {
+		s = strings.TrimSuffix(s, "[]")
+		repeated = true
+	}
+	for _, prefix := range []string{"Array<", "ReadonlyArray<"} {
+		if strings.HasPrefix(s, prefix) && strings.HasSuffix(s, ">") {
+			s = strings.TrimSuffix(strings.TrimPrefix(s, prefix), ">")
+			repeated = true
+			break
+		}
+	}
+	return strings.TrimSpace(s), repeated
 }

@@ -29,6 +29,10 @@ const tsQAll = `
       name: (identifier) @arrow.name
       value: (arrow_function) @arrow.body)) @arrow.def
 
+  (pair
+    key: (property_identifier) @objfn.name
+    value: (arrow_function) @objfn.body) @objfn.def
+
   (class_declaration
     name: (type_identifier) @class.name) @class.def
 
@@ -152,6 +156,9 @@ func (e *TypeScriptExtractor) Extract(filePath string, src []byte) (*parser.Extr
 			if name := e.emitArrow(m, filePath, fileID, src, result); name != "" {
 				arrowNames[name] = true
 			}
+
+		case m.Captures["objfn.def"] != nil:
+			e.emitArrowField(m, filePath, fileID, src, result)
 
 		case m.Captures["class.def"] != nil:
 			classID := e.emitClass(m, filePath, fileID, src, result)
@@ -385,6 +392,91 @@ func (e *TypeScriptExtractor) emitArrow(m parser.QueryResult, filePath, fileID s
 		FilePath: filePath, Line: def.StartLine + 1,
 	})
 	return name
+}
+
+// emitArrowField handles the `pair → property_identifier → arrow_function`
+// shape — `export const api = { health: async () => ... }`. Without
+// this, calls inside the arrow body have no enclosing function for
+// findEnclosingFunc to attribute them to, so EdgeCalls is silently
+// dropped and downstream features (HTTP wrapper inlining, find_usages,
+// etc.) lose every endpoint method.
+//
+// Naming: when the enclosing object is the value of a top-level
+// `const owner = { ... }`, we qualify the function name as
+// "owner.property" (e.g. "api.health"). Otherwise (inline object as
+// argument or return value) we fall back to the bare property name.
+// The graph ID always includes the start line so two same-named
+// fields in different objects in the same file don't collide.
+func (e *TypeScriptExtractor) emitArrowField(m parser.QueryResult, filePath, fileID string, src []byte, result *parser.ExtractionResult) {
+	prop := m.Captures["objfn.name"].Text
+	def := m.Captures["objfn.def"]
+	if prop == "" || def.Node == nil {
+		return
+	}
+	// Walk up: pair → object → ... look for the nearest variable_declarator
+	// or assignment whose name we can borrow.
+	owner := tsArrowFieldOwner(def.Node, src)
+	name := prop
+	if owner != "" {
+		name = owner + "." + prop
+	}
+	// Disambiguate same-name fields in different objects within one
+	// file by suffixing the start line. Cheap, deterministic, keeps
+	// the human-readable name visible as Node.Name.
+	id := fmt.Sprintf("%s::%s@%d", filePath, name, def.StartLine+1)
+	meta := map[string]any{"signature": fmt.Sprintf("%s: () =>", name)}
+	if doc := ExtractDocAbove(src, def.StartLine, DocLangBlockStar); doc != "" {
+		meta["doc"] = doc
+	}
+	result.Nodes = append(result.Nodes, &graph.Node{
+		ID: id, Kind: graph.KindFunction, Name: name,
+		FilePath: filePath, StartLine: def.StartLine + 1, EndLine: def.EndLine + 1,
+		Language: "typescript",
+		Meta:     meta,
+	})
+	result.Edges = append(result.Edges, &graph.Edge{
+		From: fileID, To: id, Kind: graph.EdgeDefines,
+		FilePath: filePath, Line: def.StartLine + 1,
+	})
+}
+
+// tsArrowFieldOwner walks from a `pair` node up the AST looking for
+// the most useful enclosing name to qualify the property with. Returns
+// "" when no such name is reachable (e.g. an inline object passed as
+// an argument). Stops as soon as it hits a program / class / function
+// boundary that wouldn't usefully contribute a name.
+func tsArrowFieldOwner(pair *sitter.Node, src []byte) string {
+	if pair == nil {
+		return ""
+	}
+	cur := pair.Parent()
+	for cur != nil {
+		switch cur.Type() {
+		case "variable_declarator":
+			// const owner = { ... }  →  owner is the first named child.
+			if name := cur.ChildByFieldName("name"); name != nil && name.Type() == "identifier" {
+				return name.Content(src)
+			}
+			return ""
+		case "assignment_expression":
+			// owner = { ... }
+			if left := cur.ChildByFieldName("left"); left != nil && left.Type() == "identifier" {
+				return left.Content(src)
+			}
+			return ""
+		case "pair":
+			// Nested object: walk further out, but use the immediate
+			// key as the owner so nested fields stay disambiguated.
+			if k := cur.ChildByFieldName("key"); k != nil && k.Type() == "property_identifier" {
+				return k.Content(src)
+			}
+		case "program", "class_body", "function_declaration",
+			"method_definition", "arrow_function", "function_expression":
+			return ""
+		}
+		cur = cur.Parent()
+	}
+	return ""
 }
 
 // emitClass writes the class node + Defines edge and runs the

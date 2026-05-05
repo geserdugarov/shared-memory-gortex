@@ -820,6 +820,179 @@ func (mi *MultiIndexer) MergedContractRegistry() *contracts.Registry {
 	return merged
 }
 
+// attachInlinedShapes folds the field shape of each contract's
+// response_type / request_type into the contract's Meta so the
+// dashboard can render the expanded field list. Targets contracts
+// where the type has been resolved to a graph node ID (contains
+// "::") AND the type node has a shape stored in its Meta.
+//
+// Type-shape extraction normally runs in commitContracts via
+// snapshotContractShapes + inlineEnvelopeShapes — but those passes
+// run during the initial extract and miss contracts added later by
+// InlineWrappers. This is the post-inline equivalent: it doesn't
+// re-extract shapes (the type nodes already have them from
+// snapshotContractShapes if they were referenced anywhere), it just
+// attaches them to the new contract entries.
+func (mi *MultiIndexer) attachInlinedShapes(cr *contracts.Registry, g *graph.Graph) {
+	idsToTouch := map[string]bool{}
+	for _, c := range cr.All() {
+		if c.Meta == nil {
+			continue
+		}
+		for _, key := range []string{"response_type", "request_type"} {
+			if v, _ := c.Meta[key].(string); v != "" && strings.Contains(v, "::") {
+				idsToTouch[c.ID] = true
+				break
+			}
+		}
+		if env, ok := c.Meta["response_envelope"].([]map[string]any); ok && len(env) > 0 {
+			// Touch any contract that has an envelope, even when
+			// the rows still carry bare type names — the loop below
+			// upgrades them. Otherwise we skip them and lose the
+			// shape attachment for sibling-file types.
+			idsToTouch[c.ID] = true
+			_ = env
+		}
+	}
+	srcCache := map[string][]byte{}
+	resolveShape := func(typeID string) any {
+		if typeID == "" || !strings.Contains(typeID, "::") {
+			return nil
+		}
+		node := g.GetNode(typeID)
+		if node == nil {
+			return nil
+		}
+		if node.Kind != graph.KindType && node.Kind != graph.KindInterface {
+			return nil
+		}
+		if node.Meta == nil {
+			node.Meta = map[string]any{}
+		}
+		if shape, ok := node.Meta["shape"]; ok && shape != nil {
+			return shape
+		}
+		// Lazy-extract: snapshotContractShapes only walks types
+		// referenced by the initial bulk extract. Types referenced
+		// ONLY by wrapper-inlined contracts need this fallback or
+		// their fields stay unread.
+		src := srcCache[node.FilePath]
+		if src == nil {
+			data, ok := mi.readNodeSource(node)
+			if !ok {
+				srcCache[node.FilePath] = []byte{}
+				return nil
+			}
+			src = data
+			srcCache[node.FilePath] = src
+		}
+		if len(src) == 0 {
+			return nil
+		}
+		extracted := contracts.ExtractShape(node.FilePath, src, node.StartLine, node.EndLine)
+		if extracted == nil {
+			return nil
+		}
+		node.Meta["shape"] = extracted
+		return extracted
+	}
+	for id := range idsToTouch {
+		items := cr.ByID(id)
+		changed := false
+		for i := range items {
+			if items[i].Meta == nil {
+				continue
+			}
+			// Top-level request/response type shapes.
+			for _, pair := range []struct{ typeKey, shapeKey string }{
+				{"response_type", "response_shape"},
+				{"request_type", "request_shape"},
+			} {
+				if _, has := items[i].Meta[pair.shapeKey]; has {
+					continue
+				}
+				typeID, _ := items[i].Meta[pair.typeKey].(string)
+				if shape := resolveShape(typeID); shape != nil {
+					items[i].Meta[pair.shapeKey] = shape
+					changed = true
+				}
+			}
+			// Envelope rows — upgrade bare type names to graph IDs
+			// (so the shape lookup hits) and attach shapes.
+			if env, ok := items[i].Meta["response_envelope"].([]map[string]any); ok && len(env) > 0 {
+				envChanged := false
+				for ri, row := range env {
+					typeID, _ := row["type"].(string)
+					// Upgrade bare type name → graph ID when the
+					// in-file resolveTypeInFile pass left it bare
+					// (the type lives in a sibling file).
+					if typeID != "" && !strings.Contains(typeID, "::") {
+						matches := g.FindNodesByName(typeID)
+						var resolved string
+						for _, n := range matches {
+							if n.Kind != graph.KindType && n.Kind != graph.KindInterface {
+								continue
+							}
+							resolved = n.ID
+							if items[i].RepoPrefix != "" && strings.HasPrefix(n.ID, items[i].RepoPrefix+"/") {
+								break // prefer same-repo
+							}
+						}
+						if resolved != "" {
+							env[ri]["type"] = resolved
+							typeID = resolved
+							envChanged = true
+						}
+					}
+					if _, has := row["shape"]; has {
+						continue
+					}
+					if shape := resolveShape(typeID); shape != nil {
+						env[ri]["shape"] = shape
+						envChanged = true
+					}
+				}
+				if envChanged {
+					items[i].Meta["response_envelope"] = env
+					changed = true
+				}
+			}
+		}
+		if changed {
+			cr.ReplaceByID(id, items)
+		}
+	}
+}
+
+// readNodeSource returns the source bytes of the file the node lives
+// in, resolving the repo prefix to a real disk path via tracked-repo
+// metadata. Mirrors wrapperSourceReader's path-resolution dance.
+func (mi *MultiIndexer) readNodeSource(node *graph.Node) ([]byte, bool) {
+	if node == nil || node.FilePath == "" {
+		return nil, false
+	}
+	rel := node.FilePath
+	if node.RepoPrefix != "" {
+		meta := mi.GetMetadata(node.RepoPrefix)
+		if meta == nil || meta.RootPath == "" {
+			return nil, false
+		}
+		rel = strings.TrimPrefix(rel, node.RepoPrefix+"/")
+		data, err := os.ReadFile(filepath.Join(meta.RootPath, rel))
+		if err != nil {
+			return nil, false
+		}
+		return data, true
+	}
+	for _, m := range mi.AllMetadata() {
+		data, err := os.ReadFile(filepath.Join(m.RootPath, rel))
+		if err == nil {
+			return data, true
+		}
+	}
+	return nil, false
+}
+
 // wrapperSourceReader returns a SourceReader closure that maps a graph
 // node back to its on-disk bytes by joining the node's repo-relative
 // FilePath with the repo's RootPath from MultiIndexer metadata. In
@@ -952,6 +1125,73 @@ func (mi *MultiIndexer) ReconcileContractEdges() int {
 			if !alreadyPersisted {
 				cr.Add(c)
 			}
+		}
+		mi.mu.RUnlock()
+
+		// Wrapper-inlined contracts arrive AFTER commitContracts ran
+		// its UpgradeBareTypeRefs pass, so their response_type /
+		// request_type still carries bare names like "ToolInfo".
+		// Re-run the upgrade against the merged graph so downstream
+		// snapshotContractShapes finds the type node and the
+		// dashboard sees fields instead of a string.
+		mi.mu.RLock()
+		lookup := func(name, repoHint string) []string {
+			matches := mi.graph.FindNodesByName(name)
+			if len(matches) == 0 {
+				return nil
+			}
+			ids := make([]string, 0, len(matches))
+			for _, n := range matches {
+				if n.Kind != graph.KindType && n.Kind != graph.KindInterface {
+					continue
+				}
+				ids = append(ids, n.ID)
+			}
+			// Prefer same-repo when multiple match.
+			if len(ids) > 1 && repoHint != "" {
+				var sameRepo []string
+				for _, id := range ids {
+					if strings.HasPrefix(id, repoHint+"/") {
+						sameRepo = append(sameRepo, id)
+					}
+				}
+				if len(sameRepo) > 0 {
+					return sameRepo
+				}
+			}
+			return ids
+		}
+		for _, idx := range mi.indexers {
+			cr := idx.ContractRegistry()
+			if cr != nil {
+				cr.UpgradeBareTypeRefs(lookup)
+			}
+		}
+		// UpgradeBareTypeRefs leaves names with ≥2 candidates alone
+		// (e.g. a TS app declaring `DashboardSnapshot` in both
+		// `lib/schema.ts` and `lib/types.ts`). disambiguateBareTypesViaImports
+		// re-reads the consumer's source, parses its `import` lines,
+		// and picks the candidate whose graph FilePath matches an
+		// imported module. Runs before attachInlinedShapes so the
+		// shape attachment sees fully-qualified IDs.
+		for _, idx := range mi.indexers {
+			cr := idx.ContractRegistry()
+			if cr != nil {
+				mi.disambiguateBareTypesViaImports(cr, mi.graph)
+			}
+		}
+		// Now that response_type / request_type point at real graph
+		// nodes, fold each referenced type's shape (struct fields)
+		// into the contract's Meta so the dashboard renders the
+		// expanded field list instead of just the type name. Mirrors
+		// what snapshotContractShapes + inlineEnvelopeShapes do for
+		// initially-extracted contracts.
+		for _, idx := range mi.indexers {
+			cr := idx.ContractRegistry()
+			if cr == nil {
+				continue
+			}
+			mi.attachInlinedShapes(cr, mi.graph)
 		}
 		mi.mu.RUnlock()
 	}

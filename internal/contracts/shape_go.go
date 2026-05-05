@@ -69,50 +69,91 @@ func extractGoShape(src []byte, startLine, endLine int) *Shape {
 	inner := body[openIdx+1 : closeIdx]
 
 	shape := &Shape{Kind: "struct"}
+	// Track brace depth across the inner body so we don't hoist
+	// fields of nested anonymous structs into the parent shape.
+	// Lines are scanned at depth 0 (= immediately inside the outer
+	// struct's `{`); when an inline `Stats struct { ... }` opens,
+	// depth goes to 1 and child lines are suppressed until the
+	// closing `}` returns depth to 0. Without this, a parent that
+	// happens to share field names with its inline anonymous
+	// substruct (e.g. dashboardSnapshot's outer `Repos`/`Caveats`
+	// shadowed by Stats.Repos/Stats.Caveats) produces duplicate
+	// field names in the shape — the dashboard then renders two
+	// React children with the same key.
+	depth = 0
 	for _, rawLine := range strings.Split(inner, "\n") {
 		line := strings.TrimSpace(rawLine)
 		if line == "" || strings.HasPrefix(line, "//") {
+			updateGoBraceDepth(line, &depth)
 			continue
 		}
-		m := goFieldRe.FindStringSubmatch(line)
-		if m == nil {
-			continue
+		if depth == 0 {
+			emitGoStructField(line, shape)
 		}
-		names := strings.Split(m[1], ",")
-		typeExpr := strings.TrimSpace(m[2])
-		tag := m[3]
-		comment := ""
-		if len(m) > 4 {
-			comment = truncateComment(m[4])
-		}
-		jsonTag, required, repeated, effectiveType := goFieldMetadata(typeExpr, tag)
-		for _, rawName := range names {
-			name := strings.TrimSpace(rawName)
-			if name == "" || !isExportedGo(name) {
-				continue
-			}
-			wireName := name
-			// Only derive a wire name from the JSON tag if the tag
-			// actually gives one — otherwise preserve the Go field
-			// name unchanged so downstream diffing doesn't invent
-			// lowercased synonyms.
-			if jsonTag != "" && jsonTag != "-" {
-				wireName = jsonTag
-			}
-			shape.Fields = append(shape.Fields, ShapeField{
-				Name:     wireName,
-				Type:     effectiveType,
-				JSONTag:  tag,
-				Required: required,
-				Repeated: repeated,
-				Comment:  comment,
-			})
-		}
+		updateGoBraceDepth(line, &depth)
 	}
 	if len(shape.Fields) == 0 {
 		return nil
 	}
 	return shape
+}
+
+// updateGoBraceDepth adjusts the running brace depth from one line
+// of source. Quoted strings and runes don't carry depth-changing
+// braces in well-formed Go struct definitions, so a naive count
+// suffices for the lines we care about. A `//` comment short-circuits
+// the rest of the line.
+func updateGoBraceDepth(line string, depth *int) {
+	for i := 0; i < len(line); i++ {
+		switch line[i] {
+		case '{':
+			*depth++
+		case '}':
+			if *depth > 0 {
+				*depth--
+			}
+		case '/':
+			if i+1 < len(line) && line[i+1] == '/' {
+				return
+			}
+		}
+	}
+}
+
+// emitGoStructField runs goFieldRe over one line and appends every
+// resulting field (a single decl can declare multiple comma-separated
+// names) to shape.
+func emitGoStructField(line string, shape *Shape) {
+	m := goFieldRe.FindStringSubmatch(line)
+	if m == nil {
+		return
+	}
+	names := strings.Split(m[1], ",")
+	typeExpr := strings.TrimSpace(m[2])
+	tag := m[3]
+	comment := ""
+	if len(m) > 4 {
+		comment = truncateComment(m[4])
+	}
+	jsonTag, required, repeated, effectiveType := goFieldMetadata(typeExpr, tag)
+	for _, rawName := range names {
+		name := strings.TrimSpace(rawName)
+		if name == "" || !isExportedGo(name) {
+			continue
+		}
+		wireName := name
+		if jsonTag != "" && jsonTag != "-" {
+			wireName = jsonTag
+		}
+		shape.Fields = append(shape.Fields, ShapeField{
+			Name:     wireName,
+			Type:     effectiveType,
+			JSONTag:  tag,
+			Required: required,
+			Repeated: repeated,
+			Comment:  comment,
+		})
+	}
 }
 
 // goFieldMetadata turns a type expression + raw struct tag into the

@@ -3,12 +3,11 @@ package contracts
 import (
 	"regexp"
 	"sort"
-
-	"github.com/zzet/gortex/internal/parser"
 	"strconv"
 	"strings"
 
 	"github.com/zzet/gortex/internal/graph"
+	"github.com/zzet/gortex/internal/parser"
 )
 
 // schemaHints collects the structured fields a single enricher extracts
@@ -30,6 +29,11 @@ type schemaHints struct {
 
 	ResponseType string
 	ResponseExpr string
+	// ResponseRepeated is true when the captured type was a list
+	// shape (`Foo[]`, `Array<Foo>`, `[]Foo`), so the dashboard can
+	// render the response as an array of Foo without losing the
+	// underlying type.
+	ResponseRepeated bool
 	// ResponseEnvelope is the structured form of an inline map response
 	// like `map[string]any{"files": out, "total": count}`. Each field
 	// records the JSON key, the source expression that fed it, and
@@ -74,6 +78,11 @@ func (h *schemaHints) merge(o schemaHints) {
 	}
 	if h.ResponseType == "" {
 		h.ResponseType = o.ResponseType
+		// ResponseRepeated travels with ResponseType: only adopt it
+		// when we adopt the underlying type, so a later enricher
+		// can't promote a non-list type to a list one (or vice
+		// versa) in isolation.
+		h.ResponseRepeated = o.ResponseRepeated
 	}
 	if h.ResponseExpr == "" {
 		h.ResponseExpr = o.ResponseExpr
@@ -203,7 +212,17 @@ func enrichHTTPContract(c *Contract, lines []string, fileNodes []*graph.Node, la
 // window around the call site for payload arg types, decode targets,
 // and any JSON-encode wrapper expressions.
 func enrichConsumerContract(c *Contract, lines []string, fileNodes []*graph.Node, lang string) {
-	start, end := callSiteWindow(c, lines)
+	// Prefer the enclosing function's body range when SymbolID
+	// resolves to a known function in this file. The wide
+	// callSiteWindow heuristic (±6/+14 lines) was designed for
+	// top-level/script call sites where there's no enclosing
+	// function — but it spans MULTIPLE neighbouring functions in
+	// dense object literals (api.health/api.tools/api.stats stacked
+	// 2-3 lines apart in api.ts), so the regex's first
+	// `Promise<X>` match latches onto the WRONG endpoint's type.
+	// The function-body window is tight, structurally correct, and
+	// always preferable when available.
+	start, end := consumerBodyRange(c, fileNodes, lines)
 	if start <= 0 {
 		c.Meta["schema_source"] = "none"
 		return
@@ -254,6 +273,9 @@ func applyHints(c *Contract, h schemaHints, matched bool) {
 	}
 	if h.ResponseType != "" {
 		c.Meta["response_type"] = h.ResponseType
+		if h.ResponseRepeated {
+			c.Meta["response_repeated"] = true
+		}
 	}
 	if h.ResponseExpr != "" {
 		c.Meta["response_expr"] = h.ResponseExpr
@@ -360,6 +382,35 @@ func braceWindow(lines []string, from int) (int, int) {
 	return from, end
 }
 
+// consumerBodyRange returns the best body window for a consumer
+// contract. Order of preference:
+//  1. The enclosing function node when SymbolID resolves — gives a
+//     tight, correct window even in dense object-literal API
+//     declarations where neighbouring methods sit 2-3 lines apart.
+//  2. The wide ±6/+14 callSiteWindow heuristic, used when SymbolID
+//     doesn't resolve to a fileNode (top-level scripts, inline
+//     module code).
+func consumerBodyRange(c *Contract, fileNodes []*graph.Node, lines []string) (int, int) {
+	if c.SymbolID != "" {
+		for _, n := range fileNodes {
+			if n.ID != c.SymbolID {
+				continue
+			}
+			// Only trust the function body window when the call line
+			// falls inside the function's range. Synthetic / stale
+			// SymbolIDs (legacy tests, contracts whose handler was
+			// re-resolved post-extract) point at the wrong function;
+			// in that case fall back to the wide call-site window.
+			if n.StartLine > 0 && n.EndLine >= n.StartLine &&
+				c.Line >= n.StartLine && c.Line <= n.EndLine {
+				return n.StartLine, clampLine(n.EndLine, len(lines))
+			}
+			break
+		}
+	}
+	return callSiteWindow(c, lines)
+}
+
 // callSiteWindow picks a small window of source around a consumer
 // call site — enough to catch `jsonEncode(payload)` or `Decode(&resp)`
 // patterns that sit in adjacent lines.
@@ -422,8 +473,15 @@ func resolveTypeInFile(name string, fileNodes []*graph.Node) string {
 	if idx := strings.LastIndex(name, "."); idx >= 0 {
 		name = name[idx+1:]
 	}
+	// Also accept KindInterface — TypeScript / Java / Kotlin model
+	// type definitions as `interface Foo {}`, which gets emitted as
+	// KindInterface, not KindType. Limiting to KindType silently
+	// drops every TS interface response_type lookup.
 	for _, n := range fileNodes {
-		if n.Kind == graph.KindType && n.Name == name {
+		if n.Name != name {
+			continue
+		}
+		if n.Kind == graph.KindType || n.Kind == graph.KindInterface {
 			return n.ID
 		}
 	}

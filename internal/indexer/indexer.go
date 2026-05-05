@@ -1990,6 +1990,14 @@ func (idx *Indexer) resolveProviderHandlers(reg *contracts.Registry) {
 		trail      string
 		fallback   string
 		repoHint   string
+		// srcDir is the directory of the contract's registration site
+		// (the file with the HandleFunc call). Used by lookupHandler
+		// as a tie-breaker when two same-repo functions share a name
+		// across packages — e.g. `Handler.handleContracts` in the
+		// `server` pkg vs `Server.handleContracts` in `mcp`. A
+		// `recv.method` call from inside `server/handler.go` resolves
+		// to the same-package method, not the cross-package one.
+		srcDir string
 	}
 	var todo []pending
 	for _, c := range reg.All() {
@@ -2006,7 +2014,13 @@ func (idx *Indexer) resolveProviderHandlers(reg *contracts.Registry) {
 		if src, _ := c.Meta["schema_source"].(string); src == "extracted" || src == "partial" {
 			continue
 		}
-		todo = append(todo, pending{contractID: c.ID, trail: trail, fallback: fallback, repoHint: c.RepoPrefix})
+		todo = append(todo, pending{
+			contractID: c.ID,
+			trail:      trail,
+			fallback:   fallback,
+			repoHint:   c.RepoPrefix,
+			srcDir:     filepath.Dir(c.FilePath),
+		})
 	}
 	// Always strip the internal handler hints from Meta at the end of
 	// this pass — successful or not. They were only ever intended as
@@ -2058,7 +2072,7 @@ func (idx *Indexer) resolveProviderHandlers(reg *contracts.Registry) {
 	}()
 	resolved := 0
 	for _, p := range todo {
-		handlerNode := idx.resolveInnermostHandler(p.trail, p.fallback, p.repoHint)
+		handlerNode := idx.resolveInnermostHandler(p.trail, p.fallback, p.repoHint, p.srcDir)
 		if handlerNode == nil {
 			continue
 		}
@@ -2142,14 +2156,14 @@ func (idx *Indexer) resolveProviderHandlers(reg *contracts.Registry) {
 // `h.ServeArchive`, not the `WithAuth` wrapper. Falls back to the
 // single identifier when no trail is available (e.g. simple bare
 // `r.GET("/x", listUsers)` patterns).
-func (idx *Indexer) resolveInnermostHandler(trail, fallback, repoHint string) *graph.Node {
+func (idx *Indexer) resolveInnermostHandler(trail, fallback, repoHint, srcDir string) *graph.Node {
 	candidates := contracts.HandlerCandidatesInTrail(trail)
 	if len(candidates) == 0 && fallback != "" {
 		candidates = []string{fallback}
 	}
 	var best *graph.Node
 	for _, c := range candidates {
-		if n := idx.lookupHandler(c, repoHint); n != nil {
+		if n := idx.lookupHandler(c, repoHint, srcDir); n != nil {
 			best = n
 		}
 	}
@@ -2164,7 +2178,7 @@ func (idx *Indexer) resolveInnermostHandler(trail, fallback, repoHint string) *g
 //   - "pkg.Foo"        → same as first form, package-qualified call.
 //
 // Returns nil when no candidate resolves unambiguously.
-func (idx *Indexer) lookupHandler(ident, repoHint string) *graph.Node {
+func (idx *Indexer) lookupHandler(ident, repoHint, srcDir string) *graph.Node {
 	// Strip a leading receiver / package qualifier — "h.ServeArchive"
 	// → "ServeArchive".
 	name := ident
@@ -2194,6 +2208,28 @@ func (idx *Indexer) lookupHandler(ident, repoHint string) *graph.Node {
 	}
 	if len(sameRepo) == 0 && len(other) == 1 {
 		return other[0]
+	}
+	// Multiple candidates — try same-package tie-break before giving up.
+	// A `recv.method` call inside `pkg/foo.go` resolves to a method
+	// declared in the same package; cross-package lookalikes (e.g.
+	// `Server.handleContracts` in `mcp` vs `Handler.handleContracts`
+	// in `server`) are filtered out. Without this, both routers and
+	// MCP-side handlers compete for the same name and the resolver
+	// falls back to the enclosing function (`registerRoutes`).
+	if srcDir != "" {
+		pool := sameRepo
+		if len(pool) == 0 {
+			pool = other
+		}
+		var samePkg []*graph.Node
+		for _, n := range pool {
+			if filepath.Dir(n.FilePath) == srcDir {
+				samePkg = append(samePkg, n)
+			}
+		}
+		if len(samePkg) == 1 {
+			return samePkg[0]
+		}
 	}
 	return nil // ambiguous
 }
@@ -2844,7 +2880,15 @@ func (idx *Indexer) snapshotContractShapes(reg *contracts.Registry) {
 	attached := 0
 	for id := range symbols {
 		node := idx.graph.GetNode(id)
-		if node == nil || node.Kind != graph.KindType {
+		if node == nil {
+			continue
+		}
+		// Accept both KindType and KindInterface — TypeScript /
+		// Java / Kotlin model their type defs as interfaces, and
+		// the dashboard wants their fields expanded just like Go
+		// struct types. Limiting to KindType silently dropped every
+		// TS interface shape extraction.
+		if node.Kind != graph.KindType && node.Kind != graph.KindInterface {
 			continue
 		}
 		if _, done := node.Meta["shape"]; done {

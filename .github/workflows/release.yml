@@ -34,6 +34,51 @@ jobs:
         with:
           cosign-release: v2.4.1
 
+      # Stage every artifact rcodesign needs (binary + Apple credentials)
+      # under one 0700 directory so the goreleaser-cross container — and
+      # the post-archive notarize step on the host — can read it via a
+      # single bind-mount. The dir is wiped unconditionally at the end of
+      # the job (see "Wipe macOS signing material").
+      - name: Stage macOS signing material
+        env:
+          P12_B64:    ${{ secrets.MACOS_CERTIFICATE_P12 }}
+          P12_PASS:   ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          NOTARY_B64: ${{ secrets.MACOS_NOTARY_API_KEY }}
+          KEY_ID:     ${{ secrets.MACOS_NOTARY_KEY_ID }}
+          ISSUER_ID:  ${{ secrets.MACOS_NOTARY_ISSUER_ID }}
+        run: |
+          set -euo pipefail
+          SIGNING_DIR=/tmp/macos-signing
+          mkdir -p "$SIGNING_DIR"
+          chmod 700 "$SIGNING_DIR"
+
+          echo "$P12_B64"     | base64 -d > "$SIGNING_DIR/cert.p12"
+          printf '%s' "$P12_PASS"        > "$SIGNING_DIR/cert.pass"
+          echo "$NOTARY_B64"  | base64 -d > "$SIGNING_DIR/notary.p8"
+
+          # Pin rcodesign to a known-good release. apple-codesign tags use
+          # `apple-codesign/X.Y.Z`; the slash is URL-escaped as %2F. Bump
+          # version + sha256 together — the release page publishes both.
+          RCODESIGN_VERSION=0.29.0
+          RCODESIGN_SHA256=dbe85cedd8ee4217b64e9a0e4c2aef92ab8bcaaa41f20bde99781ff02e600002
+          RCODESIGN_TARBALL="apple-codesign-${RCODESIGN_VERSION}-x86_64-unknown-linux-musl.tar.gz"
+          curl -fsSL \
+            "https://github.com/indygreg/apple-platform-rs/releases/download/apple-codesign%2F${RCODESIGN_VERSION}/${RCODESIGN_TARBALL}" \
+            -o "$SIGNING_DIR/$RCODESIGN_TARBALL"
+          echo "$RCODESIGN_SHA256  $SIGNING_DIR/$RCODESIGN_TARBALL" | sha256sum -c -
+          tar -xzf "$SIGNING_DIR/$RCODESIGN_TARBALL" -C "$SIGNING_DIR" --strip-components=1
+          chmod +x "$SIGNING_DIR/rcodesign"
+          rm "$SIGNING_DIR/$RCODESIGN_TARBALL"
+
+          # rcodesign notary-submit wants a single JSON file with the
+          # issuer/key id and the .p8 contents pre-encoded — done once
+          # here so the post-archive step is just an upload.
+          "$SIGNING_DIR/rcodesign" encode-app-store-connect-api-key \
+            -o "$SIGNING_DIR/notary.json" \
+            "$ISSUER_ID" "$KEY_ID" "$SIGNING_DIR/notary.p8"
+
+          chmod 600 "$SIGNING_DIR"/cert.* "$SIGNING_DIR"/notary.*
+
       - name: Run GoReleaser (cross-compile via Docker)
         # goreleaser-cross ships osxcross + aarch64/x86_64 gcc toolchains
         # so all 4 targets (linux/amd64, linux/arm64, darwin/amd64,
@@ -42,9 +87,14 @@ jobs:
         #
         # Image tag is pinned to the Go major.minor; bump together with
         # go.mod and the setup-go step elsewhere in the workflows.
+        #
+        # The /tmp/macos-signing bind-mount exposes rcodesign + the P12
+        # to the build hook in .goreleaser.yml, which signs each darwin
+        # Mach-O before the archive step.
         run: |
           docker run --rm --privileged \
             -v "$PWD":/go/src/gortex \
+            -v /tmp/macos-signing:/tmp/macos-signing:ro \
             -w /go/src/gortex \
             -e GITHUB_TOKEN \
             -e HOMEBREW_TAP_TOKEN \
@@ -63,6 +113,31 @@ jobs:
       # before any permission-denied errors surface.
       - name: Reclaim ownership of dist/ from Docker
         run: sudo chown -R "$(id -u):$(id -g)" dist
+
+      # The build hook already codesigned each darwin Mach-O. Notarization
+      # is Apple's blessing on that signature — they don't see the binary
+      # again, just hash + signature metadata, so the tarball on disk is
+      # left untouched. That means cosign signs and SLSA provenance covers
+      # the same bytes goreleaser already published, no checksum churn.
+      #
+      # Bare Mach-O can't be stapled (only .app/.pkg/.dmg can), so we
+      # don't pass --staple. Online macs fetch the ticket from Apple on
+      # first run; offline-first UX would require a signed .pkg.
+      - name: Notarize macOS binaries
+        run: |
+          set -euo pipefail
+          SIGNING_DIR=/tmp/macos-signing
+          shopt -s nullglob
+          for tgz in dist/gortex_darwin_*.tar.gz; do
+            workdir="$(mktemp -d)"
+            tar -xzf "$tgz" -C "$workdir"
+            (cd "$workdir" && zip -q notary.zip gortex)
+            "$SIGNING_DIR/rcodesign" notary-submit \
+              --api-key-file "$SIGNING_DIR/notary.json" \
+              --wait \
+              "$workdir/notary.zip"
+            rm -rf "$workdir"
+          done
 
       # Keyless cosign signing: each artifact gets a `.sig` (signature) and
       # `.pem` (certificate chain binding the signature to this workflow's
@@ -116,6 +191,17 @@ jobs:
           # they don't need their own provenance.
           HASHES=$(sha256sum *.tar.gz *.deb *.rpm *.apk | base64 -w0)
           echo "hashes=$HASHES" >> "$GITHUB_OUTPUT"
+
+      # Always wipe signing material — even on failure — so a P12 / .p8
+      # never lingers on a runner image cache or in actions/upload-artifact
+      # debug bundles. shred clears the inode contents before unlink.
+      - name: Wipe macOS signing material
+        if: always()
+        run: |
+          if [ -d /tmp/macos-signing ]; then
+            find /tmp/macos-signing -type f -exec shred -uf {} \; 2>/dev/null || true
+            rm -rf /tmp/macos-signing
+          fi
 
   # SLSA-3 provenance via the OpenSSF reusable workflow. This runs in a
   # separate, isolated job that the `release` job can't tamper with —

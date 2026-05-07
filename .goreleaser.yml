@@ -53,6 +53,16 @@ builds:
         env:
           - CC=aarch64-linux-gnu-gcc
           - CXX=aarch64-linux-gnu-g++
+    # Per-target build hook. Fires after each Mach-O / ELF is linked,
+    # before the archive step. The script is a no-op for non-darwin
+    # targets, so we don't need a per-override hook list.
+    #
+    # Codesigning a Mach-O is what makes the resulting tarball survive
+    # macOS Gatekeeper. Notarization (post-archive, in release.yml) only
+    # validates an already-signed binary; it cannot retroactively sign one.
+    hooks:
+      post:
+        - 'sh scripts/sign-macos-build-hook.sh "{{ .Os }}" "{{ .Path }}"'
 
 archives:
   - formats: [tar.gz]
@@ -114,13 +124,3 @@ homebrew_casks:
     generate_completions_from_executable:
       executable: gortex
       shell_parameter_format: cobra
-    # Strip the macOS quarantine xattr so users don't hit Gatekeeper's
-    # "cannot be opened because Apple cannot check it for malicious
-    # software" prompt on first run. The binary isn't notarized today;
-    # if/when it is, this hook can be removed.
-    hooks:
-      post:
-        install: |
-          if OS.mac?
-            system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/gortex"]
-          end

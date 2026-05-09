@@ -138,7 +138,20 @@ func (p *Provider) Enrich(g *graph.Graph, repoRoot string) (*semantic.EnrichResu
 		result.CoveragePercent = float64(result.SymbolsCovered) / float64(result.SymbolsTotal) * 100
 	}
 
-	// Phase 2: Process references — confirm/add edges.
+	// Externals attribution: every Use of an external symbol becomes
+	// an EdgeCalls / EdgeReferences targeting a freshly materialised
+	// `ext::go:<importPath>::<name>` node, which itself carries an
+	// EdgeDependsOnModule to the owning KindModule. Mirrors A21 — the
+	// resolver previously left these calls pointing at stub strings
+	// (`stdlib::fmt::Println`, `dep::github.com/.../foo::Bar`) that no
+	// node holds; goanalysis upgrades them to real graph nodes with
+	// LSP-grade origin.
+	externals := newExternalsAttribution(g, pkgs, p.Name())
+
+	// Phase 2: Process references — confirm/add edges. External symbols
+	// are routed through externals.resolveSymbol so calls into stdlib
+	// and module-cache packages land on real graph nodes rather than
+	// the resolver's stub strings.
 	for _, pkg := range pkgs {
 		if pkg.TypesInfo == nil {
 			continue
@@ -163,11 +176,41 @@ func (p *Provider) Enrich(g *graph.Graph, repoRoot string) (*semantic.EnrichResu
 
 			// Find the target Gortex node (the definition being used).
 			targetNodeID, ok := objToNode[obj]
+			external := false
 			if !ok {
-				continue
+				targetNodeID = externals.resolveSymbol(obj)
+				if targetNodeID == "" {
+					continue
+				}
+				external = true
 			}
 
 			if callerNode.ID == targetNodeID {
+				continue
+			}
+
+			// External: claim a resolver-stub edge if one exists, else
+			// add a fresh edge. Internal: confirm or add as before.
+			if external {
+				importPath := obj.Pkg().Path()
+				if upgraded := externals.claimAndUpgradeStub(callerNode.ID, importPath, obj, targetNodeID, pos.Line); upgraded != nil {
+					result.EdgesConfirmed++
+					continue
+				}
+				existing := semantic.FindEdgeByTarget(g, callerNode.ID, targetNodeID)
+				if existing != nil {
+					if existing.Confidence < 1.0 {
+						semantic.ConfirmEdge(existing, p.Name())
+						result.EdgesConfirmed++
+					}
+					continue
+				}
+				kind := inferEdgeKindFromObj(obj)
+				if kind != "" {
+					semantic.AddSemanticEdge(g, callerNode.ID, targetNodeID, kind,
+						relPath, pos.Line, p.Name())
+					result.EdgesAdded++
+				}
 				continue
 			}
 
@@ -189,6 +232,13 @@ func (p *Provider) Enrich(g *graph.Graph, repoRoot string) (*semantic.EnrichResu
 			}
 		}
 	}
+
+	// Stitch the externals counters into the standard result. NodesEnriched
+	// previously only incremented for in-repo type-meta enrichment; here
+	// we surface the synthetic external + module nodes the externals
+	// pass added so callers can see the full graph delta in one number.
+	result.EdgesAdded += externals.edgesAdded + externals.edgesUpgraded
+	result.NodesEnriched += externals.nodesAdded
 
 	// Phase 3: Interface implementations via go/types.
 	result.EdgesConfirmed += p.enrichImplements(g, pkgs, objToNode)
@@ -439,7 +489,13 @@ func (p *Provider) loadPackages(dir string) ([]*packages.Package, *token.FileSet
 		packages.NeedDeps |
 		packages.NeedTypes |
 		packages.NeedTypesInfo |
-		packages.NeedSyntax
+		packages.NeedSyntax |
+		// NeedModule populates pkg.Module so the externals pass can
+		// classify imports as stdlib (Module == nil), module_cache
+		// (Module != nil && !Main), or main (Module.Main). Without
+		// it the loader returns nil for every Module field and we
+		// can't tell stdlib calls from internal-package calls.
+		packages.NeedModule
 
 	cfg := &packages.Config{
 		Mode:  mode,

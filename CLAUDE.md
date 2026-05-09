@@ -86,6 +86,7 @@ The `analyze` MCP tool is a unified dispatcher. Supported `kind` values:
 | Tracing config-key readers            | `analyze` with `kind: "config_readers"` — config_key nodes grouped by EdgeReadsConfig |
 | Tracing event/log emitters            | `analyze` with `kind: "event_emitters"` — events grouped by EdgeEmits, `level` filter optional |
 | Mapping the error surface             | `analyze` with `kind: "error_surface"` — function/method nodes with their EdgeThrows targets |
+| Surveying stdlib / module-cache reach | `analyze` with `kind: "external_calls"` — KindModule nodes grouped by call/symbol counts; pass `id` for per-symbol detail, `module_kind` for stdlib/module_cache filter |
 | Checking if the index is stale        | `index_health` — health score, parse failures, stale files |
 | Wondering what changed this session   | `get_symbol_history` — modification counts, flags churning (3+ edits) |
 | Hydrating blame / coverage / releases | `gortex enrich blame|coverage|releases|all` (CLI) — bulk-stamps the graph for the `stale_*`, `coverage_*`, `ownership`, and `releases` analyzers |

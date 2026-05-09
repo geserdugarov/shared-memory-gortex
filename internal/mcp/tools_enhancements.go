@@ -91,6 +91,7 @@ func (s *Server) registerEnhancementTools() {
 			mcp.WithString("ids", mcp.Required(), mcp.Description("Comma-separated list of changed symbol IDs")),
 			mcp.WithBoolean("compact", mcp.Description("One-line-per-rule text output")),
 			mcp.WithString("format", mcp.Description("Output format: json (default), gcx (GCX1 compact wire format), or toon")),
+			mcp.WithNumber("max_bytes", mcp.Description("Cap the marshaled response at this many bytes. The longest list is trimmed; truncation metadata rides on the response. Omit for no cap.")),
 		),
 		s.handleCheckGuards,
 	)
@@ -102,8 +103,14 @@ func (s *Server) registerEnhancementTools() {
 			mcp.WithString("task", mcp.Description("Natural language task description")),
 			mcp.WithString("recent_symbols", mcp.Description("Comma-separated list of recently viewed symbol IDs")),
 			mcp.WithBoolean("include_source", mcp.Description("Include source code for top 5 candidates")),
+			mcp.WithNumber("limit", mcp.Description("Max candidates to return (default: 10)")),
+			mcp.WithString("cursor", mcp.Description("Opaque pagination cursor from a previous `next_cursor` to fetch the next page.")),
+			mcp.WithBoolean("paginate", mcp.Description("When true, the server caps each page at the project default budget and returns `next_cursor` for any tail.")),
+			mcp.WithNumber("max_bytes", mcp.Description("Cap the marshaled response at this many bytes. The longest list is trimmed; truncation metadata rides on the response.")),
+			mcp.WithString("fields", mcp.Description("Comma-separated list of fields to keep on each candidate (e.g. \"id,confidence,reason\").")),
 			mcp.WithBoolean("compact", mcp.Description("One-line-per-symbol text output")),
 			mcp.WithString("format", mcp.Description("Output format: json (default), gcx (GCX1 compact wire format), or toon")),
+			mcp.WithNumber("max_bytes", mcp.Description("Cap the marshaled response at this many bytes. The longest list is trimmed; truncation metadata rides on the response. Omit for no cap.")),
 		),
 		s.handlePrefetchContext,
 	)
@@ -115,6 +122,7 @@ func (s *Server) registerEnhancementTools() {
 			mcp.WithString("kind", mcp.Required(), mcp.Description("Analysis kind: dead_code | hotspots | cycles | would_create_cycle | todos | blame | coverage | stale_code | ownership | coverage_gaps | stale_flags | releases | cgo_users | wasm_users | orphan_tables | unreferenced_tables | coverage_summary")),
 			mcp.WithBoolean("compact", mcp.Description("One-line-per-result text output")),
 			mcp.WithString("format", mcp.Description("Output format: json (default), gcx (GCX1 compact wire format, per-kind hand-tuned encoder), or toon")),
+			mcp.WithNumber("max_bytes", mcp.Description("Cap the marshaled response at this many bytes. The longest list is trimmed; truncation metadata rides on the response. Omit for no cap.")),
 			mcp.WithBoolean("include_variables", mcp.Description("(dead_code) Include variable nodes (default false — usually false positives without data-flow analysis)")),
 			mcp.WithNumber("threshold", mcp.Description("(hotspots) Complexity score threshold (default: mean + 2σ)")),
 			mcp.WithString("scope", mcp.Description("(cycles) File path or package prefix to limit scope")),
@@ -150,8 +158,13 @@ func (s *Server) registerEnhancementTools() {
 			mcp.WithNumber("min_fan_out", mcp.Description("Minimum outgoing calls (default: 0)")),
 			mcp.WithNumber("min_churn", mcp.Description("Minimum session modification count (default: 0)")),
 			mcp.WithNumber("limit", mcp.Description("Max results (default: 20)")),
+			mcp.WithString("cursor", mcp.Description("Opaque pagination cursor from a previous `next_cursor` to fetch the next page.")),
+			mcp.WithBoolean("paginate", mcp.Description("When true, the server caps each page at the project default budget and returns `next_cursor` for any tail.")),
+			mcp.WithNumber("max_bytes", mcp.Description("Cap the marshaled response at this many bytes. The longest list is trimmed; truncation metadata rides on the response.")),
+			mcp.WithString("fields", mcp.Description("Comma-separated list of fields to keep on each result (e.g. \"id,score,fan_in\").")),
 			mcp.WithBoolean("compact", mcp.Description("One-line-per-result text output")),
 			mcp.WithString("format", mcp.Description("Output format: json (default), gcx (GCX1 compact wire format), or toon")),
+			mcp.WithNumber("max_bytes", mcp.Description("Cap the marshaled response at this many bytes. The longest list is trimmed; truncation metadata rides on the response. Omit for no cap.")),
 			mcp.WithString("repo", mcp.Description("Filter results to a specific repository prefix")),
 			mcp.WithString("project", mcp.Description("Filter results to repositories in a specific project")),
 			mcp.WithString("ref", mcp.Description("Filter results to repositories with a specific reference tag")),
@@ -224,8 +237,14 @@ func (s *Server) registerEnhancementTools() {
 			mcp.WithBoolean("include_deps", mcp.Description("(list) Include type=dependency contracts and contracts from vendored paths (vendor/, node_modules/, Pods/, .venv/). Default false.")),
 			mcp.WithString("type", mcp.Description("(list) Filter by type: http, grpc, graphql, topic, ws, env, openapi, dependency")),
 			mcp.WithString("role", mcp.Description("(list) Filter by role: provider or consumer")),
+			mcp.WithNumber("limit", mcp.Description("(list) Max contracts per page (default: 200)")),
+			mcp.WithString("cursor", mcp.Description("(list) Opaque pagination cursor from a previous `next_cursor` to fetch the next page.")),
+			mcp.WithBoolean("paginate", mcp.Description("(list) When true, caps each page at the project default budget and returns `next_cursor` for any tail.")),
+			mcp.WithNumber("max_bytes", mcp.Description("(list) Cap the marshaled response at this many bytes; the longest list is trimmed with truncation metadata.")),
+			mcp.WithString("fields", mcp.Description("(list) Comma-separated list of fields to keep on each contract (e.g. \"type,role,id\").")),
 			mcp.WithBoolean("compact", mcp.Description("One-line-per-contract text output")),
 			mcp.WithString("format", mcp.Description("Output format: json (default), gcx (GCX1 compact wire format), or toon")),
+			mcp.WithNumber("max_bytes", mcp.Description("Cap the marshaled response at this many bytes. The longest list is trimmed; truncation metadata rides on the response. Omit for no cap.")),
 		),
 		s.handleContracts,
 	)
@@ -323,7 +342,7 @@ func (s *Server) handleCheckGuards(ctx context.Context, req mcp.CallToolRequest)
 
 	if len(s.guardRules) == 0 {
 		if s.isGCX(ctx, req) {
-			return gcxResponse(encodeCheckGuards(nil, true))
+			return s.gcxResponseWithBudget(req)(encodeCheckGuards(nil, true))
 		}
 		empty := map[string]any{
 			"violations": []any{},
@@ -349,7 +368,7 @@ func (s *Server) handleCheckGuards(ctx context.Context, req mcp.CallToolRequest)
 	}
 
 	if s.isGCX(ctx, req) {
-		return gcxResponse(encodeCheckGuards(violations, false))
+		return s.gcxResponseWithBudget(req)(encodeCheckGuards(violations, false))
 	}
 
 	result := map[string]any{
@@ -569,12 +588,28 @@ func (s *Server) handlePrefetchContext(ctx context.Context, req mcp.CallToolRequ
 		return candidates[i].Confidence > candidates[j].Confidence
 	})
 
-	// Truncate to top 10
+	// Default page size 10, capped at totalCount. The cursor opens the
+	// rare "I want more than the top 10" path without making it the
+	// default — agents that don't paginate get the same first page
+	// they always got.
 	totalCount := len(candidates)
-	truncated := false
-	if len(candidates) > 10 {
-		candidates = candidates[:10]
-		truncated = true
+	limit := req.GetInt("limit", 10)
+	if limit <= 0 {
+		limit = 10
+	}
+	offset := decodeCursor(req.GetString("cursor", ""))
+	if offset > totalCount {
+		offset = totalCount
+	}
+	endIdx := offset + limit
+	if endIdx > totalCount {
+		endIdx = totalCount
+	}
+	candidates = candidates[offset:endIdx]
+	truncated := endIdx < totalCount
+	nextCursor := ""
+	if truncated {
+		nextCursor = encodeCursor(endIdx)
 	}
 
 	// Include source for top 5 if requested
@@ -606,13 +641,16 @@ func (s *Server) handlePrefetchContext(ctx context.Context, req mcp.CallToolRequ
 	}
 
 	if s.isGCX(ctx, req) {
-		return gcxResponse(encodePrefetchContext(candidates, totalCount, truncated, includeSource))
+		return s.gcxResponseWithBudget(req)(encodePrefetchContext(candidates, totalCount, truncated, includeSource))
 	}
 
 	result := map[string]any{
 		"candidates": candidates,
 		"total":      totalCount,
 		"truncated":  truncated,
+	}
+	if nextCursor != "" {
+		result["next_cursor"] = nextCursor
 	}
 	if s.isTOON(ctx, req) {
 		return returnTOON(result)
@@ -1851,7 +1889,7 @@ func (s *Server) handleFindDeadCode(ctx context.Context, req mcp.CallToolRequest
 				Line: e.Line,
 			})
 		}
-		return gcxResponse(encodeAnalyze("dead_code", items))
+		return s.gcxResponseWithBudget(req)(encodeAnalyze("dead_code", items))
 	}
 
 	if isCompact(req) {
@@ -1917,7 +1955,7 @@ func (s *Server) handleFindHotspots(ctx context.Context, req mcp.CallToolRequest
 				Score:          e.ComplexityScore,
 			})
 		}
-		return gcxResponse(encodeAnalyze("hotspots", items))
+		return s.gcxResponseWithBudget(req)(encodeAnalyze("hotspots", items))
 	}
 
 	if isCompact(req) {
@@ -2037,7 +2075,7 @@ func (s *Server) handleFindCycles(ctx context.Context, req mcp.CallToolRequest) 
 				Nodes:    c.Path,
 			})
 		}
-		return gcxResponse(encodeAnalyze("cycles", items))
+		return s.gcxResponseWithBudget(req)(encodeAnalyze("cycles", items))
 	}
 
 	if len(cycles) == 0 {
@@ -2094,7 +2132,7 @@ func (s *Server) handleWouldCreateCycle(ctx context.Context, req mcp.CallToolReq
 	wouldCycle, path := analysis.WouldCreateCycle(s.graph, fromID, toID)
 
 	if s.isGCX(ctx, req) {
-		return gcxResponse(encodeAnalyze("would_create_cycle", map[string]any{
+		return s.gcxResponseWithBudget(req)(encodeAnalyze("would_create_cycle", map[string]any{
 			"would_cycle": wouldCycle,
 			"path":        path,
 		}))
@@ -2860,16 +2898,27 @@ func (s *Server) handleGetContracts(ctx context.Context, req mcp.CallToolRequest
 	// Cap response — every per-contract row carries handler trails and
 	// schema metadata, so a few hundred contracts blows past the MCP
 	// per-response token cap. Default 200 surfaces enough to be useful;
-	// callers that need every contract pass `limit` explicitly.
+	// callers that need every contract pass `limit` explicitly. With
+	// pagination on, the contract list is sliced [offset, offset+limit)
+	// with a `next_cursor` returned when the tail is unread.
 	contractsLimit := 200
 	if v, ok := args["limit"].(float64); ok && v > 0 {
 		contractsLimit = int(v)
 	}
+	contractsOffset := decodeCursor(req.GetString("cursor", ""))
 	contractsTotal := len(filtered)
-	contractsTruncated := false
-	if len(filtered) > contractsLimit {
-		filtered = filtered[:contractsLimit]
-		contractsTruncated = true
+	if contractsOffset > contractsTotal {
+		contractsOffset = contractsTotal
+	}
+	contractsEnd := contractsOffset + contractsLimit
+	if contractsEnd > contractsTotal {
+		contractsEnd = contractsTotal
+	}
+	filtered = filtered[contractsOffset:contractsEnd]
+	contractsTruncated := contractsEnd < contractsTotal
+	contractsNextCursor := ""
+	if contractsTruncated {
+		contractsNextCursor = encodeCursor(contractsEnd)
 	}
 
 	if isCompact(req) {
@@ -2913,7 +2962,7 @@ func (s *Server) handleGetContracts(ctx context.Context, req mcp.CallToolRequest
 		if depsSkipped > 0 {
 			extra = append(extra, "dependencies_skipped", fmt.Sprintf("%d", depsSkipped))
 		}
-		return gcxResponse(encodeContractsList(filtered, len(filtered), extra...))
+		return s.gcxResponseWithBudget(req)(encodeContractsList(filtered, len(filtered), extra...))
 	}
 
 	// Group by repo, then by type for structured output.
@@ -2941,6 +2990,9 @@ func (s *Server) handleGetContracts(ctx context.Context, req mcp.CallToolRequest
 	}
 	if contractsTruncated {
 		payload["limit"] = contractsLimit
+	}
+	if contractsNextCursor != "" {
+		payload["next_cursor"] = contractsNextCursor
 	}
 	if otherReposTotal > 0 {
 		payload["other_repos"] = map[string]any{
@@ -3034,7 +3086,7 @@ func (s *Server) handleCheckContracts(ctx context.Context, req mcp.CallToolReque
 	}
 
 	if s.isGCX(ctx, req) {
-		return gcxResponse(encodeContractsCheck(result))
+		return s.gcxResponseWithBudget(req)(encodeContractsCheck(result))
 	}
 
 	payload := map[string]any{
@@ -3209,7 +3261,7 @@ func (s *Server) handleQueryFeedback(ctx context.Context, req mcp.CallToolReques
 			"most_demoted":  []any{},
 		}
 		if s.isGCX(ctx, req) {
-			return gcxResponse(encodeFeedbackQuery(empty))
+			return s.gcxResponseWithBudget(req)(encodeFeedbackQuery(empty))
 		}
 		if s.isTOON(ctx, req) {
 			return returnTOON(empty)
@@ -3234,7 +3286,7 @@ func (s *Server) handleQueryFeedback(ctx context.Context, req mcp.CallToolReques
 	}
 
 	if s.isGCX(ctx, req) {
-		return gcxResponse(encodeFeedbackQuery(stats))
+		return s.gcxResponseWithBudget(req)(encodeFeedbackQuery(stats))
 	}
 	if s.isTOON(ctx, req) {
 		return returnTOON(stats)

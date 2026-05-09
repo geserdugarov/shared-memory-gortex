@@ -117,7 +117,7 @@ func (s *Server) returnSubGraph(ctx context.Context, req mcp.CallToolRequest, sg
 		if tool == "" {
 			tool = "subgraph"
 		}
-		return gcxResponse(encodeSubGraph(tool, sg))
+		return s.gcxResponseWithBudget(req)(encodeSubGraph(tool, sg))
 	}
 	if s.isTOON(ctx, req) {
 		return subGraphToTOON(sg)
@@ -168,7 +168,33 @@ func returnTOON(payload any) (*mcp.CallToolResult, error) {
 // caller (or the per-session default) asks for it and JSON otherwise.
 // GCX is handled inline at the call site because GCX uses hand-tuned
 // per-tool encoders rather than reusing the JSON shape.
+//
+// Three pipeline stages run before the format encoder:
+//
+//  1. Sparse-fieldsets filter: when the caller passes
+//     `fields: "id,line"`, list rows are projected down to those keys.
+//     Trims response size at the row level.
+//  2. Graceful degradation: tools that registered a per-shape policy
+//     (`get_file_summary`, `get_editing_context`, `find_usages`, …)
+//     run a cascade — strip verbose meta, drop low-priority kinds,
+//     last-resort tail-trim. Quality stays high under pressure.
+//  3. Generic budget: tools without a registered shape fall back to
+//     a "trim the longest list" heuristic. Always emits inline data
+//     with `_truncated_by_budget` metadata; never falls through to
+//     a transport spill that the agent has to re-read from disk.
+//
+// effectiveBudget defaults to defaultMaxBytes when the caller does
+// not specify; pass `max_bytes: 0` to opt out of budgeting and get
+// the full result in one shot (transport spill if oversized).
 func (s *Server) respondJSONOrTOON(ctx context.Context, req mcp.CallToolRequest, payload any) (*mcp.CallToolResult, error) {
+	payload = applyFieldsFilter(payload, parseFields(req.GetString("fields", "")))
+	if budget := effectiveBudget(req); budget > 0 {
+		if shape, ok := degradeShapes[req.Params.Name]; ok {
+			payload, _ = applyDegradation(payload, shape, budget)
+		} else {
+			payload, _ = applyBudget(payload, budget)
+		}
+	}
 	if s.isTOON(ctx, req) {
 		return returnTOON(payload)
 	}
@@ -454,6 +480,10 @@ func (s *Server) registerCoreTools() {
 			mcp.WithDescription("Use instead of Grep to find symbols across the whole codebase. Supports natural language queries with camelCase-aware tokenization and BM25 ranking — 'validate token auth' finds validateToken, AuthMiddleware, parseJWT."),
 			mcp.WithString("query", mcp.Required(), mcp.Description("Search query — can be symbol name, concept, or multiple keywords")),
 			mcp.WithNumber("limit", mcp.Description("Max results (default: 20)")),
+			mcp.WithString("cursor", mcp.Description("Opaque pagination cursor returned in `next_cursor` from a previous call. Pass it back to fetch the next page. Omit for the first page.")),
+			mcp.WithBoolean("paginate", mcp.Description("When true, the server caps each page at the project default budget and returns `next_cursor` for any tail. Implies the caller will follow `next_cursor` to walk the rest. Default false (full result inline; transport spills to disk if oversized).")),
+			mcp.WithNumber("max_bytes", mcp.Description("Cap the marshaled response at this many bytes. The longest list is trimmed and `_truncated_by_budget` plus `_max_returned_<key>` / `_original_count_<key>` flags ride on the response. Omit for no cap.")),
+			mcp.WithString("fields", mcp.Description("Comma-separated list of fields to keep on each result (e.g. \"id,name,line\"). Drops the rest to save tokens.")),
 			mcp.WithBoolean("compact", mcp.Description("Return one-line-per-result text instead of JSON objects (saves 50-70% tokens)")),
 			mcp.WithString("format", mcp.Description("Output format: json (default), gcx (GCX1 compact wire format — round-trippable, ~40% fewer tokens), or toon")),
 			mcp.WithString("repo", mcp.Description("Filter results to a specific repository prefix")),
@@ -470,6 +500,7 @@ func (s *Server) registerCoreTools() {
 			mcp.WithString("path", mcp.Required(), mcp.Description("Relative file path")),
 			mcp.WithBoolean("compact", mcp.Description("One-line-per-symbol text output (saves 50-70% tokens)")),
 			mcp.WithString("format", mcp.Description("Output format: json (default), gcx (GCX1 compact wire format), or toon")),
+			mcp.WithNumber("max_bytes", mcp.Description("Cap the marshaled response at this many bytes. The longest list is trimmed; truncation metadata rides on the response. Omit for no cap.")),
 			mcp.WithString("repo", mcp.Description("Filter results to a specific repository prefix")),
 			mcp.WithString("project", mcp.Description("Filter results to repositories in a specific project")),
 			mcp.WithString("ref", mcp.Description("Filter results to repositories with a specific reference tag")),
@@ -486,6 +517,7 @@ func (s *Server) registerCoreTools() {
 			mcp.WithNumber("limit", mcp.Description("Max nodes (default: 50)")),
 			mcp.WithBoolean("compact", mcp.Description("One-line-per-symbol text output (saves 50-70% tokens)")),
 			mcp.WithString("format", mcp.Description("Output format: json (default), gcx (GCX1 compact wire format), or toon")),
+			mcp.WithNumber("max_bytes", mcp.Description("Cap the marshaled response at this many bytes. The longest list is trimmed; truncation metadata rides on the response. Omit for no cap.")),
 			mcp.WithString("min_tier", mcp.Description(minTierParamDescription)),
 		),
 		s.handleGetDependencies,
@@ -499,6 +531,7 @@ func (s *Server) registerCoreTools() {
 			mcp.WithNumber("limit", mcp.Description("Max nodes (default: 50)")),
 			mcp.WithBoolean("compact", mcp.Description("One-line-per-symbol text output (saves 50-70% tokens)")),
 			mcp.WithString("format", mcp.Description("Output format: json (default), gcx (GCX1 compact wire format), or toon")),
+			mcp.WithNumber("max_bytes", mcp.Description("Cap the marshaled response at this many bytes. The longest list is trimmed; truncation metadata rides on the response. Omit for no cap.")),
 			mcp.WithString("min_tier", mcp.Description(minTierParamDescription)),
 		),
 		s.handleGetDependents,
@@ -512,6 +545,7 @@ func (s *Server) registerCoreTools() {
 			mcp.WithNumber("limit", mcp.Description("Max nodes (default: 50)")),
 			mcp.WithBoolean("compact", mcp.Description("One-line-per-symbol text output (saves 50-70% tokens)")),
 			mcp.WithString("format", mcp.Description("Output format: json (default), gcx (GCX1 compact wire format), or toon")),
+			mcp.WithNumber("max_bytes", mcp.Description("Cap the marshaled response at this many bytes. The longest list is trimmed; truncation metadata rides on the response. Omit for no cap.")),
 			mcp.WithString("repo", mcp.Description("Filter results to a specific repository prefix")),
 			mcp.WithString("project", mcp.Description("Filter results to repositories in a specific project")),
 			mcp.WithString("ref", mcp.Description("Filter results to repositories with a specific reference tag")),
@@ -528,6 +562,7 @@ func (s *Server) registerCoreTools() {
 			mcp.WithNumber("limit", mcp.Description("Max nodes (default: 50)")),
 			mcp.WithBoolean("compact", mcp.Description("One-line-per-symbol text output (saves 50-70% tokens)")),
 			mcp.WithString("format", mcp.Description("Output format: json (default), gcx (GCX1 compact wire format), or toon")),
+			mcp.WithNumber("max_bytes", mcp.Description("Cap the marshaled response at this many bytes. The longest list is trimmed; truncation metadata rides on the response. Omit for no cap.")),
 			mcp.WithString("min_tier", mcp.Description(minTierParamDescription)),
 			mcp.WithBoolean("exclude_tests", mcp.Description("Drop callers originating in test functions (set true when you want production callers only)")),
 		),
@@ -539,6 +574,7 @@ func (s *Server) registerCoreTools() {
 			mcp.WithDescription("Finds all concrete types that implement an interface. Use before changing an interface to identify all types that will be affected."),
 			mcp.WithString("id", mcp.Required(), mcp.Description("Interface node ID")),
 			mcp.WithString("format", mcp.Description("Output format: json (default), gcx (GCX1 compact wire format), or toon")),
+			mcp.WithNumber("max_bytes", mcp.Description("Cap the marshaled response at this many bytes. The longest list is trimmed; truncation metadata rides on the response. Omit for no cap.")),
 			mcp.WithString("min_tier", mcp.Description(minTierParamDescription)),
 		),
 		s.handleFindImplementations,
@@ -550,6 +586,7 @@ func (s *Server) registerCoreTools() {
 			mcp.WithString("id", mcp.Required(), mcp.Description("Method node ID")),
 			mcp.WithString("direction", mcp.Description("'children' (default — overriders) or 'parents' (overridden methods)")),
 			mcp.WithString("format", mcp.Description("Output format: json (default), gcx (GCX1 compact wire format), or toon")),
+			mcp.WithNumber("max_bytes", mcp.Description("Cap the marshaled response at this many bytes. The longest list is trimmed; truncation metadata rides on the response. Omit for no cap.")),
 			mcp.WithString("min_tier", mcp.Description(minTierParamDescription)),
 		),
 		s.handleFindOverrides,
@@ -562,6 +599,7 @@ func (s *Server) registerCoreTools() {
 			mcp.WithNumber("limit", mcp.Description("Max nodes (default: 50)")),
 			mcp.WithBoolean("compact", mcp.Description("One-line-per-symbol text output (saves 50-70% tokens)")),
 			mcp.WithString("format", mcp.Description("Output format: json (default), gcx (GCX1 compact wire format), or toon")),
+			mcp.WithNumber("max_bytes", mcp.Description("Cap the marshaled response at this many bytes. The longest list is trimmed; truncation metadata rides on the response. Omit for no cap.")),
 			mcp.WithString("repo", mcp.Description("Filter results to a specific repository prefix")),
 			mcp.WithString("project", mcp.Description("Filter results to repositories in a specific project")),
 			mcp.WithString("ref", mcp.Description("Filter results to repositories with a specific reference tag")),
@@ -579,6 +617,7 @@ func (s *Server) registerCoreTools() {
 			mcp.WithNumber("limit", mcp.Description("Max nodes (default: 50)")),
 			mcp.WithBoolean("compact", mcp.Description("One-line-per-symbol text output (saves 50-70% tokens)")),
 			mcp.WithString("format", mcp.Description("Output format: json (default), gcx (GCX1 compact wire format), or toon")),
+			mcp.WithNumber("max_bytes", mcp.Description("Cap the marshaled response at this many bytes. The longest list is trimmed; truncation metadata rides on the response. Omit for no cap.")),
 		),
 		s.handleGetCluster,
 	)
@@ -681,6 +720,7 @@ func (s *Server) handleSearchSymbols(ctx context.Context, req mcp.CallToolReques
 		return mcp.NewToolResultError("query is required"), nil
 	}
 	limit := req.GetInt("limit", 20)
+	offset := decodeCursor(req.GetString("cursor", ""))
 
 	sess := s.sessionFor(ctx)
 	sess.recordSearch(q)
@@ -689,12 +729,13 @@ func (s *Server) handleSearchSymbols(ctx context.Context, req mcp.CallToolReques
 	// / `project` args win per-field; empty falls through to the
 	// server's --workspace flag. SearchSymbolsScoped over-fetches and
 	// post-filters, so ranking is preserved while results stay inside
-	// the boundary.
+	// the boundary. With pagination we over-fetch to (offset + limit
+	// + 10) so the post-filter slack still leaves a full page.
 	workspaceArg := req.GetString("workspace", "")
 	projectArg := req.GetString("project", "")
 	scopeWS, scopeProj := s.resolveQueryScope(workspaceArg, projectArg)
 	scope := query.QueryOptions{WorkspaceID: scopeWS, ProjectID: scopeProj}
-	nodes := s.engine.SearchSymbolsScoped(q, limit+10, scope)
+	nodes := s.engine.SearchSymbolsScoped(q, offset+limit+10, scope)
 
 	// Apply repo/project/ref filter.
 	allowed, filterErr := s.resolveRepoFilter(req)
@@ -720,28 +761,35 @@ func (s *Server) handleSearchSymbols(ctx context.Context, req mcp.CallToolReques
 	// Cap at top limit so unseen "overflow" results don't get credited.
 	recordLastSearchFromNodes(sess, q, nodes, limit)
 
-	if isCompact(req) {
-		if len(nodes) > limit {
-			nodes = nodes[:limit]
-		}
-		return mcp.NewToolResultText(compactNodes(nodes)), nil
+	total := len(nodes)
+	// Slice the (offset, limit) window. nextCursor is empty when the
+	// last row in `nodes` is included.
+	end := offset + limit
+	if end > total {
+		end = total
+	}
+	if offset > total {
+		offset = total
+	}
+	page := nodes[offset:end]
+	nextCursor := ""
+	if end < total {
+		nextCursor = encodeCursor(end)
 	}
 
-	total := len(nodes)
+	if isCompact(req) {
+		return mcp.NewToolResultText(compactNodes(page)), nil
+	}
 
 	if s.isGCX(ctx, req) {
-		return gcxResponse(encodeSearchSymbols(nodes, total, limit))
-	}
-
-	if len(nodes) > limit {
-		nodes = nodes[:limit]
+		return s.gcxResponseWithBudget(req)(encodeSearchSymbols(page, total, len(page)))
 	}
 
 	if s.isTOON(ctx, req) {
 		result := toonSearchResult{
-			Results:   nodesToTOONRows(nodes),
+			Results:   nodesToTOONRows(page),
 			Total:     total,
-			Truncated: total > limit,
+			Truncated: end < total,
 		}
 		data, err := toon.Marshal(result)
 		if err == nil {
@@ -750,14 +798,18 @@ func (s *Server) handleSearchSymbols(ctx context.Context, req mcp.CallToolReques
 	}
 
 	var results []map[string]any
-	for _, n := range nodes {
+	for _, n := range page {
 		results = append(results, n.Brief())
 	}
-	return s.respondJSONOrTOON(ctx, req, map[string]any{
+	resp := map[string]any{
 		"results":   results,
 		"total":     total,
-		"truncated": total > limit,
-	})
+		"truncated": end < total,
+	}
+	if nextCursor != "" {
+		resp["next_cursor"] = nextCursor
+	}
+	return s.respondJSONOrTOON(ctx, req, resp)
 }
 
 func (s *Server) handleGetFileSummary(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -795,7 +847,7 @@ func (s *Server) handleGetFileSummary(ctx context.Context, req mcp.CallToolReque
 	}
 
 	if s.isGCX(ctx, req) {
-		return gcxResponse(encodeFileSummary(sg, etag))
+		return s.gcxResponseWithBudget(req)(encodeFileSummary(sg, etag))
 	}
 
 	// Wrap with etag in response.
@@ -1011,7 +1063,7 @@ func (s *Server) handleFindUsages(ctx context.Context, req mcp.CallToolRequest) 
 	sg.FilterByMinTier(minTier)
 	enrichSubGraphEdges(sg)
 	if s.isGCX(ctx, req) {
-		return gcxResponse(encodeFindUsages(sg))
+		return s.gcxResponseWithBudget(req)(encodeFindUsages(sg))
 	}
 	return s.returnSubGraph(ctx, req, sg)
 }

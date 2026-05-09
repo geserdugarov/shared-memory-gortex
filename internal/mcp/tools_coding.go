@@ -23,6 +23,7 @@ func (s *Server) registerCodingTools() {
 			mcp.WithString("path", mcp.Required(), mcp.Description("Relative file path")),
 			mcp.WithString("detail", mcp.Description("brief or full (default: brief)")),
 			mcp.WithString("format", mcp.Description("Output format: json (default), gcx (GCX1 compact wire format), or toon")),
+			mcp.WithNumber("max_bytes", mcp.Description("Cap the marshaled response at this many bytes. The longest list is trimmed; truncation metadata rides on the response. Omit for no cap.")),
 			mcp.WithString("if_none_match", mcp.Description("ETag from a previous response — returns not_modified if content unchanged")),
 		),
 		s.handleGetEditingContext,
@@ -42,6 +43,7 @@ func (s *Server) registerCodingTools() {
 			mcp.WithDescription("Given a list of symbols you plan to modify, returns risk-tiered blast radius: d=1 will break, d=2 likely affected, d=3 needs testing. Includes affected processes and communities."),
 			mcp.WithString("ids", mcp.Required(), mcp.Description("Comma-separated list of symbol IDs to modify")),
 			mcp.WithString("format", mcp.Description("Output format: json (default), gcx (GCX1 compact wire format), or toon")),
+			mcp.WithNumber("max_bytes", mcp.Description("Cap the marshaled response at this many bytes. The longest list is trimmed; truncation metadata rides on the response. Omit for no cap.")),
 		),
 		s.handleEnhancedChangeImpact,
 	)
@@ -53,6 +55,7 @@ func (s *Server) registerCodingTools() {
 			mcp.WithNumber("context_lines", mcp.Description("Extra lines above/below the symbol (default: 3)")),
 			mcp.WithString("if_none_match", mcp.Description("ETag from a previous response — returns not_modified if content unchanged")),
 			mcp.WithString("format", mcp.Description("Output format: json (default), gcx (GCX1 compact wire format), or toon")),
+			mcp.WithNumber("max_bytes", mcp.Description("Cap the marshaled response at this many bytes. The longest list is trimmed; truncation metadata rides on the response. Omit for no cap.")),
 		),
 		s.handleGetSymbolSource,
 	)
@@ -65,6 +68,7 @@ func (s *Server) registerCodingTools() {
 			mcp.WithNumber("context_lines", mcp.Description("Extra lines above/below source (default: 3, only if include_source)")),
 			mcp.WithString("if_none_match", mcp.Description("ETag from a previous response — returns not_modified if content unchanged")),
 			mcp.WithString("format", mcp.Description("Output format: json (default), gcx (GCX1 compact wire format), or toon")),
+			mcp.WithNumber("max_bytes", mcp.Description("Cap the marshaled response at this many bytes. The longest list is trimmed; truncation metadata rides on the response. Omit for no cap.")),
 		),
 		s.handleBatchSymbols,
 	)
@@ -143,6 +147,7 @@ func (s *Server) registerCodingTools() {
 			mcp.WithString("entry_point", mcp.Description("Optional symbol ID or file path to start from")),
 			mcp.WithNumber("max_symbols", mcp.Description("Max symbols to include source for (default: 5)")),
 			mcp.WithString("format", mcp.Description("Output format: json (default), gcx (GCX1 compact wire format), or toon")),
+			mcp.WithNumber("max_bytes", mcp.Description("Cap the marshaled response at this many bytes. The longest list is trimmed; truncation metadata rides on the response. Omit for no cap.")),
 			mcp.WithString("repo", mcp.Description("Filter results to a specific repository prefix")),
 			mcp.WithString("project", mcp.Description("Filter results to repositories in a specific project")),
 		),
@@ -292,7 +297,7 @@ func (s *Server) handleGetEditingContext(ctx context.Context, req mcp.CallToolRe
 	}
 
 	if s.isGCX(ctx, req) {
-		return gcxResponse(encodeEditingContext(out.File, out.Defines, out.Imports, out.CalledBy, out.Calls, etag))
+		return s.gcxResponseWithBudget(req)(encodeEditingContext(out.File, out.Defines, out.Imports, out.CalledBy, out.Calls, etag))
 	}
 
 	// Add etag to response by marshaling to map.
@@ -494,7 +499,7 @@ func (s *Server) handleGetSymbolSource(ctx context.Context, req mcp.CallToolRequ
 	result["etag"] = etag
 
 	if s.isGCX(ctx, req) {
-		return gcxResponse(encodeGetSymbolSource(node, source, startLine, etag))
+		return s.gcxResponseWithBudget(req)(encodeGetSymbolSource(node, source, startLine, etag))
 	}
 	if s.isTOON(ctx, req) {
 		return returnTOON(result)
@@ -633,7 +638,7 @@ func (s *Server) handleBatchSymbols(ctx context.Context, req mcp.CallToolRequest
 	batchResult["etag"] = etag
 
 	if s.isGCX(ctx, req) {
-		return gcxResponse(encodeBatchSymbols(results, includeSource))
+		return s.gcxResponseWithBudget(req)(encodeBatchSymbols(results, includeSource))
 	}
 	if s.isTOON(ctx, req) {
 		return returnTOON(batchResult)
@@ -1353,7 +1358,7 @@ func (s *Server) handleSmartContext(ctx context.Context, req mcp.CallToolRequest
 	result["files_to_edit"] = filesToEdit
 
 	if s.isGCX(ctx, req) {
-		return gcxResponse(encodeSmartContext(result))
+		return s.gcxResponseWithBudget(req)(encodeSmartContext(result))
 	}
 	if s.isTOON(ctx, req) {
 		return returnTOON(result)

@@ -120,12 +120,22 @@ func (s *Server) handleWinnowSymbols(ctx context.Context, req mcp.CallToolReques
 
 	results := s.winnowSymbols(c, allowed)
 	total := len(results)
-	if len(results) > c.Limit {
-		results = results[:c.Limit]
+	offset := decodeCursor(req.GetString("cursor", ""))
+	if offset > total {
+		offset = total
+	}
+	end := offset + c.Limit
+	if end > total {
+		end = total
+	}
+	results = results[offset:end]
+	nextCursor := ""
+	if end < total {
+		nextCursor = encodeCursor(end)
 	}
 
 	if s.isGCX(ctx, req) {
-		return gcxResponse(encodeWinnowSymbols(results, total, c.Limit))
+		return s.gcxResponseWithBudget(req)(encodeWinnowSymbols(results, total, c.Limit))
 	}
 
 	if isCompact(req) {
@@ -145,12 +155,16 @@ func (s *Server) handleWinnowSymbols(ctx context.Context, req mcp.CallToolReques
 		row["contributions"] = floatMapRound(r.Contributions)
 		rows = append(rows, row)
 	}
-	return s.respondJSONOrTOON(ctx, req, map[string]any{
+	resp := map[string]any{
 		"results":   rows,
 		"total":     total,
-		"truncated": total > c.Limit,
+		"truncated": end < total,
 		"weights":   winnowAxisWeights,
-	})
+	}
+	if nextCursor != "" {
+		resp["next_cursor"] = nextCursor
+	}
+	return s.respondJSONOrTOON(ctx, req, resp)
 }
 
 // parseWinnowConstraints extracts the structured constraints from the MCP

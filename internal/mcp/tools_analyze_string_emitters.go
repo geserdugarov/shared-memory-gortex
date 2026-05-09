@@ -87,7 +87,7 @@ func (s *Server) handleAnalyzeStringEmitters(ctx context.Context, req mcp.CallTo
 				Emitters: strings.Join(r.Emitters, ","),
 			})
 		}
-		return gcxResponse(encodeAnalyze("string_emitters", items))
+		return s.gcxResponseWithBudget(req)(encodeAnalyze("string_emitters", items))
 	}
 
 	if isCompact(req) {

@@ -312,7 +312,7 @@ func (s *Server) handleEnhancedChangeImpact(ctx context.Context, req mcp.CallToo
 		// JSON; routing through it keeps a single source of truth for
 		// field names and avoids divergence on the next analyzer
 		// addition.
-		return gcxResponse(encodeChangeImpact(result))
+		return s.gcxResponseWithBudget(req)(encodeChangeImpact(result))
 	}
 	if s.isTOON(ctx, req) {
 		return returnTOON(result)

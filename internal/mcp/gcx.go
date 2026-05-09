@@ -43,14 +43,27 @@ func (s *Server) isGCX(ctx context.Context, req mcp.CallToolRequest) bool {
 	return s.resolveSessionFormat(ctx) == "gcx"
 }
 
-// gcxResponse wraps a GCX byte payload into an MCP text-result. If the
-// encoder returned an error, the caller gets a structured MCP error
-// result instead of a half-written payload.
-func gcxResponse(payload []byte, err error) (*mcp.CallToolResult, error) {
-	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("wire encode failed: %v", err)), nil
+// gcxResponseWithBudget binds a request to the gcx-response builder.
+// Returns a 2-arg function so it can be called inline with the
+// encoder's `(payload []byte, err error)` return tuple — the same
+// invocation shape as the legacy gcxResponse. Byte-level row-tail
+// trimming kicks in when the caller opted into a budget (`max_bytes`
+// or `paginate: true`); without opt-in the payload is forwarded
+// untouched, so non-budgeted callers retain pre-budgeting behaviour
+// (full result inline, transport-spilled if the harness cap fires).
+func (s *Server) gcxResponseWithBudget(req mcp.CallToolRequest) func([]byte, error) (*mcp.CallToolResult, error) {
+	budget := effectiveBudget(req)
+	return func(payload []byte, err error) (*mcp.CallToolResult, error) {
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("wire encode failed: %v", err)), nil
+		}
+		if budget > 0 {
+			if trimmed, _ := trimGCXBytes(payload, budget); trimmed != nil {
+				payload = trimmed
+			}
+		}
+		return mcp.NewToolResultText(string(payload)), nil
 	}
-	return mcp.NewToolResultText(string(payload)), nil
 }
 
 // newGCX creates an encoder writing to w with the given tool + fields.

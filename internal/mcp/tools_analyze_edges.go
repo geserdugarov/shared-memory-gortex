@@ -112,7 +112,7 @@ func (s *Server) handleAnalyzeChannelOps(ctx context.Context, req mcp.CallToolRe
 				Receivers: strings.Join(r.Receivers, ","),
 			})
 		}
-		return gcxResponse(encodeAnalyze("channel_ops", items))
+		return s.gcxResponseWithBudget(req)(encodeAnalyze("channel_ops", items))
 	}
 
 	if isCompact(req) {
@@ -190,7 +190,7 @@ func (s *Server) handleAnalyzeGoroutineSpawns(ctx context.Context, req mcp.CallT
 				Spawners: strings.Join(r.Spawners, ","),
 			})
 		}
-		return gcxResponse(encodeAnalyze("goroutine_spawns", items))
+		return s.gcxResponseWithBudget(req)(encodeAnalyze("goroutine_spawns", items))
 	}
 
 	if isCompact(req) {
@@ -298,7 +298,7 @@ func (s *Server) handleAnalyzeFieldWriters(ctx context.Context, req mcp.CallTool
 				Writers: strings.Join(r.Writers, ","),
 			})
 		}
-		return gcxResponse(encodeAnalyze("field_writers", items))
+		return s.gcxResponseWithBudget(req)(encodeAnalyze("field_writers", items))
 	}
 
 	if isCompact(req) {
@@ -377,7 +377,7 @@ func (s *Server) handleAnalyzeAnnotationUsers(ctx context.Context, req mcp.CallT
 			for _, r := range rows {
 				items = append(items, annotatedItem(r))
 			}
-			return gcxResponse(encodeAnalyze("annotation_users", items))
+			return s.gcxResponseWithBudget(req)(encodeAnalyze("annotation_users", items))
 		}
 		if isCompact(req) {
 			var b strings.Builder
@@ -446,7 +446,7 @@ func (s *Server) handleAnalyzeAnnotationUsers(ctx context.Context, req mcp.CallT
 				Users: r.Users,
 			})
 		}
-		return gcxResponse(encodeAnalyze("annotation_users.list", items))
+		return s.gcxResponseWithBudget(req)(encodeAnalyze("annotation_users.list", items))
 	}
 
 	if isCompact(req) {
@@ -548,7 +548,7 @@ func (s *Server) handleAnalyzeConfigReaders(ctx context.Context, req mcp.CallToo
 				Readers: strings.Join(r.Readers, ","),
 			})
 		}
-		return gcxResponse(encodeAnalyze("config_readers", items))
+		return s.gcxResponseWithBudget(req)(encodeAnalyze("config_readers", items))
 	}
 
 	if isCompact(req) {
@@ -668,7 +668,7 @@ func (s *Server) handleAnalyzeEventEmitters(ctx context.Context, req mcp.CallToo
 				Emitters: strings.Join(r.Emitters, ","),
 			})
 		}
-		return gcxResponse(encodeAnalyze("event_emitters", items))
+		return s.gcxResponseWithBudget(req)(encodeAnalyze("event_emitters", items))
 	}
 
 	if isCompact(req) {
@@ -788,7 +788,7 @@ func (s *Server) handleAnalyzeErrorSurface(ctx context.Context, req mcp.CallTool
 				Errors: strings.Join(r.Errors, ","),
 			})
 		}
-		return gcxResponse(encodeAnalyze("error_surface", items))
+		return s.gcxResponseWithBudget(req)(encodeAnalyze("error_surface", items))
 	}
 
 	if isCompact(req) {

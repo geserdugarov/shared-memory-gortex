@@ -85,7 +85,7 @@ func (s *Server) handleAnalyzeRoutes(ctx context.Context, req mcp.CallToolReques
 		for _, r := range rows {
 			items = append(items, routeItem(*r))
 		}
-		return gcxResponse(encodeAnalyze("routes", items))
+		return s.gcxResponseWithBudget(req)(encodeAnalyze("routes", items))
 	}
 	if isCompact(req) {
 		var b strings.Builder
@@ -203,7 +203,7 @@ func (s *Server) handleAnalyzeModels(ctx context.Context, req mcp.CallToolReques
 		for _, r := range rows {
 			items = append(items, modelItem(*r))
 		}
-		return gcxResponse(encodeAnalyze("models", items))
+		return s.gcxResponseWithBudget(req)(encodeAnalyze("models", items))
 	}
 	if isCompact(req) {
 		var b strings.Builder
@@ -307,7 +307,7 @@ func (s *Server) componentsRollup(ctx context.Context, req mcp.CallToolRequest, 
 		for _, r := range rows {
 			items = append(items, componentRollupItem(*r))
 		}
-		return gcxResponse(encodeAnalyze("components", items))
+		return s.gcxResponseWithBudget(req)(encodeAnalyze("components", items))
 	}
 	if isCompact(req) {
 		var b strings.Builder
@@ -373,7 +373,7 @@ func (s *Server) componentsForOne(ctx context.Context, req mcp.CallToolRequest, 
 				Line:     r.Line,
 			})
 		}
-		return gcxResponse(encodeAnalyze("components.children", items))
+		return s.gcxResponseWithBudget(req)(encodeAnalyze("components.children", items))
 	}
 	if isCompact(req) {
 		var b strings.Builder

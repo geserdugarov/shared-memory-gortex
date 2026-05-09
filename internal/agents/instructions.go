@@ -121,6 +121,24 @@ For list-shaped responses (` + "`search_symbols`" + `, ` + "`find_usages`" + `, 
 
 Explicit ` + "`format`" + ` arg always overrides the session default in either direction.
 
+### Pagination, sparse fieldsets, and graceful degradation
+
+Every list-shaped tool runs through a per-response budget by default — the agent harness's spill-to-disk fallback is a true edge case, not the routine outcome on real-world payloads. When a response would exceed the budget, the server runs a priority-aware cascade:
+
+1. **Strip verbose meta** (` + "`doc`" + `, raw ` + "`meta`" + ` blobs) — cheapest cut, never drops rows.
+2. **Drop tier-3 rows** — params, closures, generic params, ` + "`param_of`" + ` / ` + "`typed_as`" + ` / ` + "`value_flow`" + ` edges, low-confidence (` + "`text_matched`" + `) edges. High-noise rows agents almost never need on the first response.
+3. **Drop tier-2 rows** — fields, constants, variables, references, instantiates, etc.
+4. **Last-resort tail-trim** of the longest remaining tier-1 list.
+
+Each escape adds metadata: ` + "`_meta_stripped`" + `, ` + "`_dropped_tier_<N>_<list>`" + `, ` + "`_truncated_by_budget`" + `, ` + "`_max_returned_<list>`" + `, ` + "`_original_count_<list>`" + `. Use them to decide whether to narrow the filter, raise ` + "`max_bytes`" + `, or paginate.
+
+Knobs you can pull when you need something different:
+
+- **Pagination** — ` + "`search_symbols`" + `, ` + "`winnow_symbols`" + `, ` + "`prefetch_context`" + `, and ` + "`contracts`" + ` (action=list) accept ` + "`cursor`" + ` (opaque token from a previous ` + "`next_cursor`" + `). Don't parse the cursor; round-trip what the server gave you.
+- **Explicit budget** — pass ` + "`max_bytes: <N>`" + ` to override the project default. Pass ` + "`max_bytes: 0`" + ` to opt OUT of budgeting entirely — full result inline, transport spills if oversized. Use the opt-out only when you genuinely need every row (security audits, exhaustive enumeration).
+- **Sparse fieldsets** — pass ` + "`fields: \"id,line\"`" + ` (comma-separated) to drop columns at the row level. Pure size win, no priority drops.
+- **Limit defaults** — most tools default to 20–50 rows; raise ` + "`limit`" + ` only when a single page is too small. Pagination is preferred over a giant ` + "`limit`" + `.
+
 ### Session Start
 
 The SessionStart hook injects daemon status (tracked repos, cwd coverage, ready/warmup state). If you see "daemon is not running" — run ` + "`gortex daemon start --detach`" + ` and re-run the task. If you see "cwd is not covered by any tracked repo" — graph tools won't be available for that directory.
@@ -161,6 +179,16 @@ Order of preference: **gcx > toon > json**. For known clients (claude-code, curs
 | GCX-blind tooling needing tabular text| Pass ` + "`format: \"toon\"`" + ` — TOON is the second-tier fallback (lossy but ~10–15% smaller than JSON) |
 | Parsing compact text output           | Use ` + "`@gortex/wire`" + ` (npm) or the Go ` + "`github.com/gortexhq/gcx-go`" + ` package (MIT) — both decode GCX back to structured rows |
 | Reading ` + "`compact: true`" + ` output        | Prefer ` + "`format: \"gcx\"`" + ` — lossy text is being phased out; GCX is round-trippable and tokenizer-optimised |
+
+### Pagination, sparse fieldsets, and opt-in budget
+
+Tools default to "return what you have" — full result inline, MCP transport spills to a side file if your harness cap fires. Three opt-in knobs let you trade rows for staying inline:
+
+| Instead of...                         | You MUST use...                          |
+|---------------------------------------|------------------------------------------|
+| Walking thousands of results in one call | Pass ` + "`cursor`" + ` (opaque token from a previous ` + "`next_cursor`" + `) on ` + "`search_symbols`" + ` / ` + "`winnow_symbols`" + ` / ` + "`prefetch_context`" + ` / ` + "`contracts`" + `; set ` + "`paginate: true`" + ` to also cap each page at the project default budget |
+| Returning every column on every row   | Pass ` + "`fields: \"id,line\"`" + ` (comma-separated) to drop verbose ` + "`meta`" + ` / ` + "`doc`" + ` / signature columns. Pure size win, no truncation |
+| Asking for a giant ` + "`limit`" + `              | Use the default page size and paginate; or pass ` + "`max_bytes: <N>`" + ` to cap the response (longest list is trimmed; truncation metadata rides on the response) |
 
 ### Impact Analysis and Safety
 

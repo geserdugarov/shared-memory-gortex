@@ -170,7 +170,7 @@ func (s *Server) externalCallsForModule(ctx context.Context, req mcp.CallToolReq
 		for _, r := range rows {
 			items = append(items, externalSymbolItem(*r))
 		}
-		return gcxResponse(encodeAnalyze("external_calls.symbols", items))
+		return s.gcxResponseWithBudget(req)(encodeAnalyze("external_calls.symbols", items))
 	}
 	if isCompact(req) {
 		var b strings.Builder
@@ -210,7 +210,7 @@ func (s *Server) emitExternalCallsRollup(ctx context.Context, req mcp.CallToolRe
 				Calls:      r.Calls,
 			})
 		}
-		return gcxResponse(encodeAnalyze("external_calls", items))
+		return s.gcxResponseWithBudget(req)(encodeAnalyze("external_calls", items))
 	}
 	if isCompact(req) {
 		var b strings.Builder

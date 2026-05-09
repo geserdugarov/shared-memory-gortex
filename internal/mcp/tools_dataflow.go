@@ -32,6 +32,7 @@ func (s *Server) registerDataflowTools() {
 			mcp.WithNumber("max_depth", mcp.Description("Maximum BFS hops (default: 8)")),
 			mcp.WithNumber("max_paths", mcp.Description("Maximum number of paths to return (default: 10)")),
 			mcp.WithString("format", mcp.Description("Output format: json (default), gcx (GCX1 compact wire format), or toon")),
+			mcp.WithNumber("max_bytes", mcp.Description("Cap the marshaled response at this many bytes. The longest list is trimmed; truncation metadata rides on the response. Omit for no cap.")),
 		),
 		s.handleFlowBetween,
 	)
@@ -44,6 +45,7 @@ func (s *Server) registerDataflowTools() {
 			mcp.WithNumber("max_depth", mcp.Description("Maximum BFS hops per (source,sink) pair (default: 8)")),
 			mcp.WithNumber("limit", mcp.Description("Maximum findings to return (default: 20)")),
 			mcp.WithString("format", mcp.Description("Output format: json (default), gcx (GCX1 compact wire format), or toon")),
+			mcp.WithNumber("max_bytes", mcp.Description("Cap the marshaled response at this many bytes. The longest list is trimmed; truncation metadata rides on the response. Omit for no cap.")),
 		),
 		s.handleTaintPaths,
 	)
@@ -66,7 +68,7 @@ func (s *Server) handleFlowBetween(ctx context.Context, req mcp.CallToolRequest)
 
 	if s.isGCX(ctx, req) {
 		payload, err := encodeFlowBetween(source, sink, paths)
-		return gcxResponse(payload, err)
+		return s.gcxResponseWithBudget(req)(payload, err)
 	}
 
 	result := map[string]any{
@@ -107,7 +109,7 @@ func (s *Server) handleTaintPaths(ctx context.Context, req mcp.CallToolRequest) 
 
 	if s.isGCX(ctx, req) {
 		payload, err := encodeTaintPaths(srcRaw, sinkRaw, findings)
-		return gcxResponse(payload, err)
+		return s.gcxResponseWithBudget(req)(payload, err)
 	}
 
 	rows := make([]map[string]any, 0, len(findings))

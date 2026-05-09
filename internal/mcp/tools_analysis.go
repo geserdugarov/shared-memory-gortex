@@ -37,7 +37,7 @@ func (s *Server) registerAnalysisTools() {
 	)
 }
 
-func (s *Server) handleGetCommunities(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (s *Server) handleGetCommunities(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	comms := s.getCommunities()
 
 	// If id is provided, return the single community in detail.
@@ -93,7 +93,7 @@ func (s *Server) handleGetCommunities(_ context.Context, req mcp.CallToolRequest
 	})
 }
 
-func (s *Server) handleGetProcesses(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (s *Server) handleGetProcesses(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	procs := s.getProcesses()
 
 	// If id is provided, return the single process in detail.
@@ -203,7 +203,7 @@ func uniqueRepoPrefixesFromSteps(steps []analysis.Step) []string {
 	return out
 }
 
-func (s *Server) handleDetectChanges(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (s *Server) handleDetectChanges(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	scope := req.GetString("scope", "unstaged")
 	baseRef := req.GetString("base_ref", "main")
 
@@ -252,7 +252,7 @@ func (s *Server) handleDetectChanges(_ context.Context, req mcp.CallToolRequest)
 
 // handleEnhancedChangeImpact replaces the original explain_change_impact with risk tiering
 // and cross-community warnings.
-func (s *Server) handleEnhancedChangeImpact(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (s *Server) handleEnhancedChangeImpact(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	idsStr, err := req.RequireString("ids")
 	if err != nil {
 		return mcp.NewToolResultError("ids is required"), nil

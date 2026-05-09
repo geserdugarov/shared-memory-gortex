@@ -51,7 +51,7 @@ type externalSymbolRow struct {
 //   - module_path: substring match on the module path (e.g. "github.com"
 //     to filter to module-cache only).
 //   - name: substring match on external symbol name (used with id).
-func (s *Server) handleAnalyzeExternalCalls(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (s *Server) handleAnalyzeExternalCalls(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	args := req.GetArguments()
 	idFilter := strings.TrimSpace(stringArg(args, "id"))
 	moduleKindFilter := strings.ToLower(strings.TrimSpace(stringArg(args, "module_kind")))
@@ -59,14 +59,14 @@ func (s *Server) handleAnalyzeExternalCalls(_ context.Context, req mcp.CallToolR
 	nameFilter := strings.ToLower(strings.TrimSpace(stringArg(args, "name")))
 
 	if idFilter != "" {
-		return s.externalCallsForModule(req, idFilter, nameFilter)
+		return s.externalCallsForModule(ctx, req, idFilter, nameFilter)
 	}
-	return s.externalCallsRollup(req, moduleKindFilter, modulePathFilter)
+	return s.externalCallsRollup(ctx, req, moduleKindFilter, modulePathFilter)
 }
 
 // externalCallsRollup groups external attributions by module and returns
 // per-module call/symbol counts.
-func (s *Server) externalCallsRollup(req mcp.CallToolRequest, moduleKindFilter, modulePathFilter string) (*mcp.CallToolResult, error) {
+func (s *Server) externalCallsRollup(ctx context.Context, req mcp.CallToolRequest, moduleKindFilter, modulePathFilter string) (*mcp.CallToolResult, error) {
 	byModule := map[string]*externalModuleRow{}
 
 	for _, n := range s.graph.AllNodes() {
@@ -90,7 +90,7 @@ func (s *Server) externalCallsRollup(req mcp.CallToolRequest, moduleKindFilter, 
 		}
 	}
 	if len(byModule) == 0 {
-		return s.emitExternalCallsRollup(req, nil)
+		return s.emitExternalCallsRollup(ctx, req, nil)
 	}
 
 	for _, n := range s.graph.AllNodes() {
@@ -123,12 +123,12 @@ func (s *Server) externalCallsRollup(req mcp.CallToolRequest, moduleKindFilter, 
 		return rows[i].Path < rows[j].Path
 	})
 
-	return s.emitExternalCallsRollup(req, rows)
+	return s.emitExternalCallsRollup(ctx, req, rows)
 }
 
 // externalCallsForModule lists every external symbol attributed to one
 // KindModule, with its caller count.
-func (s *Server) externalCallsForModule(req mcp.CallToolRequest, moduleID, nameFilter string) (*mcp.CallToolResult, error) {
+func (s *Server) externalCallsForModule(ctx context.Context, req mcp.CallToolRequest, moduleID, nameFilter string) (*mcp.CallToolResult, error) {
 	mod := s.graph.GetNode(moduleID)
 	rows := []*externalSymbolRow{}
 	if mod != nil && mod.Kind == graph.KindModule {
@@ -165,7 +165,7 @@ func (s *Server) externalCallsForModule(req mcp.CallToolRequest, moduleID, nameF
 		return rows[i].ID < rows[j].ID
 	})
 
-	if isGCX(req) {
+	if s.isGCX(ctx, req) {
 		items := make([]externalSymbolItem, 0, len(rows))
 		for _, r := range rows {
 			items = append(items, externalSymbolItem(*r))
@@ -197,8 +197,8 @@ func (s *Server) externalCallsForModule(req mcp.CallToolRequest, moduleID, nameF
 	return mcp.NewToolResultJSON(out)
 }
 
-func (s *Server) emitExternalCallsRollup(req mcp.CallToolRequest, rows []*externalModuleRow) (*mcp.CallToolResult, error) {
-	if isGCX(req) {
+func (s *Server) emitExternalCallsRollup(ctx context.Context, req mcp.CallToolRequest, rows []*externalModuleRow) (*mcp.CallToolResult, error) {
+	if s.isGCX(ctx, req) {
 		items := make([]externalModuleItem, 0, len(rows))
 		for _, r := range rows {
 			items = append(items, externalModuleItem{

@@ -21,7 +21,7 @@ import (
 //   - context: metric|error_msg|route — narrows to one string domain.
 //   - name: string value (case-insensitive substring match). Use to
 //     find emitters of a specific metric, error message, or route.
-func (s *Server) handleAnalyzeStringEmitters(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (s *Server) handleAnalyzeStringEmitters(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	args := req.GetArguments()
 	contextFilter := strings.ToLower(strings.TrimSpace(stringArg(args, "context")))
 	nameFilter := strings.ToLower(strings.TrimSpace(stringArg(args, "name")))
@@ -76,7 +76,7 @@ func (s *Server) handleAnalyzeStringEmitters(_ context.Context, req mcp.CallTool
 		return rows[i].Value < rows[j].Value
 	})
 
-	if isGCX(req) {
+	if s.isGCX(ctx, req) {
 		items := make([]stringEmitterItem, 0, len(rows))
 		for _, r := range rows {
 			items = append(items, stringEmitterItem{

@@ -282,6 +282,13 @@ func (d *mcpDispatcher) maybeSnoopInitialize(sess *daemon.Session, frame []byte)
 		return
 	}
 	sess.SetClientInfo(peek.Params.ClientInfo.Name, peek.Params.ClientInfo.Version)
+	if d.srv != nil {
+		// Propagate the client name into the per-session MCP state so
+		// tool handlers can resolve a default wire format (e.g.
+		// claude-code → gcx) when a request omits the explicit
+		// `format` arg.
+		d.srv.NoteSessionClient(sess.ID, peek.Params.ClientInfo.Name, peek.Params.ClientInfo.Version)
+	}
 	d.logger.Info("daemon: identified MCP client",
 		zap.String("session_id", sess.ID),
 		zap.String("client", peek.Params.ClientInfo.Name),

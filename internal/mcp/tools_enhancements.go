@@ -273,7 +273,7 @@ func (s *Server) registerEnhancementTools() {
 // 10.2 handleVerifyChange
 // ---------------------------------------------------------------------------
 
-func (s *Server) handleVerifyChange(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (s *Server) handleVerifyChange(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	changesStr, err := req.RequireString("changes")
 	if err != nil {
 		return mcp.NewToolResultError("changes is required"), nil
@@ -307,7 +307,7 @@ func (s *Server) handleVerifyChange(_ context.Context, req mcp.CallToolRequest) 
 // 10.3 handleCheckGuards
 // ---------------------------------------------------------------------------
 
-func (s *Server) handleCheckGuards(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (s *Server) handleCheckGuards(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	idsStr, err := req.RequireString("ids")
 	if err != nil {
 		return mcp.NewToolResultError("ids is required"), nil
@@ -680,7 +680,7 @@ func (s *Server) handleAnalyze(ctx context.Context, req mcp.CallToolRequest) (*m
 //
 // Returns one row per matching todo with file, line, tag,
 // assignee, due, ticket, and the truncated text.
-func (s *Server) handleAnalyzeTodos(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (s *Server) handleAnalyzeTodos(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	args := req.GetArguments()
 	tagFilter := strings.ToLower(strings.TrimSpace(stringArg(args, "tag")))
 	assigneeFilter := strings.TrimSpace(stringArg(args, "assignee"))
@@ -785,7 +785,7 @@ func stringArg(args map[string]any, key string) string {
 //
 // Re-runnable: each call re-reads the profile and overwrites
 // existing meta — the desired behaviour after a fresh test run.
-func (s *Server) handleAnalyzeCoverage(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (s *Server) handleAnalyzeCoverage(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	profileArg := stringArg(req.GetArguments(), "profile")
 	if profileArg == "" {
 		return mcp.NewToolResultError("coverage enrichment requires a `profile` argument with the cover.out path"), nil
@@ -830,7 +830,7 @@ func (s *Server) handleAnalyzeCoverage(_ context.Context, req mcp.CallToolReques
 //
 // Sorted oldest-first so the cleanup loop sees the staleness
 // gradient at a glance.
-func (s *Server) handleAnalyzeStaleCode(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (s *Server) handleAnalyzeStaleCode(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	args := req.GetArguments()
 	olderThanDays := 365.0
 	if v, ok := args["older_than"].(float64); ok && v > 0 {
@@ -970,7 +970,7 @@ func parseAnalyzeKindsFilter(arg string) map[graph.NodeKind]struct{} {
 // first. The combination (path_prefix + min_symbols + sorted
 // output) is the cleanup-loop's "who do I ping for review on
 // this area" query without needing a CODEOWNERS file.
-func (s *Server) handleAnalyzeOwnership(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (s *Server) handleAnalyzeOwnership(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	args := req.GetArguments()
 	minSymbols := 1
 	if v, ok := args["min_symbols"].(float64); ok && v > 0 {
@@ -1109,7 +1109,7 @@ func tsFromMeta(raw any) int64 {
 //
 // Sorted ascending by coverage_pct so the most-undertested
 // symbols surface first.
-func (s *Server) handleAnalyzeCoverageGaps(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (s *Server) handleAnalyzeCoverageGaps(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	args := req.GetArguments()
 	maxPct := 100.0
 	if v, ok := args["max_pct"].(float64); ok && v > 0 {
@@ -1233,7 +1233,7 @@ func (s *Server) handleAnalyzeCoverageGaps(_ context.Context, req mcp.CallToolRe
 //     growthbook, unleash, internal).
 //
 // Sorted oldest-first so cleanup priorities surface at the top.
-func (s *Server) handleAnalyzeStaleFlags(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (s *Server) handleAnalyzeStaleFlags(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	args := req.GetArguments()
 	olderThanDays := 365.0
 	if v, ok := args["older_than"].(float64); ok && v > 0 {
@@ -1379,7 +1379,7 @@ func stringFromMeta(meta map[string]any, key string) string {
 // declaration with no users) aren't included either — they're
 // the inverse problem ("orphan migration") which is a separate
 // future analyzer.
-func (s *Server) handleAnalyzeOrphanTables(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (s *Server) handleAnalyzeOrphanTables(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	type orphanRow struct {
 		ID         string `json:"id"`
 		Table      string `json:"table"`
@@ -1460,7 +1460,7 @@ func (s *Server) handleAnalyzeOrphanTables(_ context.Context, req mcp.CallToolRe
 // Sorted alphabetically by id for diff-able output — there's no
 // natural priority ordering for this list the way query_count
 // gives orphan_tables.
-func (s *Server) handleAnalyzeUnreferencedTables(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (s *Server) handleAnalyzeUnreferencedTables(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	type unrefRow struct {
 		ID            string `json:"id"`
 		Table         string `json:"table"`
@@ -1532,7 +1532,7 @@ func (s *Server) handleAnalyzeUnreferencedTables(_ context.Context, req mcp.Call
 // Sorted ascending by avg_pct so worst packages surface first.
 // Filters mirror coverage_gaps: kinds (default function/method),
 // path_prefix scoping.
-func (s *Server) handleAnalyzeCoverageSummary(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (s *Server) handleAnalyzeCoverageSummary(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	args := req.GetArguments()
 	pathPrefix := strings.TrimSpace(stringArg(args, "path_prefix"))
 
@@ -1688,7 +1688,7 @@ func (s *Server) handleAnalyzeInteropUsers(_ context.Context, req mcp.CallToolRe
 // owning file — answers "added in v1.4?" with one graph hop from
 // any symbol to its file. Re-runnable: each call re-walks tags
 // and overwrites existing meta.
-func (s *Server) handleAnalyzeReleases(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (s *Server) handleAnalyzeReleases(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	roots := s.collectRepoRoots(req.GetString("repo", ""))
 	if len(roots) == 0 {
 		return mcp.NewToolResultError("releases enrichment requires at least one indexed repo with a root path"), nil
@@ -1720,7 +1720,7 @@ func (s *Server) handleAnalyzeReleases(_ context.Context, req mcp.CallToolReques
 // agent invoked it). Repeat invocations re-run blame and overwrite
 // existing meta.last_authored, which is the desired behaviour for
 // post-commit refresh.
-func (s *Server) handleAnalyzeBlame(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (s *Server) handleAnalyzeBlame(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	roots := s.collectRepoRoots(req.GetString("repo", ""))
 	if len(roots) == 0 {
 		return mcp.NewToolResultError("blame enrichment requires at least one indexed repo with a root path"), nil
@@ -1776,7 +1776,7 @@ func (s *Server) collectRepoRoots(scope string) map[string]string {
 // 10.5 handleFindDeadCode and handleFindHotspots
 // ---------------------------------------------------------------------------
 
-func (s *Server) handleFindDeadCode(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (s *Server) handleFindDeadCode(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	opts := analysis.FindDeadCodeOptions{}
 	args := req.GetArguments()
 	if v, ok := args["include_variables"].(bool); ok && v {
@@ -1814,7 +1814,7 @@ func (s *Server) handleFindDeadCode(_ context.Context, req mcp.CallToolRequest) 
 		variablesNote = "Variables excluded by default (graph lacks intra-function data flow). Pass include_variables=true to include them."
 	}
 
-	if isGCX(req) {
+	if s.isGCX(ctx, req) {
 		items := make([]deadCodeItem, 0, len(entries))
 		for _, e := range entries {
 			items = append(items, deadCodeItem{
@@ -1856,7 +1856,7 @@ func (s *Server) handleFindDeadCode(_ context.Context, req mcp.CallToolRequest) 
 	return mcp.NewToolResultJSON(result)
 }
 
-func (s *Server) handleFindHotspots(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (s *Server) handleFindHotspots(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	// Check minimum graph size
 	if s.graph.NodeCount() < 10 {
 		return mcp.NewToolResultError("codebase too small for meaningful hotspot analysis (need at least 10 symbols)"), nil
@@ -1877,7 +1877,7 @@ func (s *Server) handleFindHotspots(_ context.Context, req mcp.CallToolRequest) 
 		truncated = true
 	}
 
-	if isGCX(req) {
+	if s.isGCX(ctx, req) {
 		items := make([]hotspotItem, 0, len(entries))
 		for _, e := range entries {
 			items = append(items, hotspotItem{
@@ -1932,7 +1932,7 @@ func (r scaffoldReader) ResolveFilePath(graphPath string) string {
 	return abs
 }
 
-func (s *Server) handleScaffold(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (s *Server) handleScaffold(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	exampleID, err := req.RequireString("id")
 	if err != nil {
 		return mcp.NewToolResultError("id is required"), nil
@@ -1997,12 +1997,12 @@ func (s *Server) handleScaffold(_ context.Context, req mcp.CallToolRequest) (*mc
 // 10.7 handleFindCycles and handleWouldCreateCycle
 // ---------------------------------------------------------------------------
 
-func (s *Server) handleFindCycles(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (s *Server) handleFindCycles(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	scope := req.GetString("scope", "")
 
 	cycles := analysis.DetectCycles(s.graph, s.getCommunities(), scope)
 
-	if isGCX(req) {
+	if s.isGCX(ctx, req) {
 		items := make([]cycleItem, 0, len(cycles))
 		for _, c := range cycles {
 			items = append(items, cycleItem{
@@ -2047,7 +2047,7 @@ func (s *Server) handleFindCycles(_ context.Context, req mcp.CallToolRequest) (*
 	})
 }
 
-func (s *Server) handleWouldCreateCycle(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (s *Server) handleWouldCreateCycle(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	fromID, err := req.RequireString("from_id")
 	if err != nil {
 		return mcp.NewToolResultError("from_id is required"), nil
@@ -2067,7 +2067,7 @@ func (s *Server) handleWouldCreateCycle(_ context.Context, req mcp.CallToolReque
 
 	wouldCycle, path := analysis.WouldCreateCycle(s.graph, fromID, toID)
 
-	if isGCX(req) {
+	if s.isGCX(ctx, req) {
 		return gcxResponse(encodeAnalyze("would_create_cycle", map[string]any{
 			"would_cycle": wouldCycle,
 			"path":        path,
@@ -2112,7 +2112,7 @@ type diffSymbolInfo struct {
 	Processes []string `json:"processes,omitempty"`
 }
 
-func (s *Server) handleDiffContext(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (s *Server) handleDiffContext(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	scope := req.GetString("scope", "unstaged")
 	baseRef := req.GetString("base_ref", "main")
 
@@ -2289,7 +2289,7 @@ func (s *Server) handleDiffContext(_ context.Context, req mcp.CallToolRequest) (
 // 10.9 handleIndexHealth
 // ---------------------------------------------------------------------------
 
-func (s *Server) handleIndexHealth(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (s *Server) handleIndexHealth(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	if s.indexer == nil {
 		return mcp.NewToolResultError("no indexer available"), nil
 	}
@@ -2380,7 +2380,7 @@ func (s *Server) handleIndexHealth(_ context.Context, req mcp.CallToolRequest) (
 // 10.10 handleGetSymbolHistory
 // ---------------------------------------------------------------------------
 
-func (s *Server) handleGetSymbolHistory(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (s *Server) handleGetSymbolHistory(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	symbolID := req.GetString("id", "")
 
 	if symbolID != "" {
@@ -2480,7 +2480,7 @@ type batchEditResult struct {
 	Error    string `json:"error,omitempty"`
 }
 
-func (s *Server) handleBatchEdit(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (s *Server) handleBatchEdit(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	editsStr, err := req.RequireString("edits")
 	if err != nil {
 		return mcp.NewToolResultError("edits is required"), nil
@@ -2767,7 +2767,7 @@ func (s *Server) handleContracts(ctx context.Context, req mcp.CallToolRequest) (
 // handleGetContracts
 // ---------------------------------------------------------------------------
 
-func (s *Server) handleGetContracts(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (s *Server) handleGetContracts(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	registry := s.effectiveContractRegistry()
 	if registry == nil {
 		return mcp.NewToolResultError("no contract registry available — index a repository first"), nil
@@ -2878,7 +2878,7 @@ func (s *Server) handleGetContracts(_ context.Context, req mcp.CallToolRequest) 
 		return mcp.NewToolResultText(b.String()), nil
 	}
 
-	if isGCX(req) {
+	if s.isGCX(ctx, req) {
 		extra := []string{}
 		if otherReposTotal > 0 {
 			extra = append(extra, "other_repos_contracts", fmt.Sprintf("%d", otherReposTotal),
@@ -2937,7 +2937,7 @@ func (s *Server) handleGetContracts(_ context.Context, req mcp.CallToolRequest) 
 // handleCheckContracts
 // ---------------------------------------------------------------------------
 
-func (s *Server) handleCheckContracts(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (s *Server) handleCheckContracts(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	registry := s.effectiveContractRegistry()
 	if registry == nil {
 		return mcp.NewToolResultError("no contract registry available — index a repository first"), nil
@@ -3007,7 +3007,7 @@ func (s *Server) handleCheckContracts(_ context.Context, req mcp.CallToolRequest
 		return mcp.NewToolResultText(b.String()), nil
 	}
 
-	if isGCX(req) {
+	if s.isGCX(ctx, req) {
 		return gcxResponse(encodeContractsCheck(result))
 	}
 
@@ -3034,7 +3034,7 @@ func (s *Server) handleCheckContracts(_ context.Context, req mcp.CallToolRequest
 // warning, or info. Accepts the same repo/project/ref scoping
 // parameters as `check` so callers can limit the diff to one project.
 
-func (s *Server) handleValidateContracts(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (s *Server) handleValidateContracts(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	registry := s.effectiveContractRegistry()
 	if registry == nil {
 		return mcp.NewToolResultError("no contract registry available — index a repository first"), nil
@@ -3133,7 +3133,7 @@ func (s *Server) handleFeedback(ctx context.Context, req mcp.CallToolRequest) (*
 // 12.1 handleRecordFeedback / handleQueryFeedback
 // ---------------------------------------------------------------------------
 
-func (s *Server) handleRecordFeedback(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (s *Server) handleRecordFeedback(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	task := req.GetString("task", "")
 	if task == "" {
 		return mcp.NewToolResultError("task is required"), nil
@@ -3173,7 +3173,7 @@ func (s *Server) handleRecordFeedback(_ context.Context, req mcp.CallToolRequest
 	})
 }
 
-func (s *Server) handleQueryFeedback(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (s *Server) handleQueryFeedback(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	if s.feedback == nil || !s.feedback.HasData() {
 		return mcp.NewToolResultJSON(map[string]any{
 			"total_entries": 0,
@@ -3388,7 +3388,7 @@ func renderContextMarkdown(data map[string]any, tokenBudget int) string {
 // Copilot instructions for stale symbol refs, dead file paths, and bloat.
 // ---------------------------------------------------------------------------
 
-func (s *Server) handleAuditAgentConfig(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (s *Server) handleAuditAgentConfig(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	root := req.GetString("root", "")
 	if root == "" {
 		if s.indexer != nil {

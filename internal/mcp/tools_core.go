@@ -33,12 +33,24 @@ func isCompact(req mcp.CallToolRequest) bool {
 	return false
 }
 
-// isTOON checks if the format is set to "toon" in the request.
-func isTOON(req mcp.CallToolRequest) bool {
-	if v, ok := req.GetArguments()["format"].(string); ok {
+// isTOON reports whether the caller requested the TOON wire format
+// for this tool call. Selection mirrors `Server.isGCX`:
+//
+//  1. Explicit `format` arg wins.
+//  2. Otherwise the per-session default (driven by MCP `clientInfo`)
+//     decides — TOON is the second-tier compact format used when a
+//     client decodes TOON but not GCX. Today no shipping client is
+//     known to be in this bucket; the helper exists for forward
+//     compat as plugins evolve.
+//  3. Default false — JSON wins.
+func (s *Server) isTOON(ctx context.Context, req mcp.CallToolRequest) bool {
+	if v, ok := req.GetArguments()["format"].(string); ok && v != "" {
 		return v == "toon"
 	}
-	return false
+	if s == nil {
+		return false
+	}
+	return s.resolveSessionFormat(ctx) == "toon"
 }
 
 // toonNodeRow is a TOON-optimized flat representation of a graph node.
@@ -93,18 +105,20 @@ func nodesToTOONRows(nodes []*graph.Node) []toonNodeRow {
 }
 
 // returnSubGraph returns a SubGraph in the requested format (JSON, compact, GCX, or TOON).
-func returnSubGraph(req mcp.CallToolRequest, sg *query.SubGraph) (*mcp.CallToolResult, error) {
+// Method on Server so the format negotiation can consult per-session
+// client identity (claude-code → gcx, etc.).
+func (s *Server) returnSubGraph(ctx context.Context, req mcp.CallToolRequest, sg *query.SubGraph) (*mcp.CallToolResult, error) {
 	if isCompact(req) {
 		return mcp.NewToolResultText(compactSubGraph(sg)), nil
 	}
-	if isGCX(req) {
+	if s.isGCX(ctx, req) {
 		tool := requestToolName(req)
 		if tool == "" {
 			tool = "subgraph"
 		}
 		return gcxResponse(encodeSubGraph(tool, sg))
 	}
-	if isTOON(req) {
+	if s.isTOON(ctx, req) {
 		return subGraphToTOON(sg)
 	}
 	return mcp.NewToolResultJSON(sg)
@@ -672,7 +686,7 @@ func (s *Server) handleSearchSymbols(ctx context.Context, req mcp.CallToolReques
 
 	total := len(nodes)
 
-	if isGCX(req) {
+	if s.isGCX(ctx, req) {
 		return gcxResponse(encodeSearchSymbols(nodes, total, limit))
 	}
 
@@ -680,7 +694,7 @@ func (s *Server) handleSearchSymbols(ctx context.Context, req mcp.CallToolReques
 		nodes = nodes[:limit]
 	}
 
-	if isTOON(req) {
+	if s.isTOON(ctx, req) {
 		result := toonSearchResult{
 			Results:   nodesToTOONRows(nodes),
 			Total:     total,
@@ -703,7 +717,7 @@ func (s *Server) handleSearchSymbols(ctx context.Context, req mcp.CallToolReques
 	})
 }
 
-func (s *Server) handleGetFileSummary(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (s *Server) handleGetFileSummary(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	fp, err := req.RequireString("path")
 	if err != nil {
 		return mcp.NewToolResultError("path is required"), nil
@@ -737,7 +751,7 @@ func (s *Server) handleGetFileSummary(_ context.Context, req mcp.CallToolRequest
 		return notModifiedResult(etag), nil
 	}
 
-	if isGCX(req) {
+	if s.isGCX(ctx, req) {
 		return gcxResponse(encodeFileSummary(sg, etag))
 	}
 
@@ -753,7 +767,7 @@ func (s *Server) handleGetFileSummary(_ context.Context, req mcp.CallToolRequest
 	return mcp.NewToolResultJSON(result)
 }
 
-func (s *Server) handleGetDependencies(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (s *Server) handleGetDependencies(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	id, err := req.RequireString("id")
 	if err != nil {
 		return mcp.NewToolResultError("id is required"), nil
@@ -771,10 +785,10 @@ func (s *Server) handleGetDependencies(_ context.Context, req mcp.CallToolReques
 	sg := s.engine.GetDependencies(id, opts)
 	sg.FilterByMinTier(minTier)
 	enrichSubGraphEdges(sg)
-	return returnSubGraph(req, sg)
+	return s.returnSubGraph(ctx, req, sg)
 }
 
-func (s *Server) handleGetDependents(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (s *Server) handleGetDependents(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	id, err := req.RequireString("id")
 	if err != nil {
 		return mcp.NewToolResultError("id is required"), nil
@@ -792,10 +806,10 @@ func (s *Server) handleGetDependents(_ context.Context, req mcp.CallToolRequest)
 	sg := s.engine.GetDependents(id, opts)
 	sg.FilterByMinTier(minTier)
 	enrichSubGraphEdges(sg)
-	return returnSubGraph(req, sg)
+	return s.returnSubGraph(ctx, req, sg)
 }
 
-func (s *Server) handleGetCallChain(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (s *Server) handleGetCallChain(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	id, err := req.RequireString("id")
 	if err != nil {
 		return mcp.NewToolResultError("id is required"), nil
@@ -820,10 +834,10 @@ func (s *Server) handleGetCallChain(_ context.Context, req mcp.CallToolRequest) 
 	sg = filterSubGraph(sg, allowed)
 	sg.FilterByMinTier(minTier)
 	enrichSubGraphEdges(sg)
-	return returnSubGraph(req, sg)
+	return s.returnSubGraph(ctx, req, sg)
 }
 
-func (s *Server) handleGetCallers(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (s *Server) handleGetCallers(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	id, err := req.RequireString("id")
 	if err != nil {
 		return mcp.NewToolResultError("id is required"), nil
@@ -842,10 +856,10 @@ func (s *Server) handleGetCallers(_ context.Context, req mcp.CallToolRequest) (*
 	sg := s.engine.GetCallers(id, opts)
 	sg.FilterByMinTier(minTier)
 	enrichSubGraphEdges(sg)
-	return returnSubGraph(req, sg)
+	return s.returnSubGraph(ctx, req, sg)
 }
 
-func (s *Server) handleFindOverrides(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (s *Server) handleFindOverrides(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	id, err := req.RequireString("id")
 	if err != nil {
 		return mcp.NewToolResultError("id is required"), nil
@@ -860,11 +874,11 @@ func (s *Server) handleFindOverrides(_ context.Context, req mcp.CallToolRequest)
 		nodes = s.engine.FindOverridesMinTier(id, minTier)
 	}
 
-	if isGCX(req) {
+	if s.isGCX(ctx, req) {
 		sg := &query.SubGraph{Nodes: nodes, TotalNodes: len(nodes)}
-		return returnSubGraph(req, sg)
+		return s.returnSubGraph(ctx, req, sg)
 	}
-	if isTOON(req) {
+	if s.isTOON(ctx, req) {
 		result := struct {
 			Overrides []toonNodeRow `toon:"overrides"`
 			Total     int           `toon:"total"`
@@ -887,7 +901,7 @@ func (s *Server) handleFindOverrides(_ context.Context, req mcp.CallToolRequest)
 	})
 }
 
-func (s *Server) handleFindImplementations(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (s *Server) handleFindImplementations(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	id, err := req.RequireString("id")
 	if err != nil {
 		return mcp.NewToolResultError("id is required"), nil
@@ -895,12 +909,12 @@ func (s *Server) handleFindImplementations(_ context.Context, req mcp.CallToolRe
 	minTier := req.GetString("min_tier", "")
 	impls := s.engine.FindImplementationsMinTier(id, minTier)
 
-	if isGCX(req) {
+	if s.isGCX(ctx, req) {
 		sg := &query.SubGraph{Nodes: impls, TotalNodes: len(impls)}
-		return returnSubGraph(req, sg)
+		return s.returnSubGraph(ctx, req, sg)
 	}
 
-	if isTOON(req) {
+	if s.isTOON(ctx, req) {
 		result := struct {
 			Implementations []toonNodeRow `toon:"implementations"`
 			Total           int           `toon:"total"`
@@ -923,7 +937,7 @@ func (s *Server) handleFindImplementations(_ context.Context, req mcp.CallToolRe
 	})
 }
 
-func (s *Server) handleFindUsages(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (s *Server) handleFindUsages(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	id, err := req.RequireString("id")
 	if err != nil {
 		return mcp.NewToolResultError("id is required"), nil
@@ -950,13 +964,13 @@ func (s *Server) handleFindUsages(_ context.Context, req mcp.CallToolRequest) (*
 	sg = filterSubGraph(sg, allowed)
 	sg.FilterByMinTier(minTier)
 	enrichSubGraphEdges(sg)
-	if isGCX(req) {
+	if s.isGCX(ctx, req) {
 		return gcxResponse(encodeFindUsages(sg))
 	}
-	return returnSubGraph(req, sg)
+	return s.returnSubGraph(ctx, req, sg)
 }
 
-func (s *Server) handleGetCluster(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (s *Server) handleGetCluster(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	id, err := req.RequireString("id")
 	if err != nil {
 		return mcp.NewToolResultError("id is required"), nil
@@ -971,7 +985,7 @@ func (s *Server) handleGetCluster(_ context.Context, req mcp.CallToolRequest) (*
 	}
 	sg := s.engine.GetCluster(id, opts)
 	enrichSubGraphEdges(sg)
-	return returnSubGraph(req, sg)
+	return s.returnSubGraph(ctx, req, sg)
 }
 
 func (s *Server) handleGraphStats(ctx context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {

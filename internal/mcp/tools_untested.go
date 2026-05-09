@@ -21,7 +21,7 @@ import (
 // fan_in descending so the most-used untested symbols surface at the top —
 // they're the ones most likely to break something when changed without a
 // safety net.
-func (s *Server) handleGetUntestedSymbols(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (s *Server) handleGetUntestedSymbols(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	limit := req.GetInt("limit", 50)
 	if limit <= 0 {
 		limit = 50

@@ -84,7 +84,7 @@ func (s *Server) registerLSPTools() {
 }
 
 // handleGetDiagnostics implements the `get_diagnostics` tool.
-func (s *Server) handleGetDiagnostics(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (s *Server) handleGetDiagnostics(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	path, err := req.RequireString("path")
 	if err != nil {
 		return mcp.NewToolResultError("path is required"), nil
@@ -118,7 +118,7 @@ func (s *Server) handleGetDiagnostics(_ context.Context, req mcp.CallToolRequest
 }
 
 // handleGetCodeActions implements the `get_code_actions` tool.
-func (s *Server) handleGetCodeActions(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (s *Server) handleGetCodeActions(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	path, err := req.RequireString("path")
 	if err != nil {
 		return mcp.NewToolResultError("path is required"), nil
@@ -169,7 +169,7 @@ func (s *Server) handleGetCodeActions(_ context.Context, req mcp.CallToolRequest
 }
 
 // handleApplyCodeAction implements the `apply_code_action` tool.
-func (s *Server) handleApplyCodeAction(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (s *Server) handleApplyCodeAction(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	path, err := req.RequireString("path")
 	if err != nil {
 		return mcp.NewToolResultError("path is required"), nil
@@ -216,7 +216,7 @@ func (s *Server) handleApplyCodeAction(_ context.Context, req mcp.CallToolReques
 }
 
 // handleFixAllInFile implements the `fix_all_in_file` tool.
-func (s *Server) handleFixAllInFile(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (s *Server) handleFixAllInFile(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	path, err := req.RequireString("path")
 	if err != nil {
 		return mcp.NewToolResultError("path is required"), nil

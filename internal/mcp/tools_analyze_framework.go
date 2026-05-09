@@ -23,7 +23,7 @@ import (
 //   - type:   contract type — http / grpc / graphql / topic / ws.
 //             Named `type` (not `kind`) because the analyze dispatcher
 //             reserves `kind` for the analyzer name itself.
-func (s *Server) handleAnalyzeRoutes(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (s *Server) handleAnalyzeRoutes(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	args := req.GetArguments()
 	methodFilter := strings.ToUpper(strings.TrimSpace(stringArg(args, "method")))
 	pathFilter := strings.ToLower(strings.TrimSpace(stringArg(args, "path")))
@@ -80,7 +80,7 @@ func (s *Server) handleAnalyzeRoutes(_ context.Context, req mcp.CallToolRequest)
 		}
 		return rows[i].Handler < rows[j].Handler
 	})
-	if isGCX(req) {
+	if s.isGCX(ctx, req) {
 		items := make([]routeItem, 0, len(rows))
 		for _, r := range rows {
 			items = append(items, routeItem(*r))
@@ -139,7 +139,7 @@ func routeMethodAndPath(n *graph.Node) (string, string) {
 //   - orm:    orm flavour (gorm / sqlalchemy / django / activerecord / jpa / typeorm)
 //   - table:  substring match on the table name
 //   - model:  substring match on the model class name
-func (s *Server) handleAnalyzeModels(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (s *Server) handleAnalyzeModels(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	args := req.GetArguments()
 	ormFilter := strings.ToLower(strings.TrimSpace(stringArg(args, "orm")))
 	tableFilter := strings.ToLower(strings.TrimSpace(stringArg(args, "table")))
@@ -198,7 +198,7 @@ func (s *Server) handleAnalyzeModels(_ context.Context, req mcp.CallToolRequest)
 		}
 		return rows[i].Model < rows[j].Model
 	})
-	if isGCX(req) {
+	if s.isGCX(ctx, req) {
 		items := make([]modelItem, 0, len(rows))
 		for _, r := range rows {
 			items = append(items, modelItem(*r))
@@ -230,20 +230,20 @@ func (s *Server) handleAnalyzeModels(_ context.Context, req mcp.CallToolRequest)
 //     view).
 //   - per-component (id=<symbol>): list of every child the component
 //     renders with their resolved targets.
-func (s *Server) handleAnalyzeComponents(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (s *Server) handleAnalyzeComponents(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	args := req.GetArguments()
 	idFilter := strings.TrimSpace(stringArg(args, "id"))
 	nameFilter := strings.ToLower(strings.TrimSpace(stringArg(args, "name")))
 
 	if idFilter != "" {
-		return s.componentsForOne(req, idFilter)
+		return s.componentsForOne(ctx, req, idFilter)
 	}
-	return s.componentsRollup(req, nameFilter)
+	return s.componentsRollup(ctx, req, nameFilter)
 }
 
 // componentsRollup groups EdgeRendersChild edges per parent + per
 // child to produce a fan-in / fan-out leaderboard.
-func (s *Server) componentsRollup(req mcp.CallToolRequest, nameFilter string) (*mcp.CallToolResult, error) {
+func (s *Server) componentsRollup(ctx context.Context, req mcp.CallToolRequest, nameFilter string) (*mcp.CallToolResult, error) {
 	type compRow struct {
 		ID      string `json:"id"`
 		Name    string `json:"name"`
@@ -302,7 +302,7 @@ func (s *Server) componentsRollup(req mcp.CallToolRequest, nameFilter string) (*
 		}
 		return rows[i].Name < rows[j].Name
 	})
-	if isGCX(req) {
+	if s.isGCX(ctx, req) {
 		items := make([]componentRollupItem, 0, len(rows))
 		for _, r := range rows {
 			items = append(items, componentRollupItem(*r))
@@ -327,7 +327,7 @@ func (s *Server) componentsRollup(req mcp.CallToolRequest, nameFilter string) (*
 
 // componentsForOne returns every child component a single parent
 // renders, with the resolved-target indicator per row.
-func (s *Server) componentsForOne(req mcp.CallToolRequest, parentID string) (*mcp.CallToolResult, error) {
+func (s *Server) componentsForOne(ctx context.Context, req mcp.CallToolRequest, parentID string) (*mcp.CallToolResult, error) {
 	type childRow struct {
 		To       string `json:"to"`
 		Name     string `json:"name"`
@@ -362,7 +362,7 @@ func (s *Server) componentsForOne(req mcp.CallToolRequest, parentID string) (*mc
 		}
 		return rows[i].Name < rows[j].Name
 	})
-	if isGCX(req) {
+	if s.isGCX(ctx, req) {
 		items := make([]componentChildItem, 0, len(rows))
 		for _, r := range rows {
 			items = append(items, componentChildItem{

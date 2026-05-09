@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"sort"
 	"strings"
@@ -15,14 +16,29 @@ import (
 )
 
 // isGCX reports whether the caller requested the GCX1 compact wire
-// format. The selection order mirrors ParseFormat: the `format` arg
-// wins, otherwise legacy `compact: true` falls through to text (not
-// GCX), and the absence of either keeps JSON as the default.
-func isGCX(req mcp.CallToolRequest) bool {
-	if v, ok := req.GetArguments()["format"].(string); ok {
+// format for this tool call. Selection order:
+//
+//  1. Explicit `format` arg on the request — wins unconditionally.
+//     `format: "json"` returns false even when the session default is
+//     gcx, so an agent can opt out per-call when it needs a JSON
+//     payload (e.g. piping to a non-GCX consumer).
+//  2. Per-session default driven by the MCP `clientInfo.name` snooped
+//     at handshake — claude-code / cursor / vscode / zed / etc. ship
+//     with the @gortex/wire (or gcx-go) decoder so the daemon emits
+//     gcx by default for them. Other clients fall through.
+//  3. JSON fallback for unknown clients.
+//
+// The Server receiver is needed only for the session lookup; nil
+// receiver collapses to "explicit arg only" semantics, matching the
+// pre-session-default behaviour.
+func (s *Server) isGCX(ctx context.Context, req mcp.CallToolRequest) bool {
+	if v, ok := req.GetArguments()["format"].(string); ok && v != "" {
 		return wire.ParseFormat(v) == wire.FormatGCX
 	}
-	return false
+	if s == nil {
+		return false
+	}
+	return s.resolveSessionFormat(ctx) == "gcx"
 }
 
 // gcxResponse wraps a GCX byte payload into an MCP text-result. If the

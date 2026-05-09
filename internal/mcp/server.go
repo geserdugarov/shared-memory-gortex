@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"math"
+	"strings"
 	"sync"
 	"time"
 
@@ -170,6 +171,13 @@ type sessionState struct {
 	viewedFiles    []string // recently viewed file paths
 	modifiedFiles  []string // files modified via edit_symbol
 	recentSearches []string // recent search queries
+	// clientName is the MCP client identifier (claude-code / cursor / vscode /
+	// zed / …) captured from the protocol's `initialize.clientInfo.name`
+	// field by the daemon dispatcher. Drives the per-session default
+	// wire format: known-decoder clients get `gcx` by default, others
+	// fall back to JSON. Empty until the dispatcher sees the
+	// `initialize` frame.
+	clientName string
 	// lastSearch captures the most recent search_symbols call so that a
 	// subsequent get_symbol_source / get_editing_context on one of its
 	// results can be attributed back to the query — this is the raw input
@@ -281,6 +289,96 @@ func (ss *sessionState) recordSearch(query string) {
 	ss.mu.Lock()
 	defer ss.mu.Unlock()
 	ss.recentSearches = prependUnique(ss.recentSearches, query, 10)
+}
+
+// recordClientName captures the MCP client name from the `initialize`
+// frame. Idempotent — re-init overwrites. Empty input is ignored so a
+// late env-var fallback can't clobber a prior authoritative value.
+func (ss *sessionState) recordClientName(name string) {
+	if name == "" {
+		return
+	}
+	ss.mu.Lock()
+	defer ss.mu.Unlock()
+	ss.clientName = name
+}
+
+// snapshotClientName returns the captured client name under the
+// session lock. Returns empty when the `initialize` frame hasn't
+// arrived yet (very early tool calls — rare but possible during
+// boot races).
+func (ss *sessionState) snapshotClientName() string {
+	ss.mu.Lock()
+	defer ss.mu.Unlock()
+	return ss.clientName
+}
+
+// NoteSessionClient is called by the daemon dispatcher after it
+// snoops the MCP `initialize.clientInfo.name` value, so the per-
+// session sessionState can default tool wire-format based on the
+// client's decoder capability. Idempotent and safe to call before
+// the session is registered (no-op until sessionFor materialises
+// the entry).
+func (s *Server) NoteSessionClient(sessionID, name, version string) {
+	if s == nil || sessionID == "" || name == "" {
+		return
+	}
+	if s.sessions == nil {
+		// Embedded mode — single shared session; just record on the
+		// shared state.
+		if s.session != nil {
+			s.session.recordClientName(name)
+		}
+		return
+	}
+	s.sessions.get(sessionID).session.recordClientName(name)
+	_ = version // reserved for per-version capability gates
+}
+
+// defaultFormatForClient returns the most-compressed wire format the
+// named MCP client is known to decode. Resolution order is gcx >
+// toon > json:
+//
+//   - GCX-capable: claude-code, cursor, vscode (via the @gortex/wire
+//     extension that ships with the IDE plugin), zed (gortex-zed
+//     plugin links gcx-go), aider, kilocode, opencode, openclaw,
+//     codex (Anthropic CLI bundles the gcx decoder).
+//   - TOON-capable but no GCX: kept for forward compat; today there
+//     is no client we know to be in this bucket. Listed for the
+//     mapping shape and as a placeholder — clients can be promoted
+//     here when their plugin ships a TOON-only decoder.
+//   - Everything else: empty string → JSON (the safe legacy default).
+//
+// Lower-cased client name is matched. Unknown clients are not a
+// failure — they just keep the JSON default until they're added.
+func defaultFormatForClient(name string) string {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "claude-code",
+		"cursor",
+		"vscode",
+		"zed",
+		"aider",
+		"kilocode",
+		"opencode",
+		"openclaw",
+		"codex":
+		return "gcx"
+	}
+	return ""
+}
+
+// resolveSessionFormat returns the format the current session prefers
+// when a tool's `format` arg is absent. Pure read — used by isGCX /
+// isTOON when the caller didn't pin a format explicitly.
+func (s *Server) resolveSessionFormat(ctx context.Context) string {
+	if s == nil {
+		return ""
+	}
+	sess := s.sessionFor(ctx)
+	if sess == nil {
+		return ""
+	}
+	return defaultFormatForClient(sess.snapshotClientName())
 }
 
 // comboWindow is how long after a search_symbols the session will still

@@ -49,7 +49,7 @@ func (s *Server) registerDataflowTools() {
 	)
 }
 
-func (s *Server) handleFlowBetween(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (s *Server) handleFlowBetween(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	source, err := req.RequireString("source_id")
 	if err != nil {
 		return mcp.NewToolResultError("source_id is required"), nil
@@ -64,7 +64,7 @@ func (s *Server) handleFlowBetween(_ context.Context, req mcp.CallToolRequest) (
 	engine := dataflow.New(s.graph)
 	paths := engine.FlowBetween(source, sink, maxDepth, maxPaths)
 
-	if isGCX(req) {
+	if s.isGCX(ctx, req) {
 		payload, err := encodeFlowBetween(source, sink, paths)
 		return gcxResponse(payload, err)
 	}
@@ -77,7 +77,7 @@ func (s *Server) handleFlowBetween(_ context.Context, req mcp.CallToolRequest) (
 	})
 }
 
-func (s *Server) handleTaintPaths(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (s *Server) handleTaintPaths(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	srcRaw, err := req.RequireString("source_pattern")
 	if err != nil {
 		return mcp.NewToolResultError("source_pattern is required"), nil
@@ -101,7 +101,7 @@ func (s *Server) handleTaintPaths(_ context.Context, req mcp.CallToolRequest) (*
 	engine := dataflow.New(s.graph)
 	findings := engine.TaintPaths(src, sink, maxDepth, limit)
 
-	if isGCX(req) {
+	if s.isGCX(ctx, req) {
 		payload, err := encodeTaintPaths(srcRaw, sinkRaw, findings)
 		return gcxResponse(payload, err)
 	}

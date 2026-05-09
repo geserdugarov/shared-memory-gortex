@@ -106,7 +106,7 @@ func (s *Server) handleTrackRepository(ctx context.Context, req mcp.CallToolRequ
 }
 
 // handleUntrackRepository removes a repo from the workspace and persists to GlobalConfig.
-func (s *Server) handleUntrackRepository(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (s *Server) handleUntrackRepository(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	path, err := req.RequireString("path")
 	if err != nil {
 		return mcp.NewToolResultError("path is required"), nil
@@ -145,7 +145,7 @@ func (s *Server) handleUntrackRepository(_ context.Context, req mcp.CallToolRequ
 
 // handleSetActiveProject validates the project name, updates the active project,
 // persists to GlobalConfig, and re-scopes queries.
-func (s *Server) handleSetActiveProject(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (s *Server) handleSetActiveProject(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	project, err := req.RequireString("project")
 	if err != nil {
 		return mcp.NewToolResultError("project is required"), nil

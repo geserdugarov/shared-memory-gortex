@@ -36,13 +36,14 @@ Gortex is running as an MCP server. You MUST use graph queries instead of file r
 | `Read` to check a function signature  | `get_symbol` (signature is in `meta.signature`) |
 | 5-10 calls to explore for a task      | `smart_context` (one call)               |
 
-### Token Economy (GCX1 compact wire format)
+### Token Economy (wire format)
 
-For any list-shaped response, pass `format: "gcx"` to get the [GCX1 compact wire format](docs/wire-format.md) instead of JSON. Round-trippable, tokenizer-aware, **median −27.4% tiktoken savings** on the benchmark.
+Order of preference: **gcx > toon > json**. For known clients (claude-code, cursor, vscode, zed, aider, kilocode, opencode, openclaw, codex) Gortex serves `gcx` automatically when a request omits the `format` arg — explicit `format` always wins.
 
 | Instead of...                         | You MUST use...                          |
 |---------------------------------------|------------------------------------------|
-| Default JSON on multi-row responses   | Pass `format: "gcx"` on `search_symbols`, `find_usages`, `analyze`, `contracts`, `batch_symbols`, `get_callers` / `get_call_chain` / `get_dependencies` / `get_dependents` / `find_implementations`, `get_file_summary`, `get_editing_context`, `smart_context` |
+| Default JSON on multi-row responses   | Rely on the per-session default (gcx) for known clients, or pass `format: "gcx"` explicitly on `search_symbols`, `find_usages`, `analyze`, `contracts`, `batch_symbols`, `get_callers` / `get_call_chain` / `get_dependencies` / `get_dependents` / `find_implementations`, `get_file_summary`, `get_editing_context`, `smart_context` |
+| GCX-blind tooling needing tabular text| Pass `format: "toon"` — TOON is the second-tier fallback (lossy but ~10–15% smaller than JSON) |
 | Parsing compact text output           | Use `@gortex/wire` (npm) or the Go `github.com/gortexhq/gcx-go` package (MIT) — both decode GCX back to structured rows |
 | Reading `compact: true` output        | Prefer `format: "gcx"` — lossy text is being phased out; GCX is round-trippable and tokenizer-optimised |
 

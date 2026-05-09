@@ -48,7 +48,7 @@ import (
 //
 //   - path_prefix: scope to operations originating in a directory
 //     subtree. Useful for "channel discipline in package X".
-func (s *Server) handleAnalyzeChannelOps(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (s *Server) handleAnalyzeChannelOps(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	pathPrefix := strings.TrimSpace(stringArg(req.GetArguments(), "path_prefix"))
 
 	type channelRow struct {
@@ -101,7 +101,7 @@ func (s *Server) handleAnalyzeChannelOps(_ context.Context, req mcp.CallToolRequ
 		return rows[i].Channel < rows[j].Channel
 	})
 
-	if isGCX(req) {
+	if s.isGCX(ctx, req) {
 		items := make([]channelOpItem, 0, len(rows))
 		for _, r := range rows {
 			items = append(items, channelOpItem{
@@ -141,7 +141,7 @@ func (s *Server) handleAnalyzeChannelOps(_ context.Context, req mcp.CallToolRequ
 // concurrency hotspots stay separable. Useful for spotting leaks
 // (a single function with many spawn sites), unowned background
 // work, and codebase-wide concurrency hygiene reviews.
-func (s *Server) handleAnalyzeGoroutineSpawns(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (s *Server) handleAnalyzeGoroutineSpawns(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	type spawnRow struct {
 		Target    string   `json:"target"`
 		Mode      string   `json:"mode,omitempty"`
@@ -180,7 +180,7 @@ func (s *Server) handleAnalyzeGoroutineSpawns(_ context.Context, req mcp.CallToo
 		return rows[i].Mode < rows[j].Mode
 	})
 
-	if isGCX(req) {
+	if s.isGCX(ctx, req) {
 		items := make([]spawnItem, 0, len(rows))
 		for _, r := range rows {
 			items = append(items, spawnItem{
@@ -230,7 +230,7 @@ func (s *Server) handleAnalyzeGoroutineSpawns(_ context.Context, req mcp.CallToo
 //     reported. Useful for targeted review of a single field's
 //     write surface.
 //   - limit: max rows when no id is set (default 20).
-func (s *Server) handleAnalyzeFieldWriters(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (s *Server) handleAnalyzeFieldWriters(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	args := req.GetArguments()
 	idFilter := strings.TrimSpace(stringArg(args, "id"))
 	limit := 20
@@ -289,7 +289,7 @@ func (s *Server) handleAnalyzeFieldWriters(_ context.Context, req mcp.CallToolRe
 		truncated = true
 	}
 
-	if isGCX(req) {
+	if s.isGCX(ctx, req) {
 		items := make([]fieldWriterItem, 0, len(rows))
 		for _, r := range rows {
 			items = append(items, fieldWriterItem{
@@ -340,7 +340,7 @@ func (s *Server) handleAnalyzeFieldWriters(_ context.Context, req mcp.CallToolRe
 //     Returns one row per annotated symbol.
 //   - name: annotation bare name (case-insensitive). Returns one
 //     row per matching annotation grouped by id.
-func (s *Server) handleAnalyzeAnnotationUsers(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (s *Server) handleAnalyzeAnnotationUsers(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	args := req.GetArguments()
 	idFilter := strings.TrimSpace(stringArg(args, "id"))
 	nameFilter := strings.ToLower(strings.TrimSpace(stringArg(args, "name")))
@@ -372,7 +372,7 @@ func (s *Server) handleAnalyzeAnnotationUsers(_ context.Context, req mcp.CallToo
 			return rows[i].Line < rows[j].Line
 		})
 
-		if isGCX(req) {
+		if s.isGCX(ctx, req) {
 			items := make([]annotatedItem, 0, len(rows))
 			for _, r := range rows {
 				items = append(items, annotatedItem(r))
@@ -437,7 +437,7 @@ func (s *Server) handleAnalyzeAnnotationUsers(_ context.Context, req mcp.CallToo
 		return rows[i].ID < rows[j].ID
 	})
 
-	if isGCX(req) {
+	if s.isGCX(ctx, req) {
 		items := make([]annotationItem, 0, len(rows))
 		for _, r := range rows {
 			items = append(items, annotationItem{
@@ -481,7 +481,7 @@ func (s *Server) handleAnalyzeAnnotationUsers(_ context.Context, req mcp.CallToo
 //   - name: config-key bare name (case-insensitive). Returns the
 //     readers of that single key.
 //   - limit: max rows when no name filter is set (default 20).
-func (s *Server) handleAnalyzeConfigReaders(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (s *Server) handleAnalyzeConfigReaders(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	args := req.GetArguments()
 	nameFilter := strings.ToLower(strings.TrimSpace(stringArg(args, "name")))
 	limit := 20
@@ -537,7 +537,7 @@ func (s *Server) handleAnalyzeConfigReaders(_ context.Context, req mcp.CallToolR
 		truncated = true
 	}
 
-	if isGCX(req) {
+	if s.isGCX(ctx, req) {
 		items := make([]configReaderItem, 0, len(rows))
 		for _, r := range rows {
 			items = append(items, configReaderItem{
@@ -593,7 +593,7 @@ func (s *Server) handleAnalyzeConfigReaders(_ context.Context, req mcp.CallToolR
 //     across the parsers that use different conventions.
 //   - name: event name (case-insensitive). Returns the emitters
 //     for that single event.
-func (s *Server) handleAnalyzeEventEmitters(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (s *Server) handleAnalyzeEventEmitters(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	args := req.GetArguments()
 	levelFilter := strings.ToLower(strings.TrimSpace(stringArg(args, "level")))
 	nameFilter := strings.ToLower(strings.TrimSpace(stringArg(args, "name")))
@@ -657,7 +657,7 @@ func (s *Server) handleAnalyzeEventEmitters(_ context.Context, req mcp.CallToolR
 		return rows[i].ID < rows[j].ID
 	})
 
-	if isGCX(req) {
+	if s.isGCX(ctx, req) {
 		items := make([]eventEmitterItem, 0, len(rows))
 		for _, r := range rows {
 			items = append(items, eventEmitterItem{
@@ -707,7 +707,7 @@ func (s *Server) handleAnalyzeEventEmitters(_ context.Context, req mcp.CallToolR
 // Filters:
 //
 //   - path_prefix: scope to throwers under a directory subtree.
-func (s *Server) handleAnalyzeErrorSurface(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (s *Server) handleAnalyzeErrorSurface(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	pathPrefix := strings.TrimSpace(stringArg(req.GetArguments(), "path_prefix"))
 
 	type throwerRow struct {
@@ -777,7 +777,7 @@ func (s *Server) handleAnalyzeErrorSurface(_ context.Context, req mcp.CallToolRe
 		rowsTruncated = true
 	}
 
-	if isGCX(req) {
+	if s.isGCX(ctx, req) {
 		items := make([]errorSurfaceItem, 0, len(rows))
 		for _, r := range rows {
 			items = append(items, errorSurfaceItem{

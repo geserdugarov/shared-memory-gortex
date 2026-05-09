@@ -124,7 +124,7 @@ func (s *Server) handleWinnowSymbols(ctx context.Context, req mcp.CallToolReques
 		results = results[:c.Limit]
 	}
 
-	if isGCX(req) {
+	if s.isGCX(ctx, req) {
 		return gcxResponse(encodeWinnowSymbols(results, total, c.Limit))
 	}
 

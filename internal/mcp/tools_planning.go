@@ -27,7 +27,7 @@ type recommendedCall struct {
 //
 // The output is deliberately small (~200 tokens): this is a routing tool,
 // not a context tool.
-func (s *Server) handlePlanTurn(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (s *Server) handlePlanTurn(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	task, err := req.RequireString("task")
 	if err != nil {
 		return mcp.NewToolResultError("task is required"), nil

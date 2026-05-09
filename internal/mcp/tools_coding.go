@@ -290,7 +290,7 @@ func (s *Server) handleGetEditingContext(ctx context.Context, req mcp.CallToolRe
 		return notModifiedResult(etag), nil
 	}
 
-	if isGCX(req) {
+	if s.isGCX(ctx, req) {
 		return gcxResponse(encodeEditingContext(out.File, out.Defines, out.Imports, out.CalledBy, out.Calls, etag))
 	}
 
@@ -306,7 +306,7 @@ func (s *Server) handleGetEditingContext(ctx context.Context, req mcp.CallToolRe
 	return mcp.NewToolResultJSON(result)
 }
 
-func (s *Server) handleFindImportPath(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (s *Server) handleFindImportPath(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	symbolName, err := req.RequireString("name")
 	if err != nil {
 		return mcp.NewToolResultError("name is required"), nil
@@ -369,7 +369,7 @@ func (s *Server) handleFindImportPath(_ context.Context, req mcp.CallToolRequest
 	})
 }
 
-func (s *Server) handleGetRecentChanges(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (s *Server) handleGetRecentChanges(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	if s.watcher == nil {
 		return mcp.NewToolResultError("watch mode is not active"), nil
 	}
@@ -489,7 +489,7 @@ func (s *Server) handleGetSymbolSource(ctx context.Context, req mcp.CallToolRequ
 	}
 	result["etag"] = etag
 
-	if isGCX(req) {
+	if s.isGCX(ctx, req) {
 		return gcxResponse(encodeGetSymbolSource(node, source, startLine, etag))
 	}
 
@@ -625,7 +625,7 @@ func (s *Server) handleBatchSymbols(ctx context.Context, req mcp.CallToolRequest
 	}
 	batchResult["etag"] = etag
 
-	if isGCX(req) {
+	if s.isGCX(ctx, req) {
 		return gcxResponse(encodeBatchSymbols(results, includeSource))
 	}
 
@@ -665,7 +665,7 @@ func isTestFile(path string) bool {
 	return strings.Contains(path, "__tests__/") || strings.Contains(path, "/test/")
 }
 
-func (s *Server) handleGetTestTargets(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (s *Server) handleGetTestTargets(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	idsStr, err := req.RequireString("ids")
 	if err != nil {
 		return mcp.NewToolResultError("ids is required"), nil
@@ -786,7 +786,7 @@ func (s *Server) handleGetTestTargets(_ context.Context, req mcp.CallToolRequest
 	})
 }
 
-func (s *Server) handleSuggestPattern(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (s *Server) handleSuggestPattern(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	exampleID, err := req.RequireString("id")
 	if err != nil {
 		return mcp.NewToolResultError("id is required"), nil
@@ -923,7 +923,7 @@ func (s *Server) handleSuggestPattern(_ context.Context, req mcp.CallToolRequest
 	return mcp.NewToolResultJSON(result)
 }
 
-func (s *Server) handleGetEditPlan(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (s *Server) handleGetEditPlan(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	idsStr, err := req.RequireString("ids")
 	if err != nil {
 		return mcp.NewToolResultError("ids is required"), nil
@@ -1342,7 +1342,7 @@ func (s *Server) handleSmartContext(ctx context.Context, req mcp.CallToolRequest
 	}
 	result["files_to_edit"] = filesToEdit
 
-	if isGCX(req) {
+	if s.isGCX(ctx, req) {
 		return gcxResponse(encodeSmartContext(result))
 	}
 	return mcp.NewToolResultJSON(result)
@@ -1394,7 +1394,7 @@ func extractKeywords(task string) []string {
 	return keywords
 }
 
-func (s *Server) handleRenameSymbol(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (s *Server) handleRenameSymbol(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	id, err := req.RequireString("id")
 	if err != nil {
 		return mcp.NewToolResultError("id is required"), nil

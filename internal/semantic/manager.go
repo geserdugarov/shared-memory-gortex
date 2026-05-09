@@ -241,3 +241,25 @@ func (m *Manager) HasProviders() bool {
 	}
 	return false
 }
+
+// AllProviders returns the unfiltered list of registered providers.
+// Used by the daemon's LSP-action surface to find the right LSP
+// provider for a file (call sites need the *lsp.Provider concrete
+// type, so this stays untyped here and the caller does the type
+// assertion against the lsp package).
+func (m *Manager) AllProviders() []Provider {
+	out := make([]Provider, len(m.providers))
+	copy(out, m.providers)
+	return out
+}
+
+// ProviderForLanguage returns the highest-priority registered provider
+// for the given language code, or nil. The returned provider is the
+// same one selectProviders would dispatch Enrich to.
+func (m *Manager) ProviderForLanguage(lang string) Provider {
+	if !m.config.Enabled {
+		return nil
+	}
+	candidates := m.selectProviders()
+	return candidates[lang]
+}

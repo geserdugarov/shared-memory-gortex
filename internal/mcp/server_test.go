@@ -81,6 +81,7 @@ func findAndCallHandler(srv *Server, name string, ctx context.Context, req mcpli
 		"get_call_chain":        srv.handleGetCallChain,
 		"get_callers":           srv.handleGetCallers,
 		"find_implementations":  srv.handleFindImplementations,
+		"find_overrides":        srv.handleFindOverrides,
 		"find_usages":           srv.handleFindUsages,
 		"get_cluster":           srv.handleGetCluster,
 		"get_editing_context":   srv.handleGetEditingContext,

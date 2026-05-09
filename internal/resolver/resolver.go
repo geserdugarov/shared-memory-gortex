@@ -1328,6 +1328,129 @@ func (r *Resolver) InferImplements() int {
 	return added
 }
 
+// InferOverrides materialises EdgeOverrides edges from method-name
+// matches between a type and its supertype. Walks every type that has
+// at least one EdgeExtends/EdgeImplements/EdgeComposes outgoing edge,
+// then for every member of the type emits an EdgeOverrides edge to a
+// matching member on the supertype (matched by name). Returns the
+// number of new edges added.
+//
+// Origin tier is ast_resolved when the supertype edge itself was
+// ast_resolved (extractor confirmed parent in the same compilation
+// unit); ast_inferred when the supertype edge was inferred from name
+// (e.g. InferImplements above); preserved when the parent edge was
+// already lsp_resolved/lsp_dispatch (the LSP enrichment path stamps
+// EdgeOverrides directly with that origin).
+//
+// This is the AST half of I2 — works without an LSP available.
+func (r *Resolver) InferOverrides() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	// Step 1: index methods by their owning type via EdgeMemberOf.
+	typeMembers := make(map[string]map[string]*graph.Node) // typeID → name → method node
+	for _, e := range r.graph.AllEdges() {
+		if e.Kind != graph.EdgeMemberOf {
+			continue
+		}
+		method := r.graph.GetNode(e.From)
+		if method == nil || method.Kind != graph.KindMethod {
+			continue
+		}
+		set := typeMembers[e.To]
+		if set == nil {
+			set = make(map[string]*graph.Node)
+			typeMembers[e.To] = set
+		}
+		set[method.Name] = method
+	}
+	if len(typeMembers) == 0 {
+		return 0
+	}
+
+	// Step 2: for every (child → parent) extends/implements/composes
+	// edge, walk the child's methods and emit EdgeOverrides where the
+	// parent has a same-named method. Skip if the override edge
+	// already exists.
+	parentKinds := map[graph.EdgeKind]bool{
+		graph.EdgeExtends:    true,
+		graph.EdgeImplements: true,
+		graph.EdgeComposes:   true,
+	}
+	type overridePair struct {
+		from, to *graph.Node
+		origin   string
+	}
+	var pending []overridePair
+	for _, e := range r.graph.AllEdges() {
+		if !parentKinds[e.Kind] {
+			continue
+		}
+		child := r.graph.GetNode(e.From)
+		parent := r.graph.GetNode(e.To)
+		if child == nil || parent == nil || child.ID == parent.ID {
+			continue
+		}
+		if child.Kind != graph.KindType && child.Kind != graph.KindInterface {
+			continue
+		}
+		if parent.Kind != graph.KindType && parent.Kind != graph.KindInterface {
+			continue
+		}
+		childMethods := typeMembers[child.ID]
+		parentMethods := typeMembers[parent.ID]
+		if len(childMethods) == 0 || len(parentMethods) == 0 {
+			continue
+		}
+		// Origin selection: track the parent edge's confidence into
+		// the override edge so blast-radius queries can filter by
+		// min_tier consistently.
+		origin := graph.OriginASTInferred
+		if e.Origin == graph.OriginASTResolved {
+			origin = graph.OriginASTResolved
+		} else if rank := graph.OriginRank(e.Origin); rank >= graph.OriginRank(graph.OriginLSPDispatch) {
+			origin = e.Origin
+		}
+		for name, cm := range childMethods {
+			pm, ok := parentMethods[name]
+			if !ok || pm.ID == cm.ID {
+				continue
+			}
+			pending = append(pending, overridePair{from: cm, to: pm, origin: origin})
+		}
+	}
+
+	added := 0
+	for _, p := range pending {
+		// Skip when the edge already exists.
+		dup := false
+		for _, existing := range r.graph.GetOutEdges(p.from.ID) {
+			if existing.Kind == graph.EdgeOverrides && existing.To == p.to.ID {
+				dup = true
+				if graph.OriginRank(existing.Origin) < graph.OriginRank(p.origin) {
+					existing.Origin = p.origin
+				}
+				break
+			}
+		}
+		if dup {
+			continue
+		}
+		r.graph.AddEdge(&graph.Edge{
+			From:            p.from.ID,
+			To:              p.to.ID,
+			Kind:            graph.EdgeOverrides,
+			FilePath:        p.from.FilePath,
+			Line:            p.from.StartLine,
+			Confidence:      1.0,
+			ConfidenceLabel: "EXTRACTED",
+			Origin:          p.origin,
+		})
+		added++
+	}
+	return added
+}
+
 func lastPathComponent(path string) string {
 	parts := strings.Split(path, "/")
 	if len(parts) == 0 {

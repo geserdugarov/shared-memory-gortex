@@ -218,8 +218,12 @@ func runMCP(cmd *cobra.Command, args []string) error {
 			switch {
 			case strings.HasPrefix(pc.Name, "scip-") && pc.Command != "":
 				semMgr.RegisterProvider(scip.NewProvider(pc.Command, pc.Args, pc.Languages, semCfg.TimeoutSeconds, logger))
-			case strings.HasPrefix(pc.Name, "gopls") || pc.Daemon:
-				semMgr.RegisterProvider(lsp.NewProvider(pc.Command, pc.Args, pc.Languages, pc.Daemon, pc.MaxParallel, logger))
+			case lsp.SpecByName(pc.Name) != nil || pc.Daemon:
+				if spec := lsp.SpecByName(pc.Name); spec != nil {
+					semMgr.RegisterProvider(lsp.NewProviderFromSpec(spec, logger))
+				} else {
+					semMgr.RegisterProvider(lsp.NewProvider(pc.Command, pc.Args, pc.Languages, pc.Daemon, pc.MaxParallel, logger))
+				}
 			}
 		}
 

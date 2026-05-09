@@ -131,10 +131,12 @@ func newPipedClient(t *testing.T) (client *Client, serverIn *bufio.Reader, serve
 	clientStdoutR, clientStdoutW := io.Pipe()
 
 	c := &Client{
-		stdin:  clientStdinW,
-		stdout: bufio.NewReader(clientStdoutR),
-		logger: zap.NewNop(),
-		done:   make(chan struct{}),
+		stdin:         clientStdinW,
+		stdout:        bufio.NewReader(clientStdoutR),
+		logger:        zap.NewNop(),
+		done:          make(chan struct{}),
+		notifHandlers: make(map[string]NotificationHandler),
+		reqHandlers:   make(map[string]RequestHandler),
 	}
 	go c.readResponses()
 
@@ -143,11 +145,19 @@ func newPipedClient(t *testing.T) (client *Client, serverIn *bufio.Reader, serve
 		_ = clientStdoutW.Close()
 		_ = clientStdinR.Close()
 		_ = clientStdoutR.Close()
-		// Unblock any pending Call invocations.
+		// readResponses' defer closes done on EOF; the test may also
+		// have closed it directly to simulate server exit. Close
+		// idempotently using a select probe.
 		select {
 		case <-c.done:
+			// Already closed.
 		default:
-			close(c.done)
+			c.mu.Lock()
+			if !c.closed {
+				c.closed = true
+				close(c.done)
+			}
+			c.mu.Unlock()
 		}
 	}
 	return c, bufio.NewReader(clientStdinR), clientStdoutW, cleanup

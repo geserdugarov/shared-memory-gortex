@@ -161,6 +161,21 @@ const (
 	// inheritance). Distinct from EdgeExtends (newtype/inheritance/
 	// interface extension).
 	EdgeComposes EdgeKind = "composes"
+	// EdgeOverrides links a method to the parent-class or interface
+	// method it overrides. Distinct from EdgeImplements (interface
+	// implementation) and EdgeExtends (class hierarchy) — those are
+	// type-level relationships; EdgeOverrides is method-level. Emitted
+	// alongside EdgeExtends/EdgeImplements when a child type declares
+	// a method that shadows a parent method with the same signature.
+	// Origin tier:
+	//   lsp_resolved when the LSP server confirmed the override (e.g.
+	//   tsserver / rust-analyzer / clangd report it via type hierarchy
+	//   or its workspace symbol provider).
+	//   ast_resolved when the parent type is in the same compilation
+	//   unit and the indexer can prove the method exists in both.
+	//   ast_inferred when the override is heuristic (same name only,
+	//   parent type unknown).
+	EdgeOverrides EdgeKind = "overrides"
 	// EdgeLicensedAs links a file to its SPDX license. Sourced from
 	// the file's SPDX-License-Identifier header, falling back to the
 	// repo-level LICENSE file.
@@ -248,7 +263,7 @@ func MeetsMinTier(origin, minTier string) bool {
 // score, and semantic_source meta as fallback signals. Never returns empty.
 func DefaultOriginFor(kind EdgeKind, confidence float64, semanticSource string) string {
 	if semanticSource != "" {
-		if kind == EdgeImplements {
+		if kind == EdgeImplements || kind == EdgeOverrides {
 			return OriginLSPDispatch
 		}
 		return OriginLSPResolved
@@ -260,7 +275,7 @@ func DefaultOriginFor(kind EdgeKind, confidence float64, semanticSource string) 
 		// Coverage structural edges: the extractor produces an
 		// unambiguous source→target binding for each, so they share
 		// the AST-resolved tier.
-		EdgeParamOf, EdgeAliases, EdgeComposes, EdgeLicensedAs,
+		EdgeParamOf, EdgeAliases, EdgeComposes, EdgeOverrides, EdgeLicensedAs,
 		EdgeOwns, EdgeAuthored, EdgeGeneratedBy, EdgeDependsOnModule,
 		EdgeCaptures:
 		return OriginASTResolved
@@ -285,7 +300,7 @@ func ConfidenceLabelFor(kind EdgeKind, confidence float64) string {
 	switch kind {
 	case EdgeDefines, EdgeImports, EdgeExtends, EdgeMemberOf, EdgeImplements,
 		EdgeProvides, EdgeConsumes, EdgeMatches,
-		EdgeParamOf, EdgeAliases, EdgeComposes, EdgeLicensedAs,
+		EdgeParamOf, EdgeAliases, EdgeComposes, EdgeOverrides, EdgeLicensedAs,
 		EdgeOwns, EdgeAuthored, EdgeGeneratedBy, EdgeDependsOnModule,
 		EdgeCaptures:
 		return "EXTRACTED"

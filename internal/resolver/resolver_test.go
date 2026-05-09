@@ -395,7 +395,7 @@ func TestResolveMethodCall_ImportReachabilityFilter(t *testing.T) {
 	g.AddNode(&graph.Node{
 		ID: "pkg/parser/registry.go::Registry.Register", Kind: graph.KindMethod, Name: "Register",
 		FilePath: "pkg/parser/registry.go", Language: "go",
-		Meta:     map[string]any{"receiver": "Registry"},
+		Meta: map[string]any{"receiver": "Registry"},
 	})
 
 	// Unrelated package: pkg/daemon. NOT imported.
@@ -403,7 +403,7 @@ func TestResolveMethodCall_ImportReachabilityFilter(t *testing.T) {
 	g.AddNode(&graph.Node{
 		ID: "pkg/daemon/overlay.go::OverlayManager.Register", Kind: graph.KindMethod, Name: "Register",
 		FilePath: "pkg/daemon/overlay.go", Language: "go",
-		Meta:     map[string]any{"receiver": "OverlayManager"},
+		Meta: map[string]any{"receiver": "OverlayManager"},
 	})
 
 	// Import edge: register.go → pkg/parser/registry.go (pre-resolved).
@@ -449,7 +449,7 @@ func TestResolveMethodCall_LocalityPrefersSamePackage(t *testing.T) {
 	g.AddNode(&graph.Node{
 		ID: "pkg/a/helpers.go::Helper.Do", Kind: graph.KindMethod, Name: "Do",
 		FilePath: "pkg/a/helpers.go", Language: "go",
-		Meta:     map[string]any{"receiver": "Helper"},
+		Meta: map[string]any{"receiver": "Helper"},
 	})
 
 	// Imported but cross-package: pkg/aaa/util.go::AAA.Do (sorts first
@@ -458,7 +458,7 @@ func TestResolveMethodCall_LocalityPrefersSamePackage(t *testing.T) {
 	g.AddNode(&graph.Node{
 		ID: "pkg/aaa/util.go::AAA.Do", Kind: graph.KindMethod, Name: "Do",
 		FilePath: "pkg/aaa/util.go", Language: "go",
-		Meta:     map[string]any{"receiver": "AAA"},
+		Meta: map[string]any{"receiver": "AAA"},
 	})
 
 	// Caller's file imports pkg/aaa, so both packages are reachable.
@@ -505,12 +505,12 @@ func TestResolveMethodCall_InterfaceDispatchFanOut(t *testing.T) {
 	g.AddNode(&graph.Node{
 		ID: "pkg/email.go::EmailNotifier.Notify", Kind: graph.KindMethod, Name: "Notify",
 		FilePath: "pkg/email.go", Language: "go",
-		Meta:     map[string]any{"receiver": "EmailNotifier"},
+		Meta: map[string]any{"receiver": "EmailNotifier"},
 	})
 	g.AddNode(&graph.Node{
 		ID: "pkg/sms.go::SMSNotifier.Notify", Kind: graph.KindMethod, Name: "Notify",
 		FilePath: "pkg/sms.go", Language: "go",
-		Meta:     map[string]any{"receiver": "SMSNotifier"},
+		Meta: map[string]any{"receiver": "SMSNotifier"},
 	})
 
 	// Receiver type is the interface itself — ambiguous dispatch.

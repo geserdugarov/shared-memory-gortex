@@ -390,6 +390,7 @@ func NewServer(engine *query.Engine, g *graph.Graph, idx *indexer.Indexer, watch
 	s.registerCodingTools()
 	s.registerAnalysisTools()
 	s.registerEnhancementTools()
+	s.registerLSPTools()
 	s.registerResources()
 	s.registerPrompts()
 

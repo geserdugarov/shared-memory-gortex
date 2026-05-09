@@ -47,9 +47,10 @@ func AddSemanticEdge(g *graph.Graph, from, to string, kind graph.EdgeKind, fileP
 // originForSemanticKind maps edge kind to the appropriate LSP-grade tier.
 // Interface → implementation is a dispatch resolution (one step less direct
 // than a literal target match), so it gets lsp_dispatch; direct target
-// references get lsp_resolved.
+// references get lsp_resolved. Method overrides are method-level
+// dispatch — same tier as EdgeImplements.
 func originForSemanticKind(kind graph.EdgeKind) string {
-	if kind == graph.EdgeImplements {
+	if kind == graph.EdgeImplements || kind == graph.EdgeOverrides {
 		return graph.OriginLSPDispatch
 	}
 	return graph.OriginLSPResolved

@@ -488,6 +488,17 @@ func (s *Server) registerCoreTools() {
 	)
 
 	s.mcpServer.AddTool(
+		mcp.NewTool("find_overrides",
+			mcp.WithDescription("Finds all methods that override the given method (children) or the parent methods it overrides. Backed by EdgeOverrides materialised at index time and promoted to lsp_dispatch when an LSP is available."),
+			mcp.WithString("id", mcp.Required(), mcp.Description("Method node ID")),
+			mcp.WithString("direction", mcp.Description("'children' (default — overriders) or 'parents' (overridden methods)")),
+			mcp.WithString("format", mcp.Description("Output format: json (default), gcx (GCX1 compact wire format), or toon")),
+			mcp.WithString("min_tier", mcp.Description(minTierParamDescription)),
+		),
+		s.handleFindOverrides,
+	)
+
+	s.mcpServer.AddTool(
 		mcp.NewTool("find_usages",
 			mcp.WithDescription("Use instead of Grep to find every reference to a symbol across the codebase. Returns precise locations with zero false positives."),
 			mcp.WithString("id", mcp.Required(), mcp.Description("Node ID")),
@@ -832,6 +843,48 @@ func (s *Server) handleGetCallers(_ context.Context, req mcp.CallToolRequest) (*
 	sg.FilterByMinTier(minTier)
 	enrichSubGraphEdges(sg)
 	return returnSubGraph(req, sg)
+}
+
+func (s *Server) handleFindOverrides(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	id, err := req.RequireString("id")
+	if err != nil {
+		return mcp.NewToolResultError("id is required"), nil
+	}
+	direction := req.GetString("direction", "children")
+	minTier := req.GetString("min_tier", "")
+	var nodes []*graph.Node
+	switch direction {
+	case "parents", "overridden":
+		nodes = s.engine.FindOverridden(id)
+	default:
+		nodes = s.engine.FindOverridesMinTier(id, minTier)
+	}
+
+	if isGCX(req) {
+		sg := &query.SubGraph{Nodes: nodes, TotalNodes: len(nodes)}
+		return returnSubGraph(req, sg)
+	}
+	if isTOON(req) {
+		result := struct {
+			Overrides []toonNodeRow `toon:"overrides"`
+			Total     int           `toon:"total"`
+		}{
+			Overrides: nodesToTOONRows(nodes),
+			Total:     len(nodes),
+		}
+		if data, err := toon.Marshal(result); err == nil {
+			return mcp.NewToolResultText(string(data)), nil
+		}
+	}
+	results := make([]map[string]any, 0, len(nodes))
+	for _, n := range nodes {
+		results = append(results, n.Brief())
+	}
+	return mcp.NewToolResultJSON(map[string]any{
+		"overrides": results,
+		"total":     len(results),
+		"direction": direction,
+	})
 }
 
 func (s *Server) handleFindImplementations(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {

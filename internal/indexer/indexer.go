@@ -330,6 +330,9 @@ func (idx *Indexer) RunDeferredPasses(ctx context.Context) {
 
 	reporter.Report("inferring interfaces", 0, 0)
 	idx.resolver.InferImplements()
+	// Method-level overrides — needs to run after InferImplements so
+	// the inferred extends/implements parent edges are present.
+	idx.resolver.InferOverrides()
 
 	if idx.semanticMgr != nil && idx.semanticMgr.Enabled() && idx.semanticMgr.HasProviders() {
 		reporter.Report("semantic enrichment", 0, 0)
@@ -1212,6 +1215,9 @@ func (idx *Indexer) IndexCtx(ctx context.Context, root string) (*IndexResult, er
 		reporter.Report("inferring interfaces", 0, 0)
 		// Infer structural interface satisfaction.
 		idx.resolver.InferImplements()
+		// Method-level overrides — needs to run after InferImplements so
+		// the inferred extends/implements parent edges are present.
+		idx.resolver.InferOverrides()
 
 		// Semantic enrichment (SCIP, go/types, LSP).
 		if idx.semanticMgr != nil && idx.semanticMgr.Enabled() && idx.semanticMgr.HasProviders() {
@@ -1413,6 +1419,7 @@ func (idx *Indexer) indexFile(filePath string, resolve bool) error {
 func (idx *Indexer) ResolveAll() {
 	idx.resolver.ResolveAll()
 	idx.resolver.InferImplements()
+	idx.resolver.InferOverrides()
 }
 
 // EvictFile removes all nodes and edges belonging to filePath.
@@ -1758,6 +1765,7 @@ func (idx *Indexer) IncrementalReindex(root string) (*IndexResult, error) {
 
 	// Re-infer interface implementations (edges may have been lost during eviction).
 	idx.resolver.InferImplements()
+	idx.resolver.InferOverrides()
 
 	// Rebuild search index to ensure consistency.
 	idx.buildSearchIndex()
@@ -2380,7 +2388,7 @@ func (idx *Indexer) resolveCallReturnTypes(reg *contracts.Registry) {
 				}
 			}
 			if varName != "" {
-				typeID, repeated := idx.lookupVarTypeForContract(c, bf,varName)
+				typeID, repeated := idx.lookupVarTypeForContract(c, bf, varName)
 				if typeID != "" {
 					items := reg.ByID(c.ID)
 					changed := false
@@ -2436,7 +2444,7 @@ func (idx *Indexer) resolveCallReturnTypes(reg *contracts.Registry) {
 			if !isLikelyIdentifier(ident) {
 				continue
 			}
-			typeID, repeated := idx.lookupVarTypeForContract(c, bf,ident)
+			typeID, repeated := idx.lookupVarTypeForContract(c, bf, ident)
 			if typeID != "" {
 				envRaw[ri]["type"] = typeID
 				if repeated {
@@ -2554,7 +2562,6 @@ func isLikelyIdentifier(s string) bool {
 	}
 	return true
 }
-
 
 // lookupVarTypeForContract resolves a variable to its return type
 // using BodyFacts (AST-driven, structurally correct). Returns

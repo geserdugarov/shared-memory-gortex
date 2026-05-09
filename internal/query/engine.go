@@ -140,6 +140,54 @@ func (e *Engine) FindImplementations(interfaceID string) []*graph.Node {
 	return e.FindImplementationsMinTier(interfaceID, "")
 }
 
+// FindOverrides returns the methods that override the given method
+// (i.e. children with EdgeOverrides → methodID). One-hop walk over
+// the type-hierarchy edges materialised by I2.
+func (e *Engine) FindOverrides(methodID string) []*graph.Node {
+	return e.FindOverridesMinTier(methodID, "")
+}
+
+// FindOverridesMinTier filters override edges by minimum origin tier.
+// Pass graph.OriginLSPDispatch to restrict to LSP-confirmed overrides.
+func (e *Engine) FindOverridesMinTier(methodID, minTier string) []*graph.Node {
+	edges := e.g.GetInEdges(methodID)
+	out := make([]*graph.Node, 0, len(edges))
+	for _, edge := range edges {
+		if edge.Kind != graph.EdgeOverrides {
+			continue
+		}
+		if minTier != "" {
+			origin := edge.Origin
+			if origin == "" {
+				origin = graph.DefaultOriginFor(edge.Kind, edge.Confidence, "")
+			}
+			if !graph.MeetsMinTier(origin, minTier) {
+				continue
+			}
+		}
+		if n := e.g.GetNode(edge.From); n != nil {
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
+// FindOverridden returns the parent-class / interface methods that
+// the given method overrides (i.e. methodID -EdgeOverrides-> targets).
+func (e *Engine) FindOverridden(methodID string) []*graph.Node {
+	edges := e.g.GetOutEdges(methodID)
+	out := make([]*graph.Node, 0, len(edges))
+	for _, edge := range edges {
+		if edge.Kind != graph.EdgeOverrides {
+			continue
+		}
+		if n := e.g.GetNode(edge.To); n != nil {
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
 // FindImplementationsMinTier is FindImplementations filtered by the origin
 // tier of the implements-edge. Pass "" for no filter; pass
 // graph.OriginLSPDispatch (or higher) to restrict to compiler-verified

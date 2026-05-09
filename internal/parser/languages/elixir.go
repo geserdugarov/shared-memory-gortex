@@ -156,6 +156,12 @@ func (e *ElixirExtractor) handleDefmodule(callNode *sitter.Node, src []byte, fil
 		// before each action. Emit one EdgeCalls per (action, plug)
 		// pair after the body walk so defs are already registered.
 		e.emitPhoenixPlugBindings(body, src, filePath, modName, result)
+		// Ecto model attribution: `schema "name" do ... end` macro
+		// → EdgeModelsTable to a synthetic KindTable node.
+		detectEcto(body, src, id, modName, filePath, result)
+		// HEEx component attribution: `~H"""..."""` sigils render
+		// uppercase-first-letter or dot-prefixed components.
+		emitElixirHEExEdges(id, body, src, filePath, result)
 	}
 }
 

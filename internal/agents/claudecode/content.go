@@ -227,8 +227,8 @@ Quick reference for all Gortex MCP tools and the knowledge graph schema.
 | analyze kind=error_surface | Function/method nodes with their EdgeThrows targets — refactor blast radius |
 | analyze kind=external_calls | Stdlib / module-cache attribution — KindModule rollup of call/symbol counts; pass ` + "`id`" + ` for per-symbol detail, ` + "`module_kind`" + ` to filter stdlib vs module_cache |
 | analyze kind=routes | Handler↔route pairs from the EdgeHandlesRoute layer (HTTP/gRPC/WS/GraphQL/topic); ` + "`method`" + ` / ` + "`path`" + ` / ` + "`type`" + ` filters |
-| analyze kind=models | Model→table edges from EdgeModelsTable across gorm / SQLAlchemy / Django / ActiveRecord / JPA / TypeORM; ` + "`orm`" + ` / ` + "`table`" + ` / ` + "`model`" + ` filters |
-| analyze kind=components | Parent↔child JSX fan-in/out from EdgeRendersChild; pass ` + "`id`" + ` for per-component child list |
+| analyze kind=models | Model→table edges from EdgeModelsTable across gorm / SQLAlchemy / Django / ActiveRecord / JPA / TypeORM / Ecto; ` + "`orm`" + ` / ` + "`table`" + ` / ` + "`model`" + ` filters |
+| analyze kind=components | Parent↔child fan-in/out from EdgeRendersChild (JSX/TSX + Phoenix HEEx); pass ` + "`id`" + ` for per-component child list |
 | index_health | Health score, parse failures, stale files, language coverage |
 | get_symbol_history | Symbols modified this session with counts; flags churning (3+ edits) |
 | gortex enrich blame\|coverage\|releases\|all (CLI) | Bulk-stamp the graph with the metadata that stale_*/coverage_*/ownership/releases analyzers need |

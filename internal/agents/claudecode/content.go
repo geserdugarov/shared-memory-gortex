@@ -162,6 +162,8 @@ Quick reference for all Gortex MCP tools and the knowledge graph schema.
 | find_import_path | Correct import path for a symbol in a target file |
 | explain_change_impact | Risk-tiered blast radius with affected processes/communities |
 | edit_symbol | Edit symbol source by ID — no Read needed, resolves file + lines |
+| edit_file | String-replace any file (markdown / config / spec / source) by absolute or repo-relative path. No pre-Read required. Atomic write (temp+rename), auto-reindex. ` + "`replace_all`" + ` for many occurrences; ` + "`dry_run`" + ` to preview. |
+| write_file | Create or overwrite any file by absolute or repo-relative path. No pre-Read required. Atomic write, creates parent dirs, auto-reindex. ` + "`dry_run`" + ` to preview. |
 | rename_symbol | Coordinated rename: generates edits for definition + all references |
 | get_recent_changes | Files/symbols changed since timestamp (watch mode) |
 

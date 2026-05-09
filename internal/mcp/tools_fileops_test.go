@@ -195,3 +195,191 @@ func TestWriteFile_PreservesExistingMode(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, os.FileMode(0o755), info.Mode().Perm())
 }
+
+func TestWriteFile_CreatesNestedDirs(t *testing.T) {
+	srv, dir := setupTestServer(t)
+
+	result := callTool(t, srv, "write_file", map[string]any{
+		"path":    "deeply/nested/sub/dir/notes.md",
+		"content": "hi",
+	})
+	assert.False(t, result.IsError, "atomic-write must mkdir -p parent dirs")
+
+	got, err := os.ReadFile(filepath.Join(dir, "deeply", "nested", "sub", "dir", "notes.md"))
+	require.NoError(t, err)
+	assert.Equal(t, "hi", string(got))
+}
+
+func TestWriteFile_RejectsPathTraversal(t *testing.T) {
+	srv, dir := setupTestServer(t)
+	// Marker file outside the repo root that the traversal would target.
+	parent := filepath.Dir(dir)
+	probe := filepath.Join(parent, "escape.txt")
+	t.Cleanup(func() { _ = os.Remove(probe) })
+
+	result := callTool(t, srv, "write_file", map[string]any{
+		"path":    "../escape.txt",
+		"content": "should not land",
+	})
+	assert.True(t, result.IsError, "relative path with .. that escapes repo must be refused")
+
+	_, err := os.Stat(probe)
+	assert.True(t, os.IsNotExist(err), "no file may be written outside the repo root via traversal")
+}
+
+func TestEditFile_RejectsPathTraversal(t *testing.T) {
+	srv, dir := setupTestServer(t)
+	parent := filepath.Dir(dir)
+	probe := filepath.Join(parent, "outside.txt")
+	require.NoError(t, os.WriteFile(probe, []byte("untouched"), 0o644))
+	t.Cleanup(func() { _ = os.Remove(probe) })
+
+	result := callTool(t, srv, "edit_file", map[string]any{
+		"path":       "../outside.txt",
+		"old_string": "untouched",
+		"new_string": "TAMPERED",
+	})
+	assert.True(t, result.IsError, "edit_file must refuse to follow traversal out of the repo")
+
+	got, err := os.ReadFile(probe)
+	require.NoError(t, err)
+	assert.Equal(t, "untouched", string(got), "the file outside the repo must remain unchanged")
+}
+
+func TestWriteFile_AbsolutePathOutsideRepoIsAllowed(t *testing.T) {
+	// Absolute paths bypass the containment check by design — agents
+	// that hand over an absolute path are responsible for the location.
+	srv, _ := setupTestServer(t)
+	tmp := t.TempDir()
+	target := filepath.Join(tmp, "external.txt")
+
+	result := callTool(t, srv, "write_file", map[string]any{
+		"path":    target,
+		"content": "abs allowed",
+	})
+	assert.False(t, result.IsError)
+
+	got, err := os.ReadFile(target)
+	require.NoError(t, err)
+	assert.Equal(t, "abs allowed", string(got))
+}
+
+func TestEditFile_DryRunDoesNotWrite(t *testing.T) {
+	srv, dir := setupTestServer(t)
+	target := filepath.Join(dir, "preview.md")
+	require.NoError(t, os.WriteFile(target, []byte("original"), 0o644))
+
+	result := callTool(t, srv, "edit_file", map[string]any{
+		"path":       "preview.md",
+		"old_string": "original",
+		"new_string": "preview-only",
+		"dry_run":    true,
+	})
+	assert.False(t, result.IsError)
+	resp := decodeFileOpsResult(t, result)
+	assert.Equal(t, "would_apply", resp["status"])
+	assert.Equal(t, true, resp["dry_run"])
+	assert.Equal(t, float64(1), resp["replacements"])
+	assert.Equal(t, false, resp["reindexed"], "dry_run must NOT reindex")
+
+	got, err := os.ReadFile(target)
+	require.NoError(t, err)
+	assert.Equal(t, "original", string(got), "dry_run must NOT touch the file")
+}
+
+func TestWriteFile_DryRunReportsCreate(t *testing.T) {
+	srv, dir := setupTestServer(t)
+
+	result := callTool(t, srv, "write_file", map[string]any{
+		"path":    "newfile.md",
+		"content": "preview",
+		"dry_run": true,
+	})
+	assert.False(t, result.IsError)
+	resp := decodeFileOpsResult(t, result)
+	assert.Equal(t, "would_create", resp["status"])
+	assert.Equal(t, true, resp["dry_run"])
+
+	_, err := os.Stat(filepath.Join(dir, "newfile.md"))
+	assert.True(t, os.IsNotExist(err), "dry_run must NOT create the file")
+}
+
+func TestWriteFile_DryRunReportsOverwrite(t *testing.T) {
+	srv, dir := setupTestServer(t)
+	target := filepath.Join(dir, "existing.md")
+	require.NoError(t, os.WriteFile(target, []byte("v1"), 0o644))
+
+	result := callTool(t, srv, "write_file", map[string]any{
+		"path":    "existing.md",
+		"content": "v2",
+		"dry_run": true,
+	})
+	assert.False(t, result.IsError)
+	resp := decodeFileOpsResult(t, result)
+	assert.Equal(t, "would_overwrite", resp["status"])
+
+	got, err := os.ReadFile(target)
+	require.NoError(t, err)
+	assert.Equal(t, "v1", string(got), "dry_run must NOT overwrite")
+}
+
+func TestWriteFile_RejectsDirectoryTarget(t *testing.T) {
+	srv, dir := setupTestServer(t)
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "is_a_dir"), 0o755))
+
+	result := callTool(t, srv, "write_file", map[string]any{
+		"path":    "is_a_dir",
+		"content": "should fail",
+	})
+	assert.True(t, result.IsError, "write_file must refuse to clobber a directory")
+}
+
+func TestEditFile_AmbiguousErrorIncludesLineNumbers(t *testing.T) {
+	srv, dir := setupTestServer(t)
+	target := filepath.Join(dir, "many.md")
+	require.NoError(t, os.WriteFile(target, []byte("\nTODO\nTODO\nTODO\n"), 0o644))
+
+	result := callTool(t, srv, "edit_file", map[string]any{
+		"path":       "many.md",
+		"old_string": "TODO",
+		"new_string": "DONE",
+	})
+	assert.True(t, result.IsError)
+	require.NotEmpty(t, result.Content)
+	text := result.Content[0].(mcplib.TextContent).Text
+	assert.Contains(t, text, "first match lines", "error must surface the line numbers so the agent can choose a unique fragment")
+}
+
+func TestEditFile_DryRunAmbiguousFailsBeforeWrite(t *testing.T) {
+	srv, dir := setupTestServer(t)
+	target := filepath.Join(dir, "amb.md")
+	require.NoError(t, os.WriteFile(target, []byte("DUP\nDUP\n"), 0o644))
+
+	result := callTool(t, srv, "edit_file", map[string]any{
+		"path":       "amb.md",
+		"old_string": "DUP",
+		"new_string": "x",
+		"dry_run":    true,
+	})
+	assert.True(t, result.IsError, "dry_run must still surface ambiguity errors")
+}
+
+func TestPathContainedIn(t *testing.T) {
+	tests := []struct {
+		abs, root string
+		want      bool
+	}{
+		{"/repo/a/b.go", "/repo", true},
+		{"/repo", "/repo", true},
+		{"/repo/", "/repo", true},
+		{"/repo-other/x.go", "/repo", false},
+		{"/etc/passwd", "/repo", false},
+		{"/repo/../etc/passwd", "/repo", false},
+		{"", "/repo", false},
+		{"/repo/x.go", "", false},
+	}
+	for _, tt := range tests {
+		got := pathContainedIn(tt.abs, tt.root)
+		assert.Equal(t, tt.want, got, "pathContainedIn(%q, %q)", tt.abs, tt.root)
+	}
+}

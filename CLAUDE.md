@@ -98,6 +98,8 @@ The `analyze` MCP tool is a unified dispatcher. Supported `kind` values:
 | Reading files to learn a pattern      | `suggest_pattern`                        |
 | Manually scaffolding from a pattern   | `scaffold` — generates code, wiring, and test stubs from an example |
 | Read→Edit roundtrip for one symbol    | `edit_symbol` — edit source by ID, no Read needed |
+| Read→Edit roundtrip for any file      | `edit_file` — string-replace any file by absolute or repo-relative path; atomic write, auto-reindex; pass `dry_run` to preview |
+| Read→Write roundtrip for new files    | `write_file` — create or overwrite any file with given content; creates parent dirs; pass `dry_run` to preview |
 | Manual find-and-replace for renames   | `rename_symbol` — coordinated rename across all references |
 | Sequencing multi-file edits yourself  | `batch_edit` — applies edits in dependency order, re-indexes between steps |
 | Reading a diff without graph context  | `diff_context` — enriches git diff with callers, callees, community, risk |

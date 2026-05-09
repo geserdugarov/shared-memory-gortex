@@ -792,6 +792,20 @@ func (mi *MultiIndexer) ResolveFilePath(prefixedPath string) string {
 	return ""
 }
 
+// RepoPrefixes returns the set of registered repo prefixes. The returned
+// slice is a snapshot — safe to retain and iterate concurrently with
+// other multi-indexer operations. Order is unspecified; callers that
+// need stability should sort.
+func (mi *MultiIndexer) RepoPrefixes() []string {
+	mi.mu.RLock()
+	defer mi.mu.RUnlock()
+	prefixes := make([]string, 0, len(mi.repos))
+	for prefix := range mi.repos {
+		prefixes = append(prefixes, prefix)
+	}
+	return prefixes
+}
+
 // RepoRoot returns the local filesystem root for the given repo prefix.
 // ok is true only when the prefix is registered AND meta.RootPath is non-empty.
 // Caller is responsible for joining repo-relative file paths against the root.

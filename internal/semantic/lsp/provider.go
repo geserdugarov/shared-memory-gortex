@@ -189,8 +189,13 @@ func (p *Provider) Enrich(g *graph.Graph, repoRoot string) (*semantic.EnrichResu
 		}
 	}
 
-	// Open documents for files that have targets.
+	// Open documents for files that have targets. Track absolute
+	// paths so the matching closeDocument calls below release the
+	// LSP server's per-file state — without the cleanup, every
+	// Enrich pass on a large repo grows the server's didOpen set
+	// monotonically until the subprocess is restarted.
 	openedFiles := make(map[string]bool)
+	openedAbs := make(map[string]bool)
 	for _, t := range targets {
 		if !openedFiles[t.node.FilePath] {
 			if err := p.openDocument(absRoot, t.node.FilePath); err != nil {
@@ -201,8 +206,19 @@ func (p *Provider) Enrich(g *graph.Graph, repoRoot string) (*semantic.EnrichResu
 				continue
 			}
 			openedFiles[t.node.FilePath] = true
+			openedAbs[filepath.Join(absRoot, t.node.FilePath)] = true
 		}
 	}
+	defer func() {
+		for abs := range openedAbs {
+			if err := p.closeDocument(abs); err != nil {
+				p.logger.Debug("LSP: failed to close document",
+					zap.String("file", abs),
+					zap.Error(err),
+				)
+			}
+		}
+	}()
 
 	// Query hover info for nodes to enrich metadata.
 	enrichedNodes := make(map[string]bool)
@@ -226,6 +242,7 @@ func (p *Provider) Enrich(g *graph.Graph, repoRoot string) (*semantic.EnrichResu
 				continue
 			}
 			openedFiles[n.FilePath] = true
+			openedAbs[filepath.Join(absRoot, n.FilePath)] = true
 		}
 
 		col := identifierColumn(p.getSource(absRoot, n.FilePath), n.StartLine, n.Name)

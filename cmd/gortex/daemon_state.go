@@ -328,6 +328,14 @@ func warmupDaemonState(state *daemonState, logger *zap.Logger) *indexer.MultiWat
 	}
 
 	ctx := progress.WithReporter(context.Background(), progress.Nop{})
+	// BeginBatch / EndBatch tells every per-repo Indexer constructed
+	// inside the loop to skip the graph-wide derivation passes
+	// (InferImplements / InferOverrides / markTestSymbolsAndEmitEdges).
+	// Those passes walk the entire shared graph, so paying them per
+	// repo across hundreds of tracked repos is O(R · global_size). The
+	// EndBatch call below runs them exactly once against the final
+	// graph.
+	state.multiIndexer.BeginBatch()
 	for _, entry := range state.configManager.Global().Repos {
 		// Route repos whose nodes came from the snapshot through
 		// ReconcileRepoCtx — it calls IncrementalReindex, which
@@ -407,6 +415,13 @@ func warmupDaemonState(state *daemonState, logger *zap.Logger) *indexer.MultiWat
 	// against). After resolution, contract bridge edges may have
 	// changed too, so ReconcileContractEdges runs again.
 	state.multiIndexer.RunGlobalResolve()
+
+	// Finish the batch: turn off the per-repo skip flag and run the
+	// graph-wide derivation passes once. RunGlobalResolve above just
+	// lifted the last cross-repo placeholder EdgeCalls, so EdgeTests
+	// derivation here picks up cross-repo test→subject pairs that
+	// were unresolved during the per-repo loop.
+	state.multiIndexer.EndBatch()
 
 	watchCfgs := make(map[string]config.WatchConfig)
 	for prefix := range state.multiIndexer.AllMetadata() {

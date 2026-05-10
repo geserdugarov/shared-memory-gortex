@@ -44,6 +44,14 @@ type MultiIndexer struct {
 	configMgr *config.ConfigManager
 	logger    *zap.Logger
 	mu        sync.RWMutex
+
+	// deferGlobalPasses, when set, propagates SetDeferGlobalPasses(true)
+	// to every per-repo Indexer constructed by this MultiIndexer. Batch
+	// callers (warmup, ReconcileAll) flip it on around their loop and
+	// invoke RunGlobalGraphPasses once at the end so the O(global) walks
+	// (InferImplements / InferOverrides / markTestSymbolsAndEmitEdges)
+	// don't run R times against an R-repo graph.
+	deferGlobalPasses bool
 }
 
 // SetEmbedder installs the embedding provider every per-repo indexer
@@ -55,6 +63,75 @@ func (mi *MultiIndexer) SetEmbedder(e embedding.Provider) {
 	mi.mu.Lock()
 	defer mi.mu.Unlock()
 	mi.embedder = e
+}
+
+// newPerRepoIndexer constructs a per-repo Indexer with the standard
+// MultiIndexer wiring (shared search backend, embedder if configured,
+// deferred-global-passes flag propagated). Centralised so the flag
+// plumbing stays in one place.
+func (mi *MultiIndexer) newPerRepoIndexer(cfg config.IndexConfig) *Indexer {
+	idx := New(mi.graph, mi.registry, cfg, mi.logger)
+	idx.search = mi.search
+	if mi.embedder != nil {
+		idx.SetEmbedder(mi.embedder)
+	}
+	idx.SetDeferGlobalPasses(mi.deferGlobalPasses)
+	return idx
+}
+
+// BeginBatch enables deferred-global-passes mode for every per-repo
+// Indexer that this MultiIndexer constructs after the call AND for
+// every Indexer already in mi.indexers (so ReconcileAll's per-repo
+// IncrementalReindex calls also skip the O(global) walks). Pair with
+// EndBatch.
+func (mi *MultiIndexer) BeginBatch() {
+	mi.mu.Lock()
+	defer mi.mu.Unlock()
+	mi.deferGlobalPasses = true
+	for _, idx := range mi.indexers {
+		idx.SetDeferGlobalPasses(true)
+	}
+}
+
+// EndBatch turns off deferred-global-passes mode and runs the graph-
+// wide derivation passes (InferImplements, InferOverrides,
+// markTestSymbolsAndEmitEdges) once against the shared graph. Restores
+// the per-Indexer flag too so a subsequent one-off TrackRepoCtx call
+// runs the passes inline as expected.
+func (mi *MultiIndexer) EndBatch() {
+	mi.mu.Lock()
+	mi.deferGlobalPasses = false
+	for _, idx := range mi.indexers {
+		idx.SetDeferGlobalPasses(false)
+	}
+	mi.mu.Unlock()
+	mi.RunGlobalGraphPasses()
+}
+
+// RunGlobalGraphPasses runs the graph-wide derivation passes once
+// against the shared graph: InferImplements (structural interface
+// satisfaction), InferOverrides (method-level overrides on
+// extends/implements/composes parents), and markTestSymbolsAndEmitEdges
+// (test→subject EdgeTests). Idempotent — graph.AddEdge dedupes by
+// edgeKey and the resolver passes skip already-present parents.
+func (mi *MultiIndexer) RunGlobalGraphPasses() {
+	if mi.graph == nil {
+		return
+	}
+	r := resolver.New(mi.graph)
+	if added := r.InferImplements(); added > 0 {
+		mi.logger.Info("inferred implements (global)", zap.Int("added", added))
+	}
+	if added := r.InferOverrides(); added > 0 {
+		mi.logger.Info("inferred overrides (global)", zap.Int("added", added))
+	}
+	marked, emitted := markTestSymbolsAndEmitEdges(mi.graph)
+	if marked > 0 || emitted > 0 {
+		mi.logger.Info("test edges emitted (global)",
+			zap.Int("test_symbols", marked),
+			zap.Int("edges", emitted),
+		)
+	}
 }
 
 // NewMultiIndexer creates a MultiIndexer.
@@ -166,11 +243,7 @@ func (mi *MultiIndexer) indexSingleRepo(entry config.RepoEntry) (map[string]*Ind
 	mi.configMgr.LoadWorkspaceConfig(prefix, absPath)
 	cfg := mi.configMgr.GetRepoConfig(prefix)
 
-	idx := New(mi.graph, mi.registry, cfg.Index, mi.logger)
-	idx.search = mi.search
-	if mi.embedder != nil {
-		idx.SetEmbedder(mi.embedder)
-	}
+	idx := mi.newPerRepoIndexer(cfg.Index)
 	entryCopy := entry
 	idx.SetWorkspaceID(resolveWorkspaceID(&entryCopy, cfg, prefix))
 	idx.SetProjectID(resolveProjectID(&entryCopy, cfg, prefix))
@@ -255,20 +328,18 @@ func (mi *MultiIndexer) indexMultiRepo(repos []config.RepoEntry) (map[string]*In
 
 			mi.configMgr.LoadWorkspaceConfig(prefix, absPath)
 			cfg := mi.configMgr.GetRepoConfig(prefix)
-			idx := New(mi.graph, mi.registry, cfg.Index, mi.logger)
-			idx.search = mi.search
-			if mi.embedder != nil {
-				idx.SetEmbedder(mi.embedder)
-			}
+			idx := mi.newPerRepoIndexer(cfg.Index)
 			idx.SetRepoPrefix(prefix)
 			entryCopy := e
 			idx.SetWorkspaceID(resolveWorkspaceID(&entryCopy, cfg, prefix))
 			idx.SetProjectID(resolveProjectID(&entryCopy, cfg, prefix))
 			idx.SetTrackedRepoModules(trackedModules)
-			// Defer the cross-cutting passes (ResolveAll, InferImplements,
-			// semantic enrich, contract extract+commit) so they don't race
-			// against each other across goroutines on the shared graph.
-			// They run serially below via RunDeferredPasses after wg.Wait().
+			// Defer the per-repo cross-cutting passes (ResolveAll,
+			// semantic enrich, contract extract+commit) so they don't
+			// race against each other across goroutines on the shared
+			// graph. They run serially below via RunDeferredPasses after
+			// wg.Wait(). The graph-wide derivation passes run once after
+			// the loop via mi.RunGlobalGraphPasses().
 			idx.SetDeferResolve(true)
 
 			result, err := idx.Index(absPath)
@@ -343,6 +414,13 @@ func (mi *MultiIndexer) indexMultiRepo(repos []config.RepoEntry) (map[string]*In
 	cr.ResolveAll()
 	mi.ReconcileContractEdges()
 
+	// Graph-wide derivation passes run exactly once after every repo
+	// has been parsed, every per-repo and cross-repo resolver has lifted
+	// placeholder edges, and contract bridges are in place. RunDeferredPasses
+	// intentionally skips these so we don't pay an O(global) walk per
+	// repo (was the dominant cost at R≈100+).
+	mi.RunGlobalGraphPasses()
+
 	if len(indexErrors) > 0 && len(results) == 0 {
 		return nil, fmt.Errorf("all repos failed to index: %s", strings.Join(indexErrors, "; "))
 	}
@@ -366,11 +444,7 @@ func (mi *MultiIndexer) IndexRepo(repoPrefix string) (*IndexResult, error) {
 
 	mi.configMgr.LoadWorkspaceConfig(repoPrefix, meta.RootPath)
 	cfg := mi.configMgr.GetRepoConfig(repoPrefix)
-	idx := New(mi.graph, mi.registry, cfg.Index, mi.logger)
-	idx.search = mi.search
-	if mi.embedder != nil {
-		idx.SetEmbedder(mi.embedder)
-	}
+	idx := mi.newPerRepoIndexer(cfg.Index)
 	if mi.IsMultiRepo() {
 		idx.SetRepoPrefix(repoPrefix)
 	}
@@ -470,11 +544,7 @@ func (mi *MultiIndexer) TrackRepoCtx(ctx context.Context, entry config.RepoEntry
 	}
 
 	cfg := mi.configMgr.GetRepoConfig(prefix)
-	idx := New(mi.graph, mi.registry, cfg.Index, mi.logger)
-	idx.search = mi.search
-	if mi.embedder != nil {
-		idx.SetEmbedder(mi.embedder)
-	}
+	idx := mi.newPerRepoIndexer(cfg.Index)
 	if willBeMultiRepo {
 		idx.SetRepoPrefix(prefix)
 	}
@@ -584,11 +654,7 @@ func (mi *MultiIndexer) ReconcileRepoCtx(ctx context.Context, entry config.RepoE
 	}
 
 	cfg := mi.configMgr.GetRepoConfig(prefix)
-	idx := New(mi.graph, mi.registry, cfg.Index, mi.logger)
-	idx.search = mi.search
-	if mi.embedder != nil {
-		idx.SetEmbedder(mi.embedder)
-	}
+	idx := mi.newPerRepoIndexer(cfg.Index)
 	if willBeMultiRepo {
 		idx.SetRepoPrefix(prefix)
 	}
@@ -653,7 +719,15 @@ func (mi *MultiIndexer) ReconcileAll() map[string]*IndexResult {
 	}
 	mi.mu.RUnlock()
 
+	// Same batch trick as warmup: each per-repo IncrementalReindex
+	// triggers an O(global) InferImplements/InferOverrides walk if we
+	// don't suppress it. With ~100 repos that's ~100× the work for the
+	// hourly janitor.
+	mi.BeginBatch()
+	defer mi.EndBatch()
+
 	results := make(map[string]*IndexResult, len(prefixes))
+	reindexed := 0
 	for _, prefix := range prefixes {
 		mi.mu.RLock()
 		idx, ok := mi.indexers[prefix]
@@ -672,6 +746,7 @@ func (mi *MultiIndexer) ReconcileAll() map[string]*IndexResult {
 			mi.logger.Info("janitor: reconciled repo",
 				zap.String("prefix", prefix),
 				zap.Int("stale_files_reindexed", result.FileCount))
+			reindexed++
 		}
 		results[prefix] = result
 
@@ -685,7 +760,7 @@ func (mi *MultiIndexer) ReconcileAll() map[string]*IndexResult {
 		mi.mu.Unlock()
 	}
 
-	if len(results) > 0 {
+	if reindexed > 0 {
 		mi.ReconcileContractEdges()
 	}
 	return results

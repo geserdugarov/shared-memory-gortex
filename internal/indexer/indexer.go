@@ -126,14 +126,24 @@ type Indexer struct {
 	upgradeSpawned   int
 
 	// deferResolve, when set, makes IndexCtx skip the cross-cutting passes
-	// (per-repo ResolveAll / InferImplements / semantic enrichment / contract
-	// extraction + commit) so the multi-repo orchestrator can run them
-	// serially after the parallel fan-out joins. Without this, two
-	// goroutines indexing different repos into the shared graph race on
-	// Edge.Meta during the resolver's mutation phase vs. the contract
-	// pass's graph walk via AllEdges().
+	// (per-repo ResolveAll / semantic enrichment / contract extraction +
+	// commit) so the multi-repo orchestrator can run them serially after
+	// the parallel fan-out joins. Without this, two goroutines indexing
+	// different repos into the shared graph race on Edge.Meta during the
+	// resolver's mutation phase vs. the contract pass's graph walk via
+	// AllEdges().
 	deferResolve       bool
 	pendingContractReg *contracts.Registry
+
+	// deferGlobalPasses, when set, makes IndexCtx and IncrementalReindex
+	// skip the graph-wide derivation passes (InferImplements,
+	// InferOverrides, markTestSymbolsAndEmitEdges). These passes walk the
+	// entire shared graph, so running them per-repo inside a batch loop
+	// (warmup, ReconcileAll) is O(R · global_size) — quadratic for repo
+	// counts in the hundreds. The batch caller is responsible for invoking
+	// RunGlobalGraphPasses exactly once at the end. Has no effect on the
+	// deferResolve path (multi-repo IndexCtx already skips those passes).
+	deferGlobalPasses bool
 
 	// codeownersOnce ensures the repo-level CODEOWNERS file is parsed
 	// exactly once per indexer lifetime. The rule list is derived
@@ -308,11 +318,51 @@ func (idx *Indexer) SetTrackedRepoModules(m map[string]string) { idx.trackedRepo
 // to a later RunDeferredPasses call. See the deferResolve field comment.
 func (idx *Indexer) SetDeferResolve(v bool) { idx.deferResolve = v }
 
-// RunDeferredPasses runs the cross-cutting passes that IndexCtx skipped in
-// deferred mode: per-repo ResolveAll, InferImplements, semantic enrichment,
-// and contract extraction + commit. Safe to call only after IndexCtx has
+// SetDeferGlobalPasses toggles whether the graph-wide derivation passes
+// (InferImplements, InferOverrides, markTestSymbolsAndEmitEdges) run
+// inline at the end of IndexCtx / IncrementalReindex. Set true when the
+// caller drives a batch (e.g. daemon warmup) and will invoke
+// RunGlobalGraphPasses once at the end. See the deferGlobalPasses field
+// comment.
+func (idx *Indexer) SetDeferGlobalPasses(v bool) { idx.deferGlobalPasses = v }
+
+// RunGlobalGraphPasses runs the graph-wide derivation passes once
+// against the indexer's shared graph. Safe to call against a graph that
+// already has these edges — InferImplements / InferOverrides skip
+// existing parents, and graph.AddEdge dedupes by edgeKey so EdgeTests
+// re-emission is a no-op. Logs counts for telemetry. Use when batching
+// multiple per-repo TrackRepoCtx / IncrementalReindex calls under
+// SetDeferGlobalPasses(true).
+func (idx *Indexer) RunGlobalGraphPasses() {
+	if idx.graph == nil {
+		return
+	}
+	if added := idx.resolver.InferImplements(); added > 0 {
+		idx.logger.Info("inferred implements (global)", zap.Int("added", added))
+	}
+	if added := idx.resolver.InferOverrides(); added > 0 {
+		idx.logger.Info("inferred overrides (global)", zap.Int("added", added))
+	}
+	marked, emitted := markTestSymbolsAndEmitEdges(idx.graph)
+	if marked > 0 || emitted > 0 {
+		idx.logger.Info("test edges emitted (global)",
+			zap.Int("test_symbols", marked),
+			zap.Int("edges", emitted),
+		)
+	}
+}
+
+// RunDeferredPasses runs the per-repo cross-cutting passes that IndexCtx
+// skipped in deferred mode: per-repo ResolveAll, semantic enrichment, and
+// contract extraction + commit. Safe to call only after IndexCtx has
 // populated the graph for this repo. Idempotent — second calls are a no-op
 // because the pending registry is cleared at the end.
+//
+// The graph-wide derivation passes (InferImplements, InferOverrides,
+// markTestSymbolsAndEmitEdges) intentionally do NOT run here. They walk
+// the entire shared graph, so the multi-repo orchestrator must invoke
+// MultiIndexer.RunGlobalGraphPasses exactly once after every repo has
+// finished its deferred per-repo work.
 func (idx *Indexer) RunDeferredPasses(ctx context.Context) {
 	if idx.pendingContractReg == nil {
 		return
@@ -327,12 +377,6 @@ func (idx *Indexer) RunDeferredPasses(ctx context.Context) {
 
 	reporter.Report("resolving references", 0, 0)
 	idx.resolver.ResolveAll()
-
-	reporter.Report("inferring interfaces", 0, 0)
-	idx.resolver.InferImplements()
-	// Method-level overrides — needs to run after InferImplements so
-	// the inferred extends/implements parent edges are present.
-	idx.resolver.InferOverrides()
 
 	if idx.semanticMgr != nil && idx.semanticMgr.Enabled() && idx.semanticMgr.HasProviders() {
 		reporter.Report("semantic enrichment", 0, 0)
@@ -361,18 +405,6 @@ func (idx *Indexer) RunDeferredPasses(ctx context.Context) {
 	idx.extractDIContracts(idx.pendingContractReg)
 	idx.commitContracts(idx.pendingContractReg)
 	idx.pendingContractReg = nil
-
-	// Test-edge pass: mark test functions and emit EdgeTests parallel
-	// to EdgeCalls so get_test_targets / find_usages-with-exclude-tests
-	// can answer in one hop.
-	reporter.Report("test edge pass", 0, 0)
-	marked, emitted := markTestSymbolsAndEmitEdges(idx.graph)
-	if marked > 0 || emitted > 0 {
-		idx.logger.Info("test edges emitted",
-			zap.Int("test_symbols", marked),
-			zap.Int("edges", emitted),
-		)
-	}
 }
 
 // RootPath returns the root path used for relative path computation.
@@ -1212,12 +1244,17 @@ func (idx *Indexer) IndexCtx(ctx context.Context, root string) (*IndexResult, er
 		// Resolve cross-file references.
 		idx.resolver.ResolveAll()
 
-		reporter.Report("inferring interfaces", 0, 0)
-		// Infer structural interface satisfaction.
-		idx.resolver.InferImplements()
-		// Method-level overrides — needs to run after InferImplements so
-		// the inferred extends/implements parent edges are present.
-		idx.resolver.InferOverrides()
+		// Infer structural interface satisfaction + method-level
+		// overrides. Skipped under deferGlobalPasses so a batch caller
+		// (warmup, ReconcileAll) can run them once at the end against
+		// the final shared graph instead of paying the O(global) walk
+		// per repo. InferOverrides depends on InferImplements running
+		// first.
+		if !idx.deferGlobalPasses {
+			reporter.Report("inferring interfaces", 0, 0)
+			idx.resolver.InferImplements()
+			idx.resolver.InferOverrides()
+		}
 
 		// Semantic enrichment (SCIP, go/types, LSP).
 		if idx.semanticMgr != nil && idx.semanticMgr.Enabled() && idx.semanticMgr.HasProviders() {
@@ -1256,15 +1293,18 @@ func (idx *Indexer) IndexCtx(ctx context.Context, root string) (*IndexResult, er
 		idx.extractDIContracts(contractReg)
 		idx.commitContracts(contractReg)
 
-		// Test-edge pass mirrors the deferred-mode hook in
-		// RunDeferredPasses — runs once the call graph is final.
-		reporter.Report("test edge pass", 0, 0)
-		marked, emitted := markTestSymbolsAndEmitEdges(idx.graph)
-		if marked > 0 || emitted > 0 {
-			idx.logger.Info("test edges emitted",
-				zap.Int("test_symbols", marked),
-				zap.Int("edges", emitted),
-			)
+		// Test-edge pass — runs once the call graph is final. Skipped
+		// under deferGlobalPasses so a batch caller can fold this into
+		// one global pass after the per-repo loop.
+		if !idx.deferGlobalPasses {
+			reporter.Report("test edge pass", 0, 0)
+			marked, emitted := markTestSymbolsAndEmitEdges(idx.graph)
+			if marked > 0 || emitted > 0 {
+				idx.logger.Info("test edges emitted",
+					zap.Int("test_symbols", marked),
+					zap.Int("edges", emitted),
+				)
+			}
 		}
 	}
 
@@ -1775,9 +1815,14 @@ func (idx *Indexer) IncrementalReindex(root string) (*IndexResult, error) {
 		}
 	}
 
-	// Re-infer interface implementations (edges may have been lost during eviction).
-	idx.resolver.InferImplements()
-	idx.resolver.InferOverrides()
+	// Re-infer interface implementations (edges may have been lost
+	// during eviction). Skipped under deferGlobalPasses so a batch
+	// caller (ReconcileAll, warmup) can run a single global pass at
+	// the end instead of paying O(global) per repo.
+	if !idx.deferGlobalPasses {
+		idx.resolver.InferImplements()
+		idx.resolver.InferOverrides()
+	}
 
 	// Rebuild search index to ensure consistency.
 	idx.buildSearchIndex()
@@ -3397,19 +3442,28 @@ func (idx *Indexer) extractContracts() {
 	// cache entries afterwards (files that left the graph).
 	seenFiles := make(map[string]struct{})
 
-	for _, fileNode := range idx.graph.AllNodes() {
+	// Multi-repo mode: walk only this repo's nodes. The previous
+	// AllNodes()-then-filter pass paid an O(global) walk per repo,
+	// which compounded with hundreds of tracked siblings.
+	var nodes []*graph.Node
+	if idx.repoPrefix != "" {
+		nodes = idx.graph.GetRepoNodes(idx.repoPrefix)
+	} else {
+		nodes = idx.graph.AllNodes()
+	}
+
+	for _, fileNode := range nodes {
 		if fileNode.Kind != graph.KindFile {
 			continue
 		}
 
-		// In multi-repo mode, only process files belonging to this repo.
-		// File paths are prefixed with repo name (e.g. "labrador/api/...").
+		// In multi-repo mode the byRepo bucket is already scoped, but
+		// the path-prefix strip below still needs to run.
 		relPath := fileNode.FilePath
 		if idx.repoPrefix != "" {
 			if !strings.HasPrefix(relPath, idx.repoPrefix+"/") {
-				continue // skip files from other repos
+				continue
 			}
-			// Strip repo prefix to get the actual file path relative to rootPath
 			relPath = strings.TrimPrefix(relPath, idx.repoPrefix+"/")
 		}
 

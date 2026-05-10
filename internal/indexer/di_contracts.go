@@ -16,6 +16,13 @@ import (
 // DI edges already live in the graph at that point — no source re-parse
 // required. Safe to call repeatedly; AddAll de-duplicates by contract
 // ID + symbol ID.
+//
+// In multi-repo mode the walk is scoped to this repo's nodes' out-edges
+// instead of the global edge slice. The previous full walk produced
+// per-repo work proportional to the entire shared graph, which became
+// the dominant per-repo cost at large repo counts (and incorrectly
+// re-attributed contracts from other repos to this one via
+// AddAllScoped's RepoPrefix overwrite).
 func (idx *Indexer) extractDIContracts(reg *contracts.Registry) {
 	if reg == nil {
 		return
@@ -28,12 +35,26 @@ func (idx *Indexer) extractDIContracts(reg *contracts.Registry) {
 	idx.linkSpringBeans()
 
 	var discovered []contracts.Contract
-	for _, e := range idx.graph.AllEdges() {
-		c, ok := diContractFromEdge(e)
-		if !ok {
-			continue
+	if idx.repoPrefix != "" {
+		// Multi-repo: walk only this repo's outgoing edges.
+		for _, n := range idx.graph.GetRepoNodes(idx.repoPrefix) {
+			for _, e := range idx.graph.GetOutEdges(n.ID) {
+				c, ok := diContractFromEdge(e)
+				if !ok {
+					continue
+				}
+				discovered = append(discovered, c)
+			}
 		}
-		discovered = append(discovered, c)
+	} else {
+		// Single-repo: every edge belongs to this repo.
+		for _, e := range idx.graph.AllEdges() {
+			c, ok := diContractFromEdge(e)
+			if !ok {
+				continue
+			}
+			discovered = append(discovered, c)
+		}
 	}
 	if len(discovered) == 0 {
 		return
@@ -47,6 +68,10 @@ func (idx *Indexer) extractDIContracts(reg *contracts.Registry) {
 // extractor already stores them on constructor nodes — no second
 // parse pass needed. Kept tight by requiring an exact type-name
 // token match inside the signature string.
+//
+// In multi-repo mode the walks are scoped to this repo's nodes so the
+// per-repo cost stays proportional to the repo's own size, not the
+// shared workspace graph.
 func (idx *Indexer) linkSpringBeans() {
 	type beanRef struct {
 		methodID string
@@ -55,21 +80,53 @@ func (idx *Indexer) linkSpringBeans() {
 		line     int
 	}
 	var beans []beanRef
-	for _, e := range idx.graph.AllEdges() {
+
+	collectBean := func(e *graph.Edge) {
 		if e.Kind != graph.EdgeProvides || e.Meta == nil {
-			continue
+			return
 		}
 		if b, _ := e.Meta["binding"].(string); b != "bean" {
-			continue
+			return
 		}
 		rt, _ := e.Meta["provides_for"].(string)
 		if rt == "" {
-			continue
+			return
 		}
 		beans = append(beans, beanRef{methodID: e.To, typeName: rt, filePath: e.FilePath, line: e.Line})
 	}
+
+	if idx.repoPrefix != "" {
+		for _, n := range idx.graph.GetRepoNodes(idx.repoPrefix) {
+			for _, e := range idx.graph.GetOutEdges(n.ID) {
+				collectBean(e)
+			}
+		}
+	} else {
+		for _, e := range idx.graph.AllEdges() {
+			collectBean(e)
+		}
+	}
 	if len(beans) == 0 {
 		return
+	}
+
+	// Java method-node candidates considered for bean injection. Scoping
+	// by repo here avoids a per-repo O(global_nodes) walk for every
+	// bean — the dominant cost on workspaces that mix one Java repo
+	// with hundreds of non-Java siblings.
+	var candidates []*graph.Node
+	if idx.repoPrefix != "" {
+		for _, n := range idx.graph.GetRepoNodes(idx.repoPrefix) {
+			if n.Kind == graph.KindMethod && n.Language == "java" {
+				candidates = append(candidates, n)
+			}
+		}
+	} else {
+		for _, n := range idx.graph.AllNodes() {
+			if n.Kind == graph.KindMethod && n.Language == "java" {
+				candidates = append(candidates, n)
+			}
+		}
 	}
 
 	// For each bean, walk Java constructor nodes whose params_src
@@ -78,10 +135,7 @@ func (idx *Indexer) linkSpringBeans() {
 	// only links once.
 	linked := make(map[string]struct{})
 	for _, b := range beans {
-		for _, n := range idx.graph.AllNodes() {
-			if n.Kind != graph.KindMethod || n.Language != "java" {
-				continue
-			}
+		for _, n := range candidates {
 			if n.ID == b.methodID {
 				continue
 			}

@@ -198,6 +198,13 @@ Quick reference for all Gortex MCP tools and the knowledge graph schema.
 | flow_between | Ranked dataflow paths between two symbol IDs. Walks ` + "`value_flow`" + ` (intra-procedural) ∪ ` + "`arg_of`" + ` (caller arg → callee param) ∪ ` + "`returns_to`" + ` (callee → assignment). Pass ` + "`max_depth`" + ` (default 8) and ` + "`max_paths`" + ` (default 10). |
 | taint_paths | Pattern-driven dataflow sweep — every flow from a matching source to a matching sink. Patterns: bare token = name substring; ` + "`exact:Foo`" + `; ` + "`path:dir/`" + `; ` + "`kind:method`" + ` (clauses combine with AND). Sinks expand functions to their params automatically. |
 
+### Structural Code Search
+| Tool | What it gives you |
+|------|-------------------|
+| search_ast (detector mode) | Bundled cross-language anti-pattern rules. Pass ` + "`detector: \"<name>\"`" + ` for one of: ` + "`error-not-wrapped`" + ` (Go), ` + "`sql-string-concat`" + ` (Go/Python/JS/TS/Ruby), ` + "`weak-crypto`" + ` (Go/Python), ` + "`panic-in-library`" + ` (Go), ` + "`goroutine-without-recover`" + ` (Go), ` + "`http-client-no-timeout`" + ` (Go), ` + "`hardcoded-secret`" + ` (Go/Python/JS/TS/Ruby), ` + "`empty-catch`" + ` (Java/JS/TS/Python), ` + "`java-string-equality`" + ` (Java), ` + "`python-mutable-default-arg`" + ` (Python). Each match returns the enclosing ` + "`symbol_id`" + ` so you can chain into ` + "`find_usages`" + ` / ` + "`apply_code_action`" + `. Test files excluded by default. |
+| search_ast (raw pattern) | Tree-sitter S-expression queries. Pass ` + "`pattern: \"...\"`" + ` + ` + "`language: \"...\"`" + `. Capture nodes with ` + "`@name`" + `, anchor with ` + "`@match`" + `, predicates ` + "`(#eq? @x \"literal\")`" + ` / ` + "`(#match? @x \"regex\")`" + `. Example: ` + "`((call_expression function: (identifier) @fn) @match (#eq? @fn \"panic\"))`" + ` finds every direct ` + "`panic()`" + ` call. |
+| search_ast (graph filters) | Combine the structural match with graph predicates ast-grep can't express: ` + "`path_prefix`" + ` / ` + "`repo`" + ` / ` + "`project`" + ` / ` + "`ref`" + ` / ` + "`min_fan_in_of_enclosing_func`" + `. The last narrows results to load-bearing code by dropping matches in functions with few callers. |
+
 ### Diagnostics & Code Actions
 | Tool | What it gives you |
 |------|-------------------|

@@ -62,6 +62,14 @@ Gortex is running as an MCP server. It indexes this repository into an in-memory
 | Manually checking team conventions    | ` + "`check_guards`" + ` — evaluates guard rules from .gortex.yaml |
 | Wondering if a new dep creates a cycle| ` + "`analyze`" + ` with ` + "`kind: \"would_create_cycle\"`" + ` — checks before you add it |
 
+### Structural Code Search
+
+| Instead of...                            | Use...                                   |
+|------------------------------------------|------------------------------------------|
+| Grep for an anti-pattern in this repo    | ` + "`search_ast`" + ` with ` + "`detector: \"<name>\"`" + ` (` + "`error-not-wrapped`" + ` / ` + "`sql-string-concat`" + ` / ` + "`weak-crypto`" + ` / ` + "`panic-in-library`" + ` / ` + "`goroutine-without-recover`" + ` / ` + "`http-client-no-timeout`" + ` / ` + "`hardcoded-secret`" + ` / ` + "`empty-catch`" + ` / ` + "`java-string-equality`" + ` / ` + "`python-mutable-default-arg`" + `). Cross-language; matches enriched with enclosing ` + "`symbol_id`" + `. |
+| Grep for a code shape                    | ` + "`search_ast`" + ` with ` + "`pattern: \"...\"`" + ` + ` + "`language`" + ` (tree-sitter S-expression; capture with ` + "`@name`" + `, anchor with ` + "`@match`" + `). |
+| Scoping audit to important code          | Pass ` + "`min_fan_in_of_enclosing_func: <N>`" + ` — drops matches in functions with fewer than N callers. |
+
 ### Diagnostics and Code Actions
 
 | Instead of...                            | Use...                                   |

@@ -97,6 +97,16 @@ The ` + "`flow_between`" + ` and ` + "`taint_paths`" + ` MCP tools answer **"whe
 | Tracing a value through helpers by hand | ` + "`flow_between(source_id, sink_id, max_depth=8)`" + ` — ranked dataflow paths between two symbols |
 | Grepping for sources / sinks         | ` + "`taint_paths(source_pattern, sink_pattern)`" + ` — pattern-driven sweep. Patterns: bare token = name substring; ` + "`exact:Foo`" + `; ` + "`path:dir/`" + `; ` + "`kind:method`" + `. Sinks auto-expand functions to their params. |
 
+### Structural Code Search
+
+` + "`search_ast`" + ` answers "find every code site whose AST matches this shape" — the missing primitive between ` + "`search_symbols`" + ` (name-based) and ` + "`find_usages`" + ` (target-required). Cross-language; every match enriched with the enclosing function's ` + "`symbol_id`" + `.
+
+| Instead of...                            | You MUST use...                          |
+|------------------------------------------|------------------------------------------|
+| Grep for an anti-pattern across the repo | ` + "`search_ast`" + ` with a bundled ` + "`detector`" + ` (` + "`error-not-wrapped`" + `, ` + "`sql-string-concat`" + `, ` + "`weak-crypto`" + `, ` + "`panic-in-library`" + `, ` + "`goroutine-without-recover`" + `, ` + "`http-client-no-timeout`" + `, ` + "`hardcoded-secret`" + `, ` + "`empty-catch`" + `, ` + "`java-string-equality`" + `, ` + "`python-mutable-default-arg`" + `). |
+| Grep for a code shape (e.g. ` + "`.Get(_, nil)`" + `) | ` + "`search_ast`" + ` with ` + "`pattern: \"...\"`" + ` (raw tree-sitter S-expression) + ` + "`language`" + `. Capture nodes with ` + "`@name`" + `, anchor with ` + "`@match`" + `, predicates ` + "`(#eq? @x \"…\")`" + ` / ` + "`(#match? @x \"…\")`" + `. |
+| Scoping the audit to load-bearing code   | Pass ` + "`min_fan_in_of_enclosing_func: <N>`" + ` — drops matches in functions with fewer than N callers. |
+
 ### Code Quality and Analysis
 
 The ` + "`analyze`" + ` MCP tool is a unified dispatcher. Pass ` + "`kind: \"<name>\"`" + ` for one of:
@@ -213,6 +223,16 @@ Wired to every running language server (gopls / tsserver / pyright / rust-analyz
 | Forgetting to opt back out               | ` + "`unsubscribe_diagnostics`" + ` — idempotent, also fires automatically on session disconnect. |
 | Hand-applying compiler suggestions       | ` + "`get_code_actions`" + ` for a file (and optional range), then ` + "`apply_code_action`" + ` on the chosen one. Atomic temp+rename, both legacy ` + "`changes`" + ` and modern ` + "`documentChanges`" + `, UTF-16 column math. |
 | Walking the whole file to apply every fix | ` + "`fix_all_in_file`" + ` — runs ` + "`source.fixAll`" + ` over the whole file in one round-trip. |
+
+### Structural Code Search
+
+` + "`search_ast`" + ` answers "find every code site whose AST matches this shape" — the missing primitive between ` + "`search_symbols`" + ` (name-based) and ` + "`find_usages`" + ` (target-required). Cross-language, graph-aware, every match enriched with the enclosing function's ` + "`symbol_id`" + `.
+
+| Instead of...                            | You MUST use...                          |
+|------------------------------------------|------------------------------------------|
+| Grep for an anti-pattern across the repo | ` + "`search_ast`" + ` with a bundled ` + "`detector`" + `: ` + "`error-not-wrapped`" + ` / ` + "`sql-string-concat`" + ` / ` + "`weak-crypto`" + ` / ` + "`panic-in-library`" + ` / ` + "`goroutine-without-recover`" + ` / ` + "`http-client-no-timeout`" + ` / ` + "`hardcoded-secret`" + ` / ` + "`empty-catch`" + ` / ` + "`java-string-equality`" + ` / ` + "`python-mutable-default-arg`" + `. |
+| Grep for a code shape (e.g. every ` + "`.Get(_, nil)`" + ` call) | ` + "`search_ast`" + ` with ` + "`pattern: \"...\"`" + ` (raw tree-sitter S-expression) + ` + "`language: \"...\"`" + `. Capture nodes with ` + "`@name`" + `, anchor the match span with ` + "`@match`" + `, predicates: ` + "`(#eq? @x \"literal\")`" + ` / ` + "`(#match? @x \"regex\")`" + `. |
+| Scoping the audit to load-bearing code   | Pass ` + "`min_fan_in_of_enclosing_func: <N>`" + ` — drops matches in functions with fewer than N callers. Combine with ` + "`path_prefix`" + ` / ` + "`repo`" + ` / ` + "`project`" + ` / ` + "`ref`" + ` to narrow further. |
 
 ### Code Quality and Analysis
 

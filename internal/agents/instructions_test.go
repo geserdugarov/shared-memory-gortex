@@ -146,6 +146,10 @@ func TestInstructionsBody_AdvertisesKeyTools(t *testing.T) {
 		"subscribe_diagnostics", "unsubscribe_diagnostics",
 		"get_diagnostics", "get_code_actions", "apply_code_action",
 		"fix_all_in_file", "notifications/diagnostics",
+		// Structural code search.
+		"search_ast", "error-not-wrapped", "sql-string-concat",
+		"weak-crypto", "panic-in-library", "hardcoded-secret",
+		"min_fan_in_of_enclosing_func",
 	} {
 		if !strings.Contains(InstructionsBody, token) {
 			t.Errorf("InstructionsBody no longer mentions %q — a doc regression would ship to every adapter", token)
@@ -164,6 +168,8 @@ func TestGlobalInstructionsBody_AdvertisesKeyTools(t *testing.T) {
 		// Infrastructure surface — also written into the per-machine
 		// block by `gortex install`.
 		"k8s_resources", "images", "kustomize",
+		// Structural code search — also in the per-machine block.
+		"search_ast", "error-not-wrapped",
 	} {
 		if !strings.Contains(GlobalInstructionsBody, token) {
 			t.Errorf("GlobalInstructionsBody no longer mentions %q", token)

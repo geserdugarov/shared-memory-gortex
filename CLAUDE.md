@@ -70,6 +70,16 @@ Wired to every running language server (gopls, tsserver, pyright, rust-analyzer,
 | Hand-applying compiler suggestions      | `get_code_actions` for a file (and optional range), then `apply_code_action` on the chosen one. Atomic temp+rename, both legacy `changes` and modern `documentChanges`, UTF-16 column math. |
 | Walking the whole file to apply every fix | `fix_all_in_file` — runs `source.fixAll` over the whole file in one round-trip. |
 
+### Structural Code Search
+
+`search_ast` is the cross-language structural search tool. Use it whenever you need to find code by *shape*, not by name — every site whose AST matches a pattern, regardless of identifier choice or token text.
+
+| Instead of...                          | You MUST use...                          |
+|----------------------------------------|------------------------------------------|
+| Grep for an anti-pattern across the repo | `search_ast` with a bundled `detector` (e.g. `error-not-wrapped`, `sql-string-concat`, `weak-crypto`, `panic-in-library`, `goroutine-without-recover`, `http-client-no-timeout`, `hardcoded-secret`, `empty-catch`, `java-string-equality`, `python-mutable-default-arg`). Each result carries the enclosing `symbol_id` so you can chain straight into `find_usages` / `verify_change` / `apply_code_action`. |
+| Grep for a code shape ("every `.Get(_, nil)` call site") | `search_ast` with `pattern: "..."` (raw tree-sitter S-expression) and `language: "..."`. Capture nodes with `@name`, anchor the match span with `@match`, predicates: `(#eq? @x "literal")`, `(#match? @x "regex")`. |
+| Walking results manually to scope to load-bearing code | Pass `min_fan_in_of_enclosing_func: <N>` — drops matches in functions with fewer than N callers, keeping the audit on the parts of the codebase that actually matter. Pair with `path_prefix`, `repo`/`project`/`ref`, and `exclude_tests` to narrow further. |
+
 ### Code Quality and Analysis
 
 The `analyze` MCP tool is a unified dispatcher. Supported `kind` values:

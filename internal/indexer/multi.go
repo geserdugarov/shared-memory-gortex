@@ -199,6 +199,15 @@ func (mi *MultiIndexer) RunGlobalGraphPasses() {
 			zap.Int("edges", cloneEdges),
 		)
 	}
+	// gRPC stub-call resolution. After InferImplements (the
+	// interface-satisfaction fallback signal) and before
+	// DetectCrossRepoEdges so a cross-repo gRPC call gets its parallel
+	// cross_repo_calls edge.
+	if grpcResolved := resolver.ResolveGRPCStubCalls(mi.graph); grpcResolved > 0 {
+		mi.logger.Info("gRPC stub calls resolved (global)",
+			zap.Int("edges", grpcResolved),
+		)
+	}
 	// Cross-repo edge layer. Runs after InferImplements / InferOverrides
 	// so the implements / extends edges they materialise across repo
 	// boundaries pick up their parallel cross_repo_* edges.

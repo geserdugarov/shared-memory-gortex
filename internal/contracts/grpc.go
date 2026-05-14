@@ -44,6 +44,11 @@ var (
 	// the service as a consumer contract with SymbolID on the
 	// enclosing function, even when we can't resolve method calls.
 	goGRPCNewClientRe = regexp.MustCompile(`(?:[\w.]+\.)?New(\w+)Client\s*\(`)
+	// Inline chained call: pb.NewServiceClient(conn).Method(...). The
+	// constructor's argument list is balance-scanned at match time, so
+	// the regex only needs to anchor the `New<Service>Client(` head;
+	// the trailing `.Method(` is matched separately after the scan.
+	goGRPCMethodHeadRe = regexp.MustCompile(`\s*\.\s*(\w+)\s*\(`)
 
 	// TypeScript consumers
 	tsGRPCNewClientRe       = regexp.MustCompile(`new\s+(\w+)Client\(`)
@@ -212,6 +217,51 @@ func (e *GRPCExtractor) extractConsumers(filePath string, src []byte, fileNodes 
 		// literal's type or the argument variable's declared type
 		// from the surrounding window.
 		if reqType := detectGoGRPCRequestType(text, m[1], fileNodes, ln); reqType != "" {
+			meta["request_type"] = reqType
+			meta["schema_source"] = "extracted"
+		} else {
+			meta["schema_source"] = "partial"
+		}
+		contracts = append(contracts, Contract{
+			ID:         fmt.Sprintf("grpc::%s::%s", svc, method),
+			Type:       ContractGRPC,
+			Role:       RoleConsumer,
+			SymbolID:   findEnclosingSymbol(fileNodes, ln),
+			FilePath:   filePath,
+			Line:       ln,
+			Meta:       meta,
+			Confidence: 0.9,
+		})
+	}
+
+	// ---- Go pass 3: inline chained calls.
+	// pb.NewServiceClient(conn).Method(...) — the stub is constructed
+	// and the RPC invoked in one expression, with no intermediate
+	// variable for pass 2 to cross-reference. Balance-scan the
+	// constructor's argument list, then match the trailing `.Method(`.
+	for _, m := range goGRPCNewClientRe.FindAllStringSubmatchIndex(text, -1) {
+		svc := text[m[2]:m[3]]
+		// m[1] is the offset just past the constructor's opening paren.
+		argsEnd := matchCloseParen(text, m[1])
+		if argsEnd < 0 {
+			continue
+		}
+		head := goGRPCMethodHeadRe.FindStringSubmatchIndex(text[argsEnd+1:])
+		if head == nil || head[0] != 0 {
+			// Not an immediate `.Method(` chain off the constructor.
+			continue
+		}
+		method := text[argsEnd+1+head[2] : argsEnd+1+head[3]]
+		ln := lineNumber(lines, m[0])
+		key := fmt.Sprintf("%s::%s::%d", svc, method, ln)
+		if _, dup := seen[key]; dup {
+			continue
+		}
+		seen[key] = struct{}{}
+		meta := map[string]any{"service": svc, "method": method, "lang": "go"}
+		// The method's argument list starts just past its opening paren.
+		methodCallEnd := argsEnd + 1 + head[1]
+		if reqType := detectGoGRPCRequestType(text, methodCallEnd, fileNodes, ln); reqType != "" {
 			meta["request_type"] = reqType
 			meta["schema_source"] = "extracted"
 		} else {
@@ -436,6 +486,28 @@ func detectPyGRPCRequestType(text string, callEnd int) string {
 		return head
 	}
 	return ""
+}
+
+// matchCloseParen returns the byte offset of the `)` that closes the
+// `(` whose closing position is openEnd (i.e. openEnd points just past
+// the opening paren). Returns -1 when the parens are unbalanced.
+func matchCloseParen(text string, openEnd int) int {
+	if openEnd <= 0 || openEnd > len(text) {
+		return -1
+	}
+	depth := 1
+	for i := openEnd; i < len(text); i++ {
+		switch text[i] {
+		case '(':
+			depth++
+		case ')':
+			depth--
+			if depth == 0 {
+				return i
+			}
+		}
+	}
+	return -1
 }
 
 // grpcCallArgSlice returns the text between the `(` at callEnd-1 and

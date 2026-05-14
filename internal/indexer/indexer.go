@@ -383,6 +383,15 @@ func (idx *Indexer) RunGlobalGraphPasses() {
 			zap.Int("edges", cloneEdges),
 		)
 	}
+	// gRPC stub-call resolution. Runs after InferImplements (the
+	// interface-satisfaction fallback signal depends on its
+	// EdgeImplements edges) and before DetectCrossRepoEdges so a
+	// cross-repo gRPC call gets its parallel cross_repo_calls edge.
+	if grpcResolved := resolver.ResolveGRPCStubCalls(idx.graph); grpcResolved > 0 {
+		idx.logger.Info("gRPC stub calls resolved (global)",
+			zap.Int("edges", grpcResolved),
+		)
+	}
 	// Cross-repo edge layer. Runs after InferImplements / InferOverrides
 	// so cross-repo implements / extends edges pick up their parallel
 	// cross_repo_* edges. No-op on single-repo graphs (no RepoPrefix).
@@ -1391,6 +1400,15 @@ func (idx *Indexer) IndexCtx(ctx context.Context, root string) (*IndexResult, er
 					zap.Int("edges", cloneEdges),
 				)
 			}
+			// gRPC stub-call resolution — runs once the call graph and
+			// interface inference are final. Skipped under
+			// deferGlobalPasses; the batch caller folds it into
+			// RunGlobalGraphPasses.
+			if grpcResolved := resolver.ResolveGRPCStubCalls(idx.graph); grpcResolved > 0 {
+				idx.logger.Info("gRPC stub calls resolved",
+					zap.Int("edges", grpcResolved),
+				)
+			}
 		}
 	}
 
@@ -1561,6 +1579,9 @@ func (idx *Indexer) ResolveAll() {
 	idx.resolver.ResolveAll()
 	idx.resolver.InferImplements()
 	idx.resolver.InferOverrides()
+	// gRPC stub-call resolution depends on InferImplements (its
+	// interface-satisfaction fallback signal) having run first.
+	resolver.ResolveGRPCStubCalls(idx.graph)
 	// CPG-lite dataflow rewriting must run after the call resolver
 	// has lifted unresolved:: targets; arg_of edges then point at
 	// real function/method nodes whose param nodes can be found,
@@ -1917,6 +1938,10 @@ func (idx *Indexer) IncrementalReindex(root string) (*IndexResult, error) {
 	if !idx.deferGlobalPasses {
 		idx.resolver.InferImplements()
 		idx.resolver.InferOverrides()
+		// gRPC stub-call resolution — re-run because eviction may have
+		// dropped a handler or a registration edge, and the handler
+		// index must be rebuilt against the fresh graph.
+		resolver.ResolveGRPCStubCalls(idx.graph)
 		// Clone detection is not re-run here: each stale file was
 		// re-indexed through IndexFile above, whose resolve pass
 		// already recomputed EdgeSimilarTo against the fresh graph,

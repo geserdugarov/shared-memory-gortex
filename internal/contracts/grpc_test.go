@@ -110,6 +110,57 @@ func makeRPCCall(ctx context.Context) {
 	}
 }
 
+// TestGRPCExtractor_GoConsumer_InlineChained covers the M4 inline
+// chained form: pb.NewServiceClient(conn).Method(...) — the stub is
+// constructed and the RPC invoked in one expression, with no
+// intermediate variable for the two-pass scan to cross-reference.
+func TestGRPCExtractor_GoConsumer_InlineChained(t *testing.T) {
+	ext := &GRPCExtractor{}
+	src := []byte(`package main
+
+import (
+	"context"
+	"example.com/pb"
+)
+
+func makeRPCCall(ctx context.Context) {
+	_, _ = pb.NewUsersClient(grpc.Dial(addr)).GetUser(ctx, &pb.GetUserRequest{Id: "x"})
+}
+`)
+	nodes := makeNodes("main.go", []struct {
+		name       string
+		start, end int
+	}{
+		{"makeRPCCall", 8, 10},
+	})
+
+	contracts := ext.Extract("main.go", src, nodes, nil)
+
+	var found *Contract
+	for i := range contracts {
+		c := contracts[i]
+		if c.Role == RoleConsumer && c.ID == "grpc::Users::GetUser" {
+			found = &contracts[i]
+		}
+	}
+	if found == nil {
+		t.Fatalf("missing inline-chained consumer contract grpc::Users::GetUser; got %+v", contracts)
+	}
+	if found.SymbolID != "main.go::makeRPCCall" {
+		t.Errorf("SymbolID want main.go::makeRPCCall, got %q", found.SymbolID)
+	}
+	if found.Meta["request_type"] != "pb.GetUserRequest" {
+		t.Errorf("request_type want pb.GetUserRequest, got %v", found.Meta["request_type"])
+	}
+	// The constructor's nested grpc.Dial(addr) call must not derail the
+	// balance-scan into a service-level fallback duplicate.
+	for _, c := range contracts {
+		if c.ID == "grpc::Users" {
+			t.Errorf("unwanted service-level fallback alongside inline-chained method contract: %+v", c)
+		}
+	}
+}
+
 // TestGRPCExtractor_GoConsumer_UnrelatedCallsAreNotGRPC guards the
 // false-positive case: "(\w+).(\w+)(" matches every method call in a
 // Go file, but we must only emit a gRPC consumer contract when the

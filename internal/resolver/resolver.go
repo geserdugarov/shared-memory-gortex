@@ -390,6 +390,13 @@ func (r *Resolver) resolveEdge(e *graph.Edge, stats *ResolveStats) (oldTo string
 	target := strings.TrimPrefix(e.To, unresolvedPrefix)
 
 	switch {
+	case strings.HasPrefix(target, "grpc::"):
+		// gRPC client-stub call placeholder
+		// (`unresolved::grpc::<Service>::<Method>`). Landed on the
+		// server-side handler by the graph-wide ResolveGRPCStubCalls
+		// pass, which needs the whole graph plus InferImplements — the
+		// per-edge resolver can't see that. Leave the edge untouched.
+		return oldTo, false
 	case strings.HasPrefix(target, "import::"):
 		r.resolveImport(e, strings.TrimPrefix(target, "import::"), stats)
 	case strings.HasPrefix(target, "extern::"):

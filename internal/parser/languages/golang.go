@@ -166,6 +166,17 @@ type goDeferredCall struct {
 	line       int    // 1-based line of call_expression
 	isSelector bool
 	spawn      bool // call is launched via `go` — emit EdgeSpawns alongside EdgeCalls
+	// gRPC server registration. Set when this call is the generated
+	// `Register<Service>Server(registrar, impl)` helper: grpcRegService
+	// is the service name and grpcRegArgNode is the second-argument AST
+	// node naming the impl. The impl type itself is resolved in the
+	// post-pass below — after the file-wide type environment is fully
+	// populated, since the impl may be a variable declared anywhere in
+	// the file. Stamped as edge Meta so the resolver's
+	// ResolveGRPCStubCalls pass can join client-stub calls to the
+	// server-side handler method.
+	grpcRegService string
+	grpcRegArgNode *sitter.Node
 }
 
 type goDeferredTypeRef struct {
@@ -223,6 +234,11 @@ func (e *GoExtractor) Extract(filePath string, src []byte) (*parser.ExtractionRe
 	seenTypeName := map[string]bool{} // dedup when alias + typedef match same name
 
 	var calls []goDeferredCall
+	// grpcStubVars maps a local variable name to the gRPC service it is
+	// a client stub for, seeded from `v := pkg.New<Service>Client(conn)`
+	// short-var declarations. Lets `v.Method(...)` call sites resolve as
+	// gRPC stub calls in the post-pass below.
+	grpcStubVars := map[string]string{}
 	var typeRefs []goDeferredTypeRef
 	var instantiates []goDeferredTypeRef
 	var valueSels []goDeferredValueSel
@@ -265,22 +281,31 @@ func (e *GoExtractor) Extract(filePath string, src []byte) (*parser.ExtractionRe
 
 		case m.Captures["call.expr"] != nil:
 			expr := m.Captures["call.expr"]
-			calls = append(calls, goDeferredCall{
-				callName: m.Captures["call.name"].Text,
+			callName := m.Captures["call.name"].Text
+			dc := goDeferredCall{
+				callName: callName,
 				line:     expr.StartLine + 1,
 				spawn:    isGoroutineSpawn(expr.Node),
-			})
+			}
+			if svc, argNode, ok := grpcRegisterArgNode(expr.Node, callName); ok {
+				dc.grpcRegService, dc.grpcRegArgNode = svc, argNode
+			}
+			calls = append(calls, dc)
 
 		case m.Captures["callm.expr"] != nil:
 			expr := m.Captures["callm.expr"]
 			method := m.Captures["callm.method"].Text
-			calls = append(calls, goDeferredCall{
+			dc := goDeferredCall{
 				method:     method,
 				receiver:   m.Captures["callm.receiver"].Text,
 				line:       expr.StartLine + 1,
 				isSelector: true,
 				spawn:      isGoroutineSpawn(expr.Node),
-			})
+			}
+			if svc, argNode, ok := grpcRegisterArgNode(expr.Node, method); ok {
+				dc.grpcRegService, dc.grpcRegArgNode = svc, argNode
+			}
+			calls = append(calls, dc)
 			if name, ok := detectGoLogEvent(expr.Node, method, src); ok {
 				observabilityEvents = append(observabilityEvents, goObservabilityEvent{
 					method: method,
@@ -347,6 +372,7 @@ func (e *GoExtractor) Extract(filePath string, src []byte) (*parser.ExtractionRe
 
 		case m.Captures["svar.def"] != nil:
 			e.recordShortVarType(m, src, tenv)
+			recordGoGRPCStubVar(m, src, grpcStubVars)
 
 		case m.Captures["comp.expr"] != nil:
 			expr := m.Captures["comp.expr"]
@@ -502,22 +528,49 @@ func (e *GoExtractor) Extract(filePath string, src []byte) (*parser.ExtractionRe
 		if callerID == "" {
 			continue
 		}
+		// gRPC client-stub call: `pkg.New<Service>Client(conn).Method(...)`
+		// (inline chain) or `stub.Method(...)` where `stub` came from a
+		// `New<Service>Client` constructor. Emitted to a dedicated
+		// placeholder that the resolver's ResolveGRPCStubCalls pass lands
+		// on the server-side handler method. Intercepted ahead of normal
+		// selector handling so the call doesn't resolve onto the generated
+		// client-interface method instead of the actual handler.
+		if c.isSelector {
+			if svc, ok := goGRPCStubService(c, grpcStubVars); ok {
+				target := "unresolved::grpc::" + svc + "::" + c.method
+				result.Edges = append(result.Edges, &graph.Edge{
+					From: callerID, To: target,
+					Kind: graph.EdgeCalls, FilePath: filePath, Line: c.line,
+					Meta: map[string]any{
+						"via":          "grpc.stub",
+						"grpc_service": svc,
+						"grpc_method":  c.method,
+					},
+				})
+				emitGoSpawnEdge(c, callerID, target, filePath, result)
+				continue
+			}
+		}
 		var target string
 		if !c.isSelector {
 			target = "unresolved::" + c.callName
-			result.Edges = append(result.Edges, &graph.Edge{
+			edge := &graph.Edge{
 				From: callerID, To: target,
 				Kind: graph.EdgeCalls, FilePath: filePath, Line: c.line,
-			})
+			}
+			applyGoGRPCRegisterMeta(edge, c, src, tenv)
+			result.Edges = append(result.Edges, edge)
 			emitGoSpawnEdge(c, callerID, target, filePath, result)
 			continue
 		}
 		if importPath, ok := imports[c.receiver]; ok {
 			target = "unresolved::extern::" + importPath + "::" + c.method
-			result.Edges = append(result.Edges, &graph.Edge{
+			edge := &graph.Edge{
 				From: callerID, To: target,
 				Kind: graph.EdgeCalls, FilePath: filePath, Line: c.line,
-			})
+			}
+			applyGoGRPCRegisterMeta(edge, c, src, tenv)
+			result.Edges = append(result.Edges, edge)
 			emitGoSpawnEdge(c, callerID, target, filePath, result)
 			continue
 		}
@@ -546,6 +599,7 @@ func (e *GoExtractor) Extract(filePath string, src []byte) (*parser.ExtractionRe
 				edge.Meta = map[string]any{"receiver_type": chainType}
 			}
 		}
+		applyGoGRPCRegisterMeta(edge, c, src, tenv)
 		result.Edges = append(result.Edges, edge)
 		emitGoSpawnEdge(c, callerID, target, filePath, result)
 	}
@@ -1470,6 +1524,197 @@ func (e *GoExtractor) recordShortVarType(m parser.QueryResult, src []byte, tenv 
 	if inferred := inferTypeFromGoExpr(valueCap.Node, src); inferred != "" {
 		tenv[name] = inferred
 	}
+}
+
+// --- gRPC stub call extraction (M4) --------------------------------
+//
+// The Go gRPC code generator produces a stable surface that lets us
+// resolve cross-service RPC calls structurally, without a type checker:
+//
+//   - Client construction: `pkg.New<Service>Client(conn)` returns a
+//     `<Service>Client` stub interface.
+//   - RPC invocation:       `stub.<Method>(ctx, req, ...)`.
+//   - Server registration:  `pkg.Register<Service>Server(registrar, impl)`
+//     binds a concrete impl type to the service.
+//
+// recordGoGRPCStubVar / goGRPCStubService recognise the consumer side
+// and route each RPC call to an `unresolved::grpc::<Service>::<Method>`
+// placeholder; parseGoGRPCRegister recognises the server side and
+// stamps `grpc_register_*` meta on the registration call edge. The
+// resolver's ResolveGRPCStubCalls pass joins the two.
+
+// recordGoGRPCStubVar inspects a short-var declaration's RHS for the
+// gRPC client-stub constructor convention `pkg.New<Service>Client(conn)`
+// and, when matched, records `varName → serviceName` so later method
+// calls on that variable resolve as gRPC stub calls.
+func recordGoGRPCStubVar(m parser.QueryResult, src []byte, stubs map[string]string) {
+	nameCap := m.Captures["svar.name"]
+	valueCap := m.Captures["svar.value"]
+	if nameCap == nil || valueCap == nil || valueCap.Node == nil {
+		return
+	}
+	if svc, ok := goGRPCServiceFromConstructor(valueCap.Node, src); ok {
+		stubs[nameCap.Text] = svc
+	}
+}
+
+// goGRPCServiceFromConstructor returns the gRPC service name when node
+// is a `New<Service>Client(...)` call expression (qualified or not).
+func goGRPCServiceFromConstructor(node *sitter.Node, src []byte) (string, bool) {
+	if node == nil || node.Type() != "call_expression" {
+		return "", false
+	}
+	fn := node.ChildByFieldName("function")
+	if fn == nil {
+		return "", false
+	}
+	var name string
+	switch fn.Type() {
+	case "identifier":
+		name = fn.Content(src)
+	case "selector_expression":
+		if field := fn.ChildByFieldName("field"); field != nil {
+			name = field.Content(src)
+		}
+	}
+	return grpcServiceFromClientCtor(name)
+}
+
+// grpcServiceFromClientCtor maps `New<Service>Client` → `<Service>`.
+func grpcServiceFromClientCtor(name string) (string, bool) {
+	const pfx, sfx = "New", "Client"
+	if len(name) <= len(pfx)+len(sfx) {
+		return "", false
+	}
+	if !strings.HasPrefix(name, pfx) || !strings.HasSuffix(name, sfx) {
+		return "", false
+	}
+	return name[len(pfx) : len(name)-len(sfx)], true
+}
+
+// goGRPCStubService reports whether a selector call's receiver is a
+// gRPC client stub — either a variable seeded by recordGoGRPCStubVar,
+// or an inline `pkg.New<Service>Client(conn)` chain — and returns the
+// service name.
+func goGRPCStubService(c goDeferredCall, stubVars map[string]string) (string, bool) {
+	if svc, ok := stubVars[c.receiver]; ok {
+		return svc, true
+	}
+	return grpcServiceFromInlineChain(c.receiver)
+}
+
+// grpcServiceFromInlineChain matches the inline-chain receiver text
+// `pkg.New<Service>Client(...)` (or unqualified) and returns the
+// service. The receiver must be exactly one balanced call expression —
+// a longer chain like `New<Service>Client(c).Foo()` is rejected so the
+// trailing method isn't mistaken for an RPC on the stub.
+func grpcServiceFromInlineChain(receiver string) (string, bool) {
+	open := strings.IndexByte(receiver, '(')
+	if open < 0 || !strings.HasSuffix(receiver, ")") {
+		return "", false
+	}
+	depth := 0
+	for i := open; i < len(receiver); i++ {
+		switch receiver[i] {
+		case '(':
+			depth++
+		case ')':
+			depth--
+			if depth == 0 && i != len(receiver)-1 {
+				return "", false
+			}
+		}
+	}
+	head := receiver[:open]
+	if dot := strings.LastIndexByte(head, '.'); dot >= 0 {
+		head = head[dot+1:]
+	}
+	return grpcServiceFromClientCtor(head)
+}
+
+// grpcRegisterArgNode recognises the generated gRPC server-registration
+// call `Register<Service>Server(registrar, impl)` (qualified or not)
+// and returns the service name plus the AST node of the second
+// argument (the impl). The impl *type* is resolved later, in the call
+// post-pass, once the file-wide type environment is fully populated.
+// Returns ok=false for any other call.
+func grpcRegisterArgNode(callNode *sitter.Node, funcName string) (service string, argNode *sitter.Node, ok bool) {
+	service, ok = grpcServiceFromRegister(funcName)
+	if !ok {
+		return "", nil, false
+	}
+	if callNode == nil || callNode.Type() != "call_expression" {
+		return "", nil, false
+	}
+	args := callNode.ChildByFieldName("arguments")
+	if args == nil {
+		return "", nil, false
+	}
+	// Second positional argument names the server implementation.
+	count := 0
+	for i := 0; i < int(args.NamedChildCount()); i++ {
+		c := args.NamedChild(i)
+		if c == nil {
+			continue
+		}
+		count++
+		if count == 2 {
+			return service, c, true
+		}
+	}
+	return "", nil, false
+}
+
+// grpcServiceFromRegister maps `Register<Service>Server` → `<Service>`.
+func grpcServiceFromRegister(name string) (string, bool) {
+	const pfx, sfx = "Register", "Server"
+	if len(name) <= len(pfx)+len(sfx) {
+		return "", false
+	}
+	if !strings.HasPrefix(name, pfx) || !strings.HasSuffix(name, sfx) {
+		return "", false
+	}
+	return name[len(pfx) : len(name)-len(sfx)], true
+}
+
+// goGRPCImplType extracts a type name from a gRPC server-registration
+// second argument: `&userServer{}`, `userServer{}`, `pkg.userServer{}`,
+// `NewUserServer()`, `pkg.NewUserServer()`, or a bare identifier whose
+// type is known from the file's type environment. Returns "" when the
+// expression doesn't unambiguously name a type.
+func goGRPCImplType(node *sitter.Node, src []byte, tenv typeEnv) string {
+	if node == nil {
+		return ""
+	}
+	switch node.Type() {
+	case "unary_expression", "composite_literal", "call_expression":
+		return normalizeGoTypeName(inferTypeFromGoExpr(node, src))
+	case "identifier":
+		return normalizeGoTypeName(tenv[node.Content(src)])
+	}
+	return ""
+}
+
+// applyGoGRPCRegisterMeta resolves the impl type named by a gRPC
+// server-registration call's second argument — against the now-complete
+// file-wide type environment — and stamps `grpc_register_*` meta onto
+// the registration call's edge so the resolver's ResolveGRPCStubCalls
+// pass can join client-stub calls to the server handler. No-op for
+// non-registration calls and for impl arguments whose type can't be
+// named (e.g. a bare field selector).
+func applyGoGRPCRegisterMeta(edge *graph.Edge, c goDeferredCall, src []byte, tenv typeEnv) {
+	if edge == nil || c.grpcRegService == "" || c.grpcRegArgNode == nil {
+		return
+	}
+	impl := goGRPCImplType(c.grpcRegArgNode, src, tenv)
+	if impl == "" {
+		return
+	}
+	if edge.Meta == nil {
+		edge.Meta = map[string]any{}
+	}
+	edge.Meta["grpc_register_service"] = c.grpcRegService
+	edge.Meta["grpc_register_impl"] = impl
 }
 
 // --- Helpers -------------------------------------------------------

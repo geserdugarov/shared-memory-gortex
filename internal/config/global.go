@@ -9,6 +9,8 @@ import (
 	"sync"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/zzet/gortex/internal/llm"
 )
 
 var (
@@ -54,8 +56,53 @@ type GlobalConfig struct {
 	// baseline and below per-RepoEntry / workspace lists.
 	Exclude []string `mapstructure:"exclude" yaml:"exclude,omitempty"`
 
+	// LLM is the user-level local-LLM service config (`llm.model:` etc.).
+	// Merged into the repo-local Config.LLM at daemon startup via
+	// MergeLLMInto — local non-zero fields win, global fills the rest.
+	// Lets users keep model paths and tuning in one place across repos
+	// without duplicating an `llm:` block in every `.gortex.yaml`.
+	LLM llm.Config `mapstructure:"llm" yaml:"llm,omitempty"`
+
 	// configPath stores the file path used for Save(). Set by LoadGlobal or SetConfigPath.
 	configPath string `yaml:"-"`
+}
+
+// MergeLLMInto layers a repo-local llm.Config over the global user
+// config: each zero-valued field of local is filled from gc.LLM,
+// per provider sub-block. Local non-zero values always win — including
+// an explicit per-repo override of an inherited global model path.
+// Safe to call on a nil receiver (returns local unchanged), so daemon
+// startup paths don't need separate nil-checks for the global config.
+//
+// The local provider's model path additionally gets `~/` expanded
+// against $HOME so users can write portable paths in either config.
+func (gc *GlobalConfig) MergeLLMInto(local llm.Config) llm.Config {
+	if gc != nil {
+		local = local.MergedWith(gc.LLM)
+	}
+	local.Local.Model = expandHome(local.Local.Model)
+	return local
+}
+
+// expandHome resolves a leading `~/` in a path against $HOME so users
+// can write portable model paths in their global config. No-op when
+// the path is empty, absolute without `~`, or `~` is not the first
+// character. Returns the input unchanged on any os.UserHomeDir error.
+func expandHome(p string) string {
+	if p == "" || !strings.HasPrefix(p, "~") {
+		return p
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return p
+	}
+	if p == "~" {
+		return home
+	}
+	if strings.HasPrefix(p, "~/") {
+		return filepath.Join(home, p[2:])
+	}
+	return p
 }
 
 // DefaultGlobalConfigPath returns the default path: ~/.config/gortex/config.yaml.

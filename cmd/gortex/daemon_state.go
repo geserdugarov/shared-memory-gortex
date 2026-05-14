@@ -302,13 +302,17 @@ func buildDaemonState(logger *zap.Logger) (*daemonState, error) {
 		logger.Warn("daemon: savings persistence disabled", zap.Error(err))
 	}
 
-	// In-process LLM service (opt-in via `.gortex.yaml` `llm.model:` or
-	// GORTEX_LLM_MODEL env var). Builds and attaches an in-process
-	// backend wired to this engine + contract registry, then registers
-	// the `ask` MCP tool. No-op when cfg.LLM is empty after env-merge,
-	// or when gortex was built without `-tags llama` (stub service +
-	// stub registerLLMTools).
-	srv.SetupLLM(cfg.LLM)
+	// LLM service (opt-in via the `.gortex.yaml` `llm:` block,
+	// `~/.config/gortex/config.yaml::llm:`, or GORTEX_LLM_* env vars).
+	// Repo-local config wins per non-zero field; the global config
+	// fills the rest; env overrides land last inside SetupLLM via
+	// MergeEnv. The active provider is chosen by `llm.provider`
+	// (local / anthropic / openai / ollama). No-op when the active
+	// provider has no model configured; a provider that fails to
+	// construct (e.g. "local" without `-tags llama`, or a missing API
+	// key) is logged and the service stays disabled.
+	gc, _ := config.LoadGlobal()
+	srv.SetupLLM(gc.MergeLLMInto(cfg.LLM))
 
 	// MultiWatcher is created in warmupDaemonState after tracked repos
 	// have been re-indexed — NewMultiWatcher needs mi.AllMetadata() to be

@@ -169,6 +169,14 @@ func pythonImportToModuleID(path string) (string, string, bool) {
 		// the package layout, which we don't have here.
 		return "", "", false
 	}
+	if strings.Contains(path, "/") {
+		// File-path stem from a project-rooted relative import
+		// (emitted by emitImportFromRelative). The relative-import
+		// resolver pass owns these; landing them on a pypi module
+		// would invent a phantom package named after the repo's
+		// directory layout.
+		return "", "", false
+	}
 	top := path
 	if i := strings.Index(path, "."); i > 0 {
 		top = path[:i]

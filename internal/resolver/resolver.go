@@ -205,6 +205,11 @@ func (r *Resolver) ResolveAll() *ResolveStats {
 		}
 	}
 
+	// Relative-import resolution for Python and Dart files. Runs
+	// before module attribution so internal-target stems never get
+	// mis-mapped to a phantom pypi/pub package.
+	r.resolveRelativeImports()
+
 	// Module attribution for ecosystems without a CGO type-checker
 	// path (Python, Dart, …). Runs serially on the post-resolution
 	// graph so it sees the final `external::*` set after the
@@ -396,6 +401,14 @@ func (r *Resolver) resolveEdge(e *graph.Edge, stats *ResolveStats) (oldTo string
 		// server-side handler by the graph-wide ResolveGRPCStubCalls
 		// pass, which needs the whole graph plus InferImplements — the
 		// per-edge resolver can't see that. Leave the edge untouched.
+		return oldTo, false
+	case strings.HasPrefix(target, "pyrel::"):
+		// Python relative-import placeholder
+		// (`unresolved::pyrel::<projectRootedStem>`). The graph-wide
+		// resolveRelativeImports pass lands these on the matching
+		// KindFile node once the whole index is built; the per-edge
+		// resolver can't see project-layout context. Leave untouched
+		// so the post-pass owns rewriting.
 		return oldTo, false
 	case strings.HasPrefix(target, "import::"):
 		r.resolveImport(e, strings.TrimPrefix(target, "import::"), stats)

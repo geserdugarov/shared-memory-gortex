@@ -35,6 +35,9 @@ const qPyAll = `
   (import_from_statement
     module_name: (dotted_name) @import.module) @importfrom.def
 
+  (import_from_statement
+    module_name: (relative_import) @importfrom.rel) @importfrom_rel.def
+
   (call
     function: (identifier) @call.name) @call.expr
 
@@ -124,6 +127,9 @@ func (e *PythonExtractor) Extract(filePath string, src []byte) (*parser.Extracti
 
 		case m.Captures["importfrom.def"] != nil:
 			e.emitImportFrom(m, filePath, fileID, src, result, imports)
+
+		case m.Captures["importfrom_rel.def"] != nil:
+			e.emitImportFromRelative(m, filePath, fileID, src, result, imports)
 
 		case m.Captures["callattr.expr"] != nil:
 			expr := m.Captures["callattr.expr"]
@@ -675,6 +681,170 @@ func (e *PythonExtractor) emitImportFrom(m parser.QueryResult, filePath, fileID 
 			imports[alias] = mod.Text + "." + importedName
 		}
 	}
+}
+
+// emitImportFromRelative handles `from . import foo`, `from .sub import
+// bar`, `from ..pkg.deep import x` shapes whose `module_name` is a
+// `relative_import` rather than a `dotted_name`. Without this branch the
+// parser silently dropped every relative import, leaving the graph
+// blind to in-project package edges.
+//
+// The handler maps the relative reference to a project-rooted file-path
+// stem so the resolver post-pass `resolveRelativeImports` can land the
+// edge on the actual `KindFile` node. Imported names are bound in the
+// per-file alias map with a `pyrel::<stem>` marker; the call-resolution
+// loop in Extract recognises that shape and emits dataflow edges that
+// the post-pass also rewrites onto internal file symbols.
+func (e *PythonExtractor) emitImportFromRelative(m parser.QueryResult, filePath, fileID string, src []byte, result *parser.ExtractionResult, _ map[string]string) {
+	relCap := m.Captures["importfrom.rel"]
+	if relCap.Node == nil {
+		return
+	}
+	relNode := relCap.Node
+	dots := 0
+	modPath := ""
+	for i := 0; i < int(relNode.NamedChildCount()); i++ {
+		child := relNode.NamedChild(i)
+		switch child.Type() {
+		case "import_prefix":
+			dots += strings.Count(child.Content(src), ".")
+		case "dotted_name":
+			modPath = child.Content(src)
+		}
+	}
+	// Some grammar versions place the dot prefix in unnamed children;
+	// scan all children for `.` tokens when the named-child walk yields
+	// zero dots so we don't silently drop `from . import x`.
+	if dots == 0 {
+		for i := 0; i < int(relNode.ChildCount()); i++ {
+			child := relNode.Child(i)
+			if child.Type() == "." {
+				dots++
+			}
+		}
+	}
+	if dots == 0 {
+		return
+	}
+
+	stem := pyResolveRelativeStem(filePath, dots, modPath)
+	if stem == "" {
+		return
+	}
+	importLine := int(relNode.StartPoint().Row) + 1
+
+	// When the relative import names a module (`from .util import a`),
+	// emit one EdgeImports edge to the module stem — the imported
+	// names live inside that module. When the dot prefix carries no
+	// module name (`from . import util`), each imported NAME is itself
+	// a submodule of the current package, so emit one edge per name
+	// targeting `<stem>/<name>`. This is the same shape the absolute
+	// `from numpy import array` path uses (one import edge to the
+	// originating module) — the only difference is that for `from .
+	// import X` the module name comes from the import list.
+	if modPath != "" {
+		pyEmitImportNode(filePath, fileID, modPath, "", importLine, result)
+		result.Edges = append(result.Edges, &graph.Edge{
+			From: fileID, To: "unresolved::pyrel::" + stem,
+			Kind: graph.EdgeImports, FilePath: filePath, Line: importLine,
+		})
+	}
+
+	def, ok := m.Captures["importfrom_rel.def"]
+	if !ok || def.Node == nil {
+		return
+	}
+	stmt := def.Node
+	moduleSeen := false
+	emittedSub := map[string]bool{}
+	emitSubmodule := func(name, alias string) {
+		if modPath != "" || name == "" {
+			return
+		}
+		subStem := stem + "/" + name
+		if emittedSub[subStem] {
+			return
+		}
+		emittedSub[subStem] = true
+		pyEmitImportNode(filePath, fileID, name, alias, importLine, result)
+		result.Edges = append(result.Edges, &graph.Edge{
+			From: fileID, To: "unresolved::pyrel::" + subStem,
+			Kind: graph.EdgeImports, FilePath: filePath, Line: importLine,
+		})
+	}
+	for i := 0; i < int(stmt.NamedChildCount()); i++ {
+		child := stmt.NamedChild(i)
+		switch child.Type() {
+		case "relative_import":
+			moduleSeen = true
+			continue
+		case "dotted_name":
+			if !moduleSeen {
+				moduleSeen = true
+				continue
+			}
+			name := child.Content(src)
+			emitSubmodule(name, "")
+		case "aliased_import":
+			var importedName, alias string
+			for j := 0; j < int(child.NamedChildCount()); j++ {
+				cc := child.NamedChild(j)
+				switch cc.Type() {
+				case "dotted_name":
+					importedName = cc.Content(src)
+				case "identifier":
+					alias = cc.Content(src)
+				}
+			}
+			emitSubmodule(importedName, alias)
+		}
+	}
+}
+
+// pyResolveRelativeStem maps a (filePath, dotCount, modPath) triple to
+// the project-rooted file-path stem the import targets. Returns "" when
+// the dot prefix would walk to or above the repo root — CPython raises
+// ImportError on the same shape, so we refuse rather than invent a
+// project-root pseudo-package.
+//
+//	pyResolveRelativeStem("app/main.py", 1, "")        → "app"
+//	pyResolveRelativeStem("app/main.py", 1, "util")    → "app/util"
+//	pyResolveRelativeStem("app/sub/x.py", 2, "parent") → "app/parent"
+//	pyResolveRelativeStem("app/sub/x.py", 3, "y")      → "" (above root)
+//	pyResolveRelativeStem("main.py", 1, "x")           → "" (no package)
+func pyResolveRelativeStem(filePath string, dots int, modPath string) string {
+	if dots <= 0 || filePath == "" {
+		return ""
+	}
+	dir := ""
+	if i := strings.LastIndex(filePath, "/"); i >= 0 {
+		dir = filePath[:i]
+	}
+	levels := 0
+	if dir != "" {
+		levels = strings.Count(dir, "/") + 1
+	}
+	// `dots-1` is the number of parent-package walks. Walking to or
+	// past `levels` means we'd land at (or above) the implicit repo
+	// root with no real package — refuse rather than fabricate one.
+	if dots-1 >= levels {
+		return ""
+	}
+	for i := 1; i < dots; i++ {
+		if j := strings.LastIndex(dir, "/"); j >= 0 {
+			dir = dir[:j]
+		} else {
+			dir = ""
+		}
+	}
+	if modPath == "" {
+		return dir
+	}
+	suffix := strings.ReplaceAll(modPath, ".", "/")
+	if dir == "" {
+		return suffix
+	}
+	return dir + "/" + suffix
 }
 
 // pyEmitImportNode appends a KindImport node + Defines edge for a

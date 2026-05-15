@@ -5,9 +5,11 @@ import (
 	"path"
 	"regexp"
 	"strings"
+	"sync"
 
 	"github.com/zzet/gortex/internal/contracts"
 	"github.com/zzet/gortex/internal/graph"
+	"github.com/zzet/gortex/internal/parser/tsalias"
 )
 
 // disambiguateBareTypesViaImports is the post-pass that handles bare
@@ -110,7 +112,8 @@ func (mi *MultiIndexer) resolveBareTypeViaImports(
 			importCache[srcFile] = nil
 			return ""
 		}
-		imports = parseTSImports(string(src), srcFile)
+		aliasMap, aliasPrefix := mi.tsAliasMapFor(srcFile)
+		imports = parseTSImports(string(src), srcFile, aliasMap, aliasPrefix)
 		importCache[srcFile] = imports
 	}
 	if len(imports) == 0 {
@@ -126,6 +129,55 @@ func (mi *MultiIndexer) resolveBareTypeViaImports(
 		}
 	}
 	return ""
+}
+
+// tsAliasCache caches the per-repo Collection of tsconfig/jsconfig
+// alias maps. Loaded lazily on first lookup for a repoPrefix and
+// reused across all import resolutions in the same session. A nil
+// entry means "scanned, no usable config" — distinct from "not yet
+// scanned" (missing key).
+var (
+	tsAliasCache   = map[string]*tsalias.Collection{}
+	tsAliasCacheMu sync.Mutex
+)
+
+// tsAliasMapFor returns the nearest-ancestor alias map for srcFile
+// (and the repo prefix the resolved path should be prefixed with).
+// srcFile is a repo-prefixed path; we determine the repo by matching
+// it against tracked repos, walk that repo's filesystem root for
+// config files (cached), and pick the scope nearest to srcFile.
+//
+// Returns (nil, "") when the repo can't be located or no usable
+// config exists — callers must handle that as "no alias resolution
+// available, fall through to bare-name behaviour."
+func (mi *MultiIndexer) tsAliasMapFor(srcFile string) (*tsalias.Map, string) {
+	if srcFile == "" {
+		return nil, ""
+	}
+	for _, m := range mi.AllMetadata() {
+		prefix := m.RepoPrefix
+		if prefix == "" || !strings.HasPrefix(srcFile, prefix+"/") {
+			continue
+		}
+		coll := loadTSAliasCollection(prefix, m.RootPath)
+		if coll == nil {
+			return nil, prefix
+		}
+		rel := strings.TrimPrefix(srcFile, prefix+"/")
+		return coll.FindForFile(path.Dir(rel)), prefix
+	}
+	return nil, ""
+}
+
+func loadTSAliasCollection(prefix, rootPath string) *tsalias.Collection {
+	tsAliasCacheMu.Lock()
+	defer tsAliasCacheMu.Unlock()
+	if c, ok := tsAliasCache[prefix]; ok {
+		return c
+	}
+	c := tsalias.Load(rootPath)
+	tsAliasCache[prefix] = c
+	return c
 }
 
 // readFileFromAnyRepo finds the on-disk bytes for a repo-prefixed
@@ -186,12 +238,13 @@ var tsImportRe = regexp.MustCompile(
 )
 
 // parseTSImports walks the import lines of a TypeScript / JavaScript
-// source file and returns name → absolute repo-relative file path.
-// `srcFile` is the importing file's own repo-relative path; it
+// source file and returns name → absolute repo-prefixed file path.
+// `srcFile` is the importing file's own repo-prefixed path; it
 // anchors relative module specifiers like `'./schema'`. Bare module
-// specifiers (`'react'`, `'@/lib/api'`) are skipped — they don't
-// resolve to a graph file the local repo owns.
-func parseTSImports(src, srcFile string) map[string]string {
+// specifiers (`'react'`) are skipped — they don't resolve to a graph
+// file the local repo owns. tsconfig-style path aliases (`@/lib/api`,
+// `$utils/format`) ARE resolved when an alias map is provided.
+func parseTSImports(src, srcFile string, aliasMap *tsalias.Map, repoPrefix string) map[string]string {
 	matches := tsImportRe.FindAllStringSubmatch(src, -1)
 	if len(matches) == 0 {
 		return nil
@@ -203,7 +256,7 @@ func parseTSImports(src, srcFile string) map[string]string {
 		defaultOrStar := m[2]
 		extraNamed := m[3]
 		modulePath := m[4]
-		resolved := resolveTSModulePath(modulePath, srcDir)
+		resolved := resolveTSModulePath(modulePath, srcDir, aliasMap, repoPrefix)
 		if resolved == "" {
 			continue
 		}
@@ -258,34 +311,57 @@ func splitTSImportClause(body string) []string {
 }
 
 // resolveTSModulePath turns a TS/JS module specifier into the
-// repo-relative file path of the imported source, or "" when the
-// specifier is bare (third-party / aliased) and we can't statically
-// know the target. We don't probe the disk here — the caller will
-// match the resolved path against a candidate's FilePath, so we
-// just append the canonical `.ts` extension when none is present.
-// `.tsx` / `.js` / `.jsx` paths are returned as-is when the user
-// wrote them explicitly. Directory imports resolving to `index.*`
-// are NOT handled — the resolver returns the bare-stem path; if
-// the candidate type lives in `<dir>/index.ts` the upgrade falls
-// through and the bare name is left in place (acceptable: the
-// dashboard still renders the bare type chip).
-func resolveTSModulePath(modulePath, srcDir string) string {
+// repo-prefixed file path of the imported source, or "" when the
+// specifier is unresolvable (third-party module with no matching
+// alias). Resolution order:
+//
+//  1. Relative path (`./foo`, `../bar/baz`) — anchored at srcDir.
+//  2. tsconfig path alias (`@/lib/foo`, `$utils/format`) — looked up
+//     against aliasMap; the resolved repo-relative target is prefixed
+//     with repoPrefix so it lines up with graph FilePaths.
+//
+// We don't probe the disk; the caller matches the resolved path
+// against a candidate's FilePath, so we just append the canonical
+// `.ts` extension when none is present. `.tsx` / `.js` / `.jsx`
+// paths are returned as-is when the user wrote them explicitly.
+// Directory imports resolving to `index.*` are NOT handled — the
+// resolver returns the bare-stem path; if the candidate type lives
+// in `<dir>/index.ts` the upgrade falls through and the bare name
+// is left in place (acceptable: the dashboard still renders the
+// bare type chip).
+func resolveTSModulePath(modulePath, srcDir string, aliasMap *tsalias.Map, repoPrefix string) string {
 	if modulePath == "" {
 		return ""
 	}
-	if !strings.HasPrefix(modulePath, "./") && !strings.HasPrefix(modulePath, "../") {
-		// Bare specifier (`react`, `@/lib/foo`, etc.). Path aliases
-		// like `@/...` aren't statically resolved here — they need a
-		// tsconfig parse, which we don't do. The caller falls back to
-		// leaving the bare type name in place when this returns "".
+	if strings.HasPrefix(modulePath, "./") || strings.HasPrefix(modulePath, "../") {
+		joined := path.Clean(path.Join(srcDir, modulePath))
+		switch path.Ext(joined) {
+		case ".ts", ".tsx", ".js", ".jsx", ".mts", ".cts", ".mjs", ".cjs":
+			return joined
+		}
+		return joined + ".ts"
+	}
+	// Bare specifier — try alias resolution. tsalias.Resolve returns a
+	// repo-relative path with the extension stripped; we re-prefix it
+	// with repoPrefix so it lines up with graph FilePaths, then add
+	// the canonical `.ts` so the caller can match against an indexed
+	// file. Returning "" still leaves the bare type name in place.
+	if aliasMap == nil {
 		return ""
 	}
-	joined := path.Clean(path.Join(srcDir, modulePath))
-	switch path.Ext(joined) {
-	case ".ts", ".tsx", ".js", ".jsx", ".mts", ".cts", ".mjs", ".cjs":
-		return joined
+	repoRel := tsalias.Resolve(aliasMap, modulePath)
+	if repoRel == "" {
+		return ""
 	}
-	return joined + ".ts"
+	full := repoRel
+	if repoPrefix != "" {
+		full = repoPrefix + "/" + repoRel
+	}
+	switch path.Ext(full) {
+	case ".ts", ".tsx", ".js", ".jsx", ".mts", ".cts", ".mjs", ".cjs":
+		return full
+	}
+	return full + ".ts"
 }
 
 // isImportResolvableLang reports whether the contract source file

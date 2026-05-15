@@ -3,7 +3,59 @@ package indexer
 import (
 	"reflect"
 	"testing"
+
+	"github.com/zzet/gortex/internal/parser/tsalias"
 )
+
+// TestResolveTSModulePath_AliasResolvesWithPrefix wires an alias map
+// (matching what tsalias.Load would produce for a Next.js-style
+// `@/*` config) into resolveTSModulePath and verifies the result is
+// re-prefixed with the repo prefix so the caller can match it
+// against the graph node's FilePath.
+func TestResolveTSModulePath_AliasResolvesWithPrefix(t *testing.T) {
+	m := &tsalias.Map{
+		Entries: []tsalias.Alias{
+			{AliasPrefix: "@/", TargetPrefix: "src/", HasWildcard: true},
+		},
+	}
+	got := resolveTSModulePath("@/lib/api", "myrepo/src/components", m, "myrepo")
+	want := "myrepo/src/lib/api.ts"
+	if got != want {
+		t.Errorf("resolveTSModulePath alias = %q, want %q", got, want)
+	}
+}
+
+// TestResolveTSModulePath_AliasNoMatchFallsThrough ensures that a bare
+// specifier with no matching alias entry still returns "" so the
+// caller leaves the bare-name reference in place.
+func TestResolveTSModulePath_AliasNoMatchFallsThrough(t *testing.T) {
+	m := &tsalias.Map{
+		Entries: []tsalias.Alias{
+			{AliasPrefix: "@/", TargetPrefix: "src/", HasWildcard: true},
+		},
+	}
+	if got := resolveTSModulePath("react", "myrepo/src", m, "myrepo"); got != "" {
+		t.Errorf("unmatched bare specifier should resolve to \"\", got %q", got)
+	}
+}
+
+// TestParseTSImports_AliasResolvesNamedImport drives the full path
+// from import-statement scanning through alias resolution.
+func TestParseTSImports_AliasResolvesNamedImport(t *testing.T) {
+	src := `
+import { Foo } from '@/lib/schema'
+`
+	m := &tsalias.Map{
+		Entries: []tsalias.Alias{
+			{AliasPrefix: "@/", TargetPrefix: "src/", HasWildcard: true},
+		},
+	}
+	got := parseTSImports(src, "web/src/app/page.tsx", m, "web")
+	want := map[string]string{"Foo": "web/src/lib/schema.ts"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got %+v\nwant %+v", got, want)
+	}
+}
 
 // TestParseTSImports_ResolvesNamedImports covers the common shape:
 // `import type { Foo, Bar as Baz } from './schema'`. Each named
@@ -14,7 +66,7 @@ func TestParseTSImports_ResolvesNamedImports(t *testing.T) {
 import type { Foo, Bar as Baz } from './schema'
 import { Quux } from '../shared/types'
 `
-	got := parseTSImports(src, "web/src/lib/api.ts")
+	got := parseTSImports(src, "web/src/lib/api.ts", nil, "")
 	want := map[string]string{
 		"Foo":  "web/src/lib/schema.ts",
 		"Baz":  "web/src/lib/schema.ts",
@@ -35,7 +87,7 @@ import React from 'react'
 import { useState } from 'react'
 import { foo } from '@/lib/foo'
 `
-	got := parseTSImports(src, "web/src/lib/api.ts")
+	got := parseTSImports(src, "web/src/lib/api.ts", nil, "")
 	if len(got) != 0 {
 		t.Errorf("expected empty map for bare specifiers, got %+v", got)
 	}
@@ -48,7 +100,7 @@ func TestParseTSImports_DefaultAndNamespace(t *testing.T) {
 import Default from './a'
 import * as NS from './b'
 `
-	got := parseTSImports(src, "x/y.ts")
+	got := parseTSImports(src, "x/y.ts", nil, "")
 	if got["Default"] != "x/a.ts" {
 		t.Errorf("default import: got %q, want %q", got["Default"], "x/a.ts")
 	}
@@ -93,7 +145,7 @@ func TestResolveTSModulePath_AddsTSExtension(t *testing.T) {
 		{"@/lib/foo", "web/src/lib", ""},
 	}
 	for _, c := range cases {
-		got := resolveTSModulePath(c.mod, c.dir)
+		got := resolveTSModulePath(c.mod, c.dir, nil, "")
 		if got != c.want {
 			t.Errorf("resolveTSModulePath(%q, %q) = %q, want %q", c.mod, c.dir, got, c.want)
 		}

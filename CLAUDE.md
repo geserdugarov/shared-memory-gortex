@@ -229,21 +229,27 @@ The `find_clones` MCP tool surfaces near-duplicate ("clone") function/method clu
 | Scoping a query to a project          | Pass `project` param to any query tool |
 | Filtering by reference tag            | Pass `ref` param to any query tool |
 
-### Live Editor Buffers (Overlay Sessions)
+### Live Editor Buffers (Shadow-Graph Overlay Sessions)
 
-Editor extensions push in-flight buffers — files the user has edited but not yet saved — into the daemon as **overlays**. Once an overlay is attached to a session, every subsequent `tools/call` from that session sees the overlaid view: graph-walking tools (`find_usages`, `get_call_chain`, `get_file_summary`, `analyze`, …) and source-reading tools (`get_symbol_source`, `get_editing_context`, …) all read the editor-buffer version of the file instead of the saved-buffer one.
+Editor extensions push in-flight (unsaved) buffers as **overlays**. Gortex composes a per-request **shadow view** (`graph.OverlaidView`) on top of the immutable base graph and threads it through the tool dispatch context. Every subsequent `tools/call` from the same MCP session reads through the shadow view — graph-walking tools (`find_usages`, `get_call_chain`, `get_file_summary`, `analyze`, …) and source-reading tools (`get_symbol_source`, `get_editing_context`, …) all see the editor-buffer state.
+
+**Load-bearing invariant: the base graph is never mutated by overlay flow.** The overlay layer is built per request, parsed once per (session, content-hash) tuple, and discarded with the request. Consequences:
+
+- **Multi-tenant safe.** Sessions A1, A2 (same user) and B (different user) can run concurrently against the same daemon; each sees its own view. The file watcher's reindex passes mutate base but the in-flight shadow view captured a stable base snapshot at request start.
+- **Non-destructive.** Cross-file edges from non-overlaid files INTO overlaid file symbols (`Caller→Target`) survive overlay processing because base's edges are intact. The in-place-mutation approach (which Gortex briefly experimented with internally) lost those edges.
+- **Diffable.** `compare_with_overlay` runs a query against both base and overlay and returns the delta — proving the two views are simultaneously available.
 
 | Instead of...                         | You MUST use...                          |
 |---------------------------------------|------------------------------------------|
-| Asking the user to save before a query | `overlay_register` then `overlay_push` — pushes one editor buffer; subsequent tool calls see the overlay merged on top of the on-disk graph view |
-| Pushing keystroke-by-keystroke through HTTP | `overlay_push` over the same MCP transport you're already on — no extra socket, no extra auth |
+| Asking the user to save before a query | `overlay_register` then `overlay_push` — pushes one editor buffer; subsequent tool calls see the overlay layered on top of base |
 | Listing what an extension has staged   | `overlay_list` — every path / size / deleted flag / base SHA for the current session |
 | Cancelling a single overlay           | `overlay_delete` with `path` — saved-buffer view returns for that path on the next tool call |
 | Tearing down an overlay session       | `overlay_drop` — discards every overlay attached to the session, in one call |
+| Previewing impact of an unsaved edit  | `compare_with_overlay` with `kind: find_usages / get_callers / get_call_chain / get_dependencies / get_dependents` — runs the query against base and overlay simultaneously, returns added / removed / common ID sets |
 
-**Drift detection.** Pass an editor-captured git blob SHA as `base_sha` on `overlay_push`. When the next tool call needs that path, the daemon compares it to the on-disk hash; if they disagree (a sibling tool, a git operation, or another editor saved over the file) the tool call returns a structured `overlay base SHA mismatch` error so the client knows to re-read the file and resubmit a fresh overlay. Drift is the load-bearing signal that prevents the daemon from folding a stale buffer into queries.
+**Drift detection.** Pass an editor-captured git blob SHA as `base_sha` on `overlay_push`. When the next tool call needs that path, Gortex compares it to the on-disk hash; if they disagree (a sibling tool, a git operation, or another editor saved over the file) the tool call returns a structured `overlay base SHA mismatch` error so the client knows to re-read the file and resubmit a fresh overlay.
 
-**Deletion overlays.** Push with `deleted: true` to model "this file is going away" — the symbols inside it vanish from the graph for the duration of the session, so the user can preview the impact of a delete without staging it.
+**Deletion overlays.** Push with `deleted: true` to model "this file is going away" — the symbols inside it vanish from the shadow view (but are untouched in base), so the user can preview the impact of a delete without staging it.
 
 **HTTP transport.** `gortex server` exposes the same surface at `POST /v1/overlay/sessions` (optional `session_id` binds an overlay to a known MCP session), `PUT /v1/overlay/sessions/{id}/files`, `DELETE /v1/overlay/sessions/{id}/files`, `GET /v1/overlay/sessions/{id}/files`, `DELETE /v1/overlay/sessions/{id}`. The `/v1/tools/<name>` HTTP entry point reads the active session from `Mcp-Session-Id` (preferred), `X-Gortex-Overlay-Session`, or `?session_id=` (test fallback).
 

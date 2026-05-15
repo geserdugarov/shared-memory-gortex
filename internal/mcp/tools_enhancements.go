@@ -457,7 +457,7 @@ func (s *Server) handlePrefetchContext(ctx context.Context, req mcp.CallToolRequ
 
 	// 1. BM25 search on task description (weight 0.4)
 	if task != "" {
-		searchResults := s.scopedNodeSlice(ctx, s.engine.SearchSymbols(task, 30))
+		searchResults := s.scopedNodeSlice(ctx, s.engineFor(ctx).SearchSymbols(task, 30))
 		maxScore := 1.0
 		for i, n := range searchResults {
 			if n.Kind == graph.KindFile || n.Kind == graph.KindImport {
@@ -493,7 +493,7 @@ func (s *Server) handlePrefetchContext(ctx context.Context, req mcp.CallToolRequ
 			}
 		}
 		// Get neighbors at depth 1-2
-		sg := s.engine.GetDependencies(rid, query.QueryOptions{Depth: 2, Limit: 30, Detail: "brief"})
+		sg := s.engineFor(ctx).GetDependencies(rid, query.QueryOptions{Depth: 2, Limit: 30, Detail: "brief"})
 		for _, n := range sg.Nodes {
 			if n.Kind == graph.KindFile || n.Kind == graph.KindImport {
 				continue
@@ -514,7 +514,7 @@ func (s *Server) handlePrefetchContext(ctx context.Context, req mcp.CallToolRequ
 			}
 		}
 		// Also check dependents (callers)
-		callers := s.engine.GetCallers(rid, query.QueryOptions{Depth: 1, Limit: 20, Detail: "brief"})
+		callers := s.engineFor(ctx).GetCallers(rid, query.QueryOptions{Depth: 1, Limit: 20, Detail: "brief"})
 		for _, n := range callers.Nodes {
 			if n.ID == rid || n.Kind == graph.KindFile || n.Kind == graph.KindImport {
 				continue
@@ -2253,7 +2253,7 @@ func (s *Server) handleDiffContext(ctx context.Context, req mcp.CallToolRequest)
 		}
 
 		// Callers (depth 1)
-		callers := s.engine.GetCallers(cs.ID, query.QueryOptions{Depth: 1, Limit: 10, Detail: "brief"})
+		callers := s.engineFor(ctx).GetCallers(cs.ID, query.QueryOptions{Depth: 1, Limit: 10, Detail: "brief"})
 		for _, cn := range callers.Nodes {
 			if cn.ID != cs.ID {
 				info.Callers = append(info.Callers, cn.ID)
@@ -2261,7 +2261,7 @@ func (s *Server) handleDiffContext(ctx context.Context, req mcp.CallToolRequest)
 		}
 
 		// Callees (depth 1)
-		callees := s.engine.GetCallChain(cs.ID, query.QueryOptions{Depth: 1, Limit: 10, Detail: "brief"})
+		callees := s.engineFor(ctx).GetCallChain(cs.ID, query.QueryOptions{Depth: 1, Limit: 10, Detail: "brief"})
 		for _, cn := range callees.Nodes {
 			if cn.ID != cs.ID {
 				info.Callees = append(info.Callees, cn.ID)
@@ -2604,7 +2604,7 @@ func (s *Server) handleBatchEdit(ctx context.Context, req mcp.CallToolRequest) (
 
 	var ordered []editWithOrder
 	for _, edit := range edits {
-		node := s.engine.GetSymbol(edit.SymbolID)
+		node := s.engineFor(ctx).GetSymbol(edit.SymbolID)
 		order := 50 // default middle priority
 		filePath := ""
 		if node != nil {
@@ -2619,7 +2619,7 @@ func (s *Server) handleBatchEdit(ctx context.Context, req mcp.CallToolRequest) (
 						continue
 					}
 					// Check if other calls this symbol
-					callers := s.engine.GetCallers(edit.SymbolID, query.QueryOptions{Depth: 1, Limit: 100, Detail: "brief"})
+					callers := s.engineFor(ctx).GetCallers(edit.SymbolID, query.QueryOptions{Depth: 1, Limit: 100, Detail: "brief"})
 					for _, cn := range callers.Nodes {
 						if cn.ID == other.SymbolID {
 							order = 10 // this is a dependency — edit first
@@ -2684,7 +2684,7 @@ func (s *Server) handleBatchEdit(ctx context.Context, req mcp.CallToolRequest) (
 			continue
 		}
 
-		node := s.engine.GetSymbol(o.edit.SymbolID)
+		node := s.engineFor(ctx).GetSymbol(o.edit.SymbolID)
 		if node == nil {
 			results = append(results, batchEditResult{
 				SymbolID: o.edit.SymbolID,

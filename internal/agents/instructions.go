@@ -371,9 +371,11 @@ The ` + "`flow_between`" + ` and ` + "`taint_paths`" + ` MCP tools answer **"whe
 | Scoping a query to a project          | Pass ` + "`project`" + ` param to any query tool |
 | Filtering by reference tag            | Pass ` + "`ref`" + ` param to any query tool |
 
-### Live Editor Buffers (Overlay Sessions)
+### Live Editor Buffers (Shadow-Graph Overlay Sessions)
 
-Editor extensions push in-flight buffers — files the user has edited but not yet saved — as **overlays**. After ` + "`overlay_register`" + ` and one or more ` + "`overlay_push`" + ` calls, every subsequent ` + "`tools/call`" + ` from the same MCP session reads the editor-buffer view (overlay merged on top of the on-disk graph). No per-tool changes are needed: graph-walking tools (` + "`find_usages`" + `, ` + "`get_call_chain`" + `, ` + "`get_file_summary`" + `, ` + "`analyze`" + `, …) and source-reading tools (` + "`get_symbol_source`" + `, ` + "`get_editing_context`" + `, …) all see the overlay.
+Editor extensions push in-flight (unsaved) buffers as **overlays**. Gortex composes a per-request **shadow view** on top of the immutable base graph and threads it through the tool dispatch context. After ` + "`overlay_register`" + ` and one or more ` + "`overlay_push`" + ` calls, every subsequent ` + "`tools/call`" + ` from the same MCP session reads through the shadow view — graph-walking tools (` + "`find_usages`" + `, ` + "`get_call_chain`" + `, ` + "`get_file_summary`" + `, …) and source-reading tools (` + "`get_symbol_source`" + `, ` + "`get_editing_context`" + `, …) all see the overlay.
+
+**Load-bearing invariant: base is never mutated by overlay flow.** Concurrent sessions (A1 / A2 / B) each see their own view; the file watcher's reindex passes don't race with overlay queries; cross-file edges from non-overlaid files into overlaid symbols are preserved because base's edges are untouched.
 
 | Instead of...                         | You MUST use...                          |
 |---------------------------------------|------------------------------------------|
@@ -381,8 +383,9 @@ Editor extensions push in-flight buffers — files the user has edited but not y
 | Listing what an extension has staged   | ` + "`overlay_list`" + ` — path / size / deleted / base SHA for the current session |
 | Cancelling a single overlay           | ` + "`overlay_delete`" + ` with ` + "`path`" + ` — saved-buffer view returns for that path |
 | Tearing down an overlay session       | ` + "`overlay_drop`" + ` — discards every overlay attached to the session in one call |
+| Previewing impact of an unsaved edit  | ` + "`compare_with_overlay`" + ` with ` + "`kind: find_usages / get_callers / get_call_chain / get_dependencies / get_dependents`" + ` — runs the query against base and overlay simultaneously, returns added / removed / common ID sets |
 
-Pass an editor-captured git blob SHA as ` + "`base_sha`" + ` on ` + "`overlay_push`" + ` to enable drift detection: when the next tool call needs that path, the daemon compares ` + "`base_sha`" + ` to the on-disk hash and returns ` + "`overlay base SHA mismatch`" + ` if they disagree, so the client knows to re-read and resubmit. Push with ` + "`deleted: true`" + ` to model a tombstone — the file's symbols vanish from the graph for the session's lifetime. Sessions auto-expire after 5 minutes of inactivity. HTTP transport mirrors the surface at ` + "`/v1/overlay/sessions/*`" + `; the ` + "`/v1/tools/<name>`" + ` entry reads the active session from ` + "`Mcp-Session-Id`" + ` / ` + "`X-Gortex-Overlay-Session`" + ` / ` + "`?session_id=`" + `.
+Pass an editor-captured git blob SHA as ` + "`base_sha`" + ` on ` + "`overlay_push`" + ` to enable drift detection: when the next tool call needs that path, Gortex compares ` + "`base_sha`" + ` to the on-disk hash and returns ` + "`overlay base SHA mismatch`" + ` if they disagree, so the client knows to re-read and resubmit. Push with ` + "`deleted: true`" + ` to model a tombstone — the file's symbols vanish from the shadow view (but are untouched in base). Sessions auto-expire after 5 minutes of inactivity. HTTP transport mirrors the surface at ` + "`/v1/overlay/sessions/*`" + `; the ` + "`/v1/tools/<name>`" + ` entry reads the active session from ` + "`Mcp-Session-Id`" + ` / ` + "`X-Gortex-Overlay-Session`" + ` / ` + "`?session_id=`" + `.
 
 ### MCP Resources
 

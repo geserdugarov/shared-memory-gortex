@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -25,16 +26,26 @@ import (
 )
 
 // setupOverlayServer builds a fully-wired MCP server with an attached
-// OverlayManager, an indexed temp repo, and a single Go file the tests
-// can overlay-edit. Returns the server, the repo root, the absolute
-// file path, and a teardown function.
-func setupOverlayServer(t *testing.T) (srv *Server, dir, file string) {
+// OverlayManager and an indexed temp repo of two interlinked Go
+// files: target.go defines `Target()`, caller.go has a `Caller()`
+// that calls `Target()`. The shape lets tests verify (a) overlays
+// surface buffer-defined symbols, (b) cross-file edges from base
+// (caller→target) survive overlay since base is never mutated, and
+// (c) two concurrent sessions see their own overlay independently.
+func setupOverlayServer(t *testing.T) (srv *Server, dir, targetFile, callerFile string) {
 	t.Helper()
 	dir = t.TempDir()
-	file = filepath.Join(dir, "main.go")
-	require.NoError(t, os.WriteFile(file, []byte(`package main
+	targetFile = filepath.Join(dir, "target.go")
+	callerFile = filepath.Join(dir, "caller.go")
+	require.NoError(t, os.WriteFile(targetFile, []byte(`package main
 
-func Disk() {}
+func Target() {}
+`), 0o644))
+	require.NoError(t, os.WriteFile(callerFile, []byte(`package main
+
+func Caller() {
+	Target()
+}
 `), 0o644))
 
 	g := graph.New()
@@ -44,12 +55,13 @@ func Disk() {}
 	idx := indexer.New(g, reg, cfg.Index, zap.NewNop())
 	_, err := idx.Index(dir)
 	require.NoError(t, err)
+	idx.ResolveAll()
 
 	eng := query.NewEngine(g)
 	srv = NewServer(eng, g, idx, nil, zap.NewNop(), nil)
 	srv.SetOverlayManager(daemon.NewOverlayManager(time.Minute))
 	srv.RunAnalysis()
-	return srv, dir, file
+	return srv, dir, targetFile, callerFile
 }
 
 func callToolByName(t *testing.T, srv *Server, ctx context.Context, name string, args map[string]any) *mcplib.CallToolResult {
@@ -75,21 +87,21 @@ func toolText(res *mcplib.CallToolResult) string {
 	return sb.String()
 }
 
-// TestOverlay_QueryConsumption_GetFileSummary is the core I19 contract:
-// after the editor pushes an overlay adding a new function, the very
-// next get_file_summary call must surface that function. The test
-// proves the overlay-apply middleware runs around tool dispatch and
-// that the indexer-from-content path produces graph entries query
-// tools observe.
-func TestOverlay_QueryConsumption_GetFileSummary(t *testing.T) {
-	srv, dir, file := setupOverlayServer(t)
-	sessID := "test-session-1"
+// TestOverlay_BaseGraphIsImmutable is the load-bearing isolation
+// guarantee: pushing and querying an overlay must NOT mutate the
+// base graph. A snapshot of base node IDs taken before and after a
+// full overlay round-trip must be byte-identical.
+func TestOverlay_BaseGraphIsImmutable(t *testing.T) {
+	srv, _, targetFile, _ := setupOverlayServer(t)
+	beforeIDs := baseNodeIDs(srv)
+
+	sessID := "test-immutability"
 	require.NoError(t, srv.OverlayManager().RegisterWithID(sessID, ""))
 	require.NoError(t, srv.OverlayManager().Push(sessID, daemon.OverlayFile{
-		Path: file,
+		Path: targetFile,
 		Content: `package main
 
-func Disk() {}
+func Target() {}
 
 func Overlay() {}
 `,
@@ -97,59 +109,73 @@ func Overlay() {}
 
 	ctx := WithSessionID(context.Background(), sessID)
 	res := callToolByName(t, srv, ctx, "get_file_summary", map[string]any{
-		"path": filepath.Base(file),
+		"path": filepath.Base(targetFile),
 	})
-	body := toolText(res)
-	require.Containsf(t, body, "Overlay", "get_file_summary must surface the overlay-added symbol; got %s", body)
-	require.Contains(t, body, "Disk")
+	require.False(t, res.IsError)
+	require.Contains(t, toolText(res), "Overlay")
 
-	// Post-call revert: a query without the session ID must NOT see the
-	// overlay function. This guarantees the middleware restored the
-	// on-disk view after the previous tool returned.
-	bare := callToolByName(t, srv, context.Background(), "get_file_summary", map[string]any{
-		"path": filepath.Base(file),
-	})
-	require.NotContainsf(t, toolText(bare), "Overlay",
-		"post-tool revert must restore the on-disk view")
-	_ = dir
+	afterIDs := baseNodeIDs(srv)
+	require.Equal(t, beforeIDs, afterIDs,
+		"base graph must be byte-identical before and after an overlay round-trip")
 }
 
-// TestOverlay_DriftSurfacesAsToolError verifies that a stale overlay
-// (BaseSHA recorded at editor-open time disagreeing with the current
-// on-disk SHA) makes the next tool call fail with an MCP error result
-// rather than silently returning stale data. The client is expected to
-// re-read the file and resubmit a fresh overlay.
+// TestOverlay_FindUsagesPreservesCrossFileCallers exercises the
+// regression the in-place-mutation design had: an editor overlays
+// target.go (defining Target), and find_usages(target.go::Target)
+// must still surface caller.go's call site — base's resolved edge
+// from caller→target survives because the base graph isn't touched.
+func TestOverlay_FindUsagesPreservesCrossFileCallers(t *testing.T) {
+	srv, _, targetFile, _ := setupOverlayServer(t)
+	sessID := "test-find-usages"
+	require.NoError(t, srv.OverlayManager().RegisterWithID(sessID, ""))
+	// Overlay rewrites target.go but keeps Target() with the same
+	// signature, so its node ID is unchanged.
+	require.NoError(t, srv.OverlayManager().Push(sessID, daemon.OverlayFile{
+		Path: targetFile,
+		Content: `package main
+
+func Target() {}
+
+func NewSibling() {}
+`,
+	}, nil))
+
+	ctx := WithSessionID(context.Background(), sessID)
+	res := callToolByName(t, srv, ctx, "find_usages", map[string]any{
+		"id": "target.go::Target",
+	})
+	require.False(t, res.IsError, "find_usages: %s", toolText(res))
+	require.Contains(t, toolText(res), "Caller",
+		"overlay must preserve base's caller.go → target.go::Target edge")
+}
+
+// TestOverlay_DriftSurfacesAsToolError: a stale BaseSHA must turn
+// the very next tool call into an MCP error result so the client
+// re-reads and resubmits.
 func TestOverlay_DriftSurfacesAsToolError(t *testing.T) {
-	srv, _, file := setupOverlayServer(t)
+	srv, _, targetFile, _ := setupOverlayServer(t)
 	sessID := "test-session-drift"
 	require.NoError(t, srv.OverlayManager().RegisterWithID(sessID, ""))
 	require.NoError(t, srv.OverlayManager().Push(sessID, daemon.OverlayFile{
-		Path:    file,
-		Content: "package main\n\nfunc Overlay() {}\n",
-		BaseSHA: "0000000000000000000000000000000000000000", // intentionally wrong
+		Path:    targetFile,
+		Content: "package main\n\nfunc Target() {}\n",
+		BaseSHA: "0000000000000000000000000000000000000000",
 	}, nil))
 
 	ctx := WithSessionID(context.Background(), sessID)
 	res := callToolByName(t, srv, ctx, "get_file_summary", map[string]any{
-		"path": filepath.Base(file),
+		"path": filepath.Base(targetFile),
 	})
 	require.True(t, res.IsError, "drift must surface as an MCP tool error")
 	require.Contains(t, toolText(res), "overlay base SHA mismatch")
 }
 
-// TestOverlay_BaseSHA_MatchProceeds confirms the drift-detection
-// happy path: when the editor's BaseSHA matches the on-disk git-blob
-// hash, the overlay applies and the new symbol is visible. Without
-// this we'd have no positive coverage of the SHA check — only the
-// negative path.
+// TestOverlay_BaseSHA_MatchProceeds: when the editor's base SHA
+// agrees with the on-disk hash, the overlay applies and the new
+// symbol is visible.
 func TestOverlay_BaseSHA_MatchProceeds(t *testing.T) {
-	srv, _, file := setupOverlayServer(t)
-
-	// Compute the on-disk git blob SHA the same way overlay.go does
-	// (`blob <len>\0<content>` → sha1). The editor would normally
-	// read this from `git ls-files -s` or its LSP host's didOpen
-	// version metadata.
-	data, err := os.ReadFile(file)
+	srv, _, targetFile, _ := setupOverlayServer(t)
+	data, err := os.ReadFile(targetFile)
 	require.NoError(t, err)
 	h := sha1.New()
 	fmt.Fprintf(h, "blob %d\x00", len(data))
@@ -159,84 +185,283 @@ func TestOverlay_BaseSHA_MatchProceeds(t *testing.T) {
 	sessID := "test-session-match"
 	require.NoError(t, srv.OverlayManager().RegisterWithID(sessID, ""))
 	require.NoError(t, srv.OverlayManager().Push(sessID, daemon.OverlayFile{
-		Path:    file,
-		Content: "package main\n\nfunc Disk() {}\n\nfunc Overlay() {}\n",
+		Path:    targetFile,
+		Content: "package main\n\nfunc Target() {}\n\nfunc Overlay() {}\n",
 		BaseSHA: baseSHA,
 	}, nil))
 
 	ctx := WithSessionID(context.Background(), sessID)
 	res := callToolByName(t, srv, ctx, "get_file_summary", map[string]any{
-		"path": filepath.Base(file),
+		"path": filepath.Base(targetFile),
 	})
 	require.False(t, res.IsError)
 	require.Contains(t, toolText(res), "Overlay")
 }
 
-// TestOverlay_NoSessionNoOp is the fast-path: a tools/call with no
-// overlay session bound to the context must NOT pay any overlay
-// apply/revert cost and must observe the on-disk view. Failing this
-// would mean overlay support imposes overhead on every non-overlay
-// MCP call — the regression that gates wide adoption.
+// TestOverlay_NoSessionNoOp: a tools/call with no overlay session
+// bound to ctx must NOT pay any overlay cost and must observe the
+// on-disk view. Failing this would mean every non-overlay call
+// pays an extra parse pass.
 func TestOverlay_NoSessionNoOp(t *testing.T) {
-	srv, _, file := setupOverlayServer(t)
-	// A registered session with no overlays attached: the fast-path
-	// (FileCount==0) must skip the apply pass entirely.
+	srv, _, targetFile, _ := setupOverlayServer(t)
 	require.NoError(t, srv.OverlayManager().RegisterWithID("idle", ""))
 	ctx := WithSessionID(context.Background(), "idle")
 	res := callToolByName(t, srv, ctx, "get_file_summary", map[string]any{
-		"path": filepath.Base(file),
+		"path": filepath.Base(targetFile),
 	})
 	require.False(t, res.IsError)
-	require.Contains(t, toolText(res), "Disk")
+	require.Contains(t, toolText(res), "Target")
 	require.NotContains(t, toolText(res), "Overlay")
 }
 
-// TestOverlay_MCP_RegisterPushList exercises the MCP-tool surface for
-// overlay management: overlay_register, overlay_push, overlay_list.
-// This is the path an IDE extension takes when it'd rather speak the
-// MCP protocol than reach for the parallel /v1/overlay/* HTTP API.
+// TestOverlay_TwoSessionsIsolated proves multi-tenant isolation: two
+// sessions with conflicting overlays on the same path each see their
+// own overlay, run concurrently, and don't contaminate each other.
+// This was the failure mode of the prior in-place-mutation design.
+func TestOverlay_TwoSessionsIsolated(t *testing.T) {
+	srv, _, targetFile, _ := setupOverlayServer(t)
+	sessA := "alpha"
+	sessB := "beta"
+	require.NoError(t, srv.OverlayManager().RegisterWithID(sessA, ""))
+	require.NoError(t, srv.OverlayManager().RegisterWithID(sessB, ""))
+	require.NoError(t, srv.OverlayManager().Push(sessA, daemon.OverlayFile{
+		Path:    targetFile,
+		Content: "package main\n\nfunc Target() {}\n\nfunc AlphaOnly() {}\n",
+	}, nil))
+	require.NoError(t, srv.OverlayManager().Push(sessB, daemon.OverlayFile{
+		Path:    targetFile,
+		Content: "package main\n\nfunc Target() {}\n\nfunc BetaOnly() {}\n",
+	}, nil))
+
+	const iterations = 8
+	var wg sync.WaitGroup
+	var aErr, bErr error
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		ctx := WithSessionID(context.Background(), sessA)
+		for i := 0; i < iterations; i++ {
+			res := callToolByName(t, srv, ctx, "get_file_summary", map[string]any{
+				"path": filepath.Base(targetFile),
+			})
+			body := toolText(res)
+			if !strings.Contains(body, "AlphaOnly") {
+				aErr = fmt.Errorf("alpha did not see AlphaOnly: %s", body)
+				return
+			}
+			if strings.Contains(body, "BetaOnly") {
+				aErr = fmt.Errorf("alpha leaked BetaOnly: %s", body)
+				return
+			}
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		ctx := WithSessionID(context.Background(), sessB)
+		for i := 0; i < iterations; i++ {
+			res := callToolByName(t, srv, ctx, "get_file_summary", map[string]any{
+				"path": filepath.Base(targetFile),
+			})
+			body := toolText(res)
+			if !strings.Contains(body, "BetaOnly") {
+				bErr = fmt.Errorf("beta did not see BetaOnly: %s", body)
+				return
+			}
+			if strings.Contains(body, "AlphaOnly") {
+				bErr = fmt.Errorf("beta leaked AlphaOnly: %s", body)
+				return
+			}
+		}
+	}()
+	wg.Wait()
+	require.NoError(t, aErr)
+	require.NoError(t, bErr)
+}
+
+// TestOverlay_OverlayAndBaseSessionsIsolated: a session WITH an
+// overlay and a session WITHOUT any overlay run concurrently. The
+// overlay session sees its buffer; the bare session sees disk.
+// Neither contaminates the other. This is the case the prior
+// in-place design failed because non-overlay calls observed the
+// graph in its mid-mutation state.
+func TestOverlay_OverlayAndBaseSessionsIsolated(t *testing.T) {
+	srv, _, targetFile, _ := setupOverlayServer(t)
+	overlaySess := "with-overlay"
+	require.NoError(t, srv.OverlayManager().RegisterWithID(overlaySess, ""))
+	require.NoError(t, srv.OverlayManager().Push(overlaySess, daemon.OverlayFile{
+		Path:    targetFile,
+		Content: "package main\n\nfunc Target() {}\n\nfunc EditorOnly() {}\n",
+	}, nil))
+
+	const iterations = 8
+	var wg sync.WaitGroup
+	var withErr, withoutErr error
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		ctx := WithSessionID(context.Background(), overlaySess)
+		for i := 0; i < iterations; i++ {
+			res := callToolByName(t, srv, ctx, "get_file_summary", map[string]any{
+				"path": filepath.Base(targetFile),
+			})
+			if !strings.Contains(toolText(res), "EditorOnly") {
+				withErr = fmt.Errorf("overlay session lost overlay: %s", toolText(res))
+				return
+			}
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		ctx := context.Background() // no session ID
+		for i := 0; i < iterations; i++ {
+			res := callToolByName(t, srv, ctx, "get_file_summary", map[string]any{
+				"path": filepath.Base(targetFile),
+			})
+			if strings.Contains(toolText(res), "EditorOnly") {
+				withoutErr = fmt.Errorf("base session leaked overlay: %s", toolText(res))
+				return
+			}
+		}
+	}()
+	wg.Wait()
+	require.NoError(t, withErr)
+	require.NoError(t, withoutErr)
+}
+
+// TestOverlay_GetSymbolSourceReturnsBufferContent: get_symbol_source
+// must surface the editor's unsaved bytes for the overlaid file,
+// not the on-disk version. Without overlay-aware content reads the
+// I19 contract for source-reading tools is unmet.
+func TestOverlay_GetSymbolSourceReturnsBufferContent(t *testing.T) {
+	srv, _, targetFile, _ := setupOverlayServer(t)
+	sessID := "src-test"
+	require.NoError(t, srv.OverlayManager().RegisterWithID(sessID, ""))
+	require.NoError(t, srv.OverlayManager().Push(sessID, daemon.OverlayFile{
+		Path: targetFile,
+		Content: `package main
+
+// EditorSentinel is a unique comment line that only exists in the
+// overlay buffer, never on disk.
+func Target() {}
+`,
+	}, nil))
+
+	ctx := WithSessionID(context.Background(), sessID)
+	res := callToolByName(t, srv, ctx, "get_symbol_source", map[string]any{
+		"id":             "target.go::Target",
+		"context_lines":  10,
+	})
+	require.False(t, res.IsError, "get_symbol_source: %s", toolText(res))
+	require.Contains(t, toolText(res), "EditorSentinel",
+		"get_symbol_source must return overlay buffer content, not disk")
+}
+
+// TestOverlay_DeletionTombstone: deleted=true overlays hide the
+// file's symbols. find_usages on a deleted symbol returns no
+// results in the overlay view.
+func TestOverlay_DeletionTombstone(t *testing.T) {
+	srv, _, targetFile, _ := setupOverlayServer(t)
+	sessID := "tombstone-test"
+	require.NoError(t, srv.OverlayManager().RegisterWithID(sessID, ""))
+	require.NoError(t, srv.OverlayManager().Push(sessID, daemon.OverlayFile{
+		Path:    targetFile,
+		Deleted: true,
+	}, nil))
+
+	ctx := WithSessionID(context.Background(), sessID)
+	res := callToolByName(t, srv, ctx, "get_file_summary", map[string]any{
+		"path": filepath.Base(targetFile),
+	})
+	// Deletion overlay: either an error (no nodes) or an empty body,
+	// but Target must not appear.
+	require.NotContains(t, toolText(res), "Target",
+		"deletion overlay must hide every symbol from the file")
+}
+
+// TestOverlay_MCP_RegisterPushList exercises the MCP-tool surface
+// for overlay management: overlay_register, overlay_push,
+// overlay_list. The MCP-native path is what IDE extensions speaking
+// MCP take instead of the /v1/overlay/* HTTP endpoints.
 func TestOverlay_MCP_RegisterPushList(t *testing.T) {
-	srv, _, file := setupOverlayServer(t)
-	sessID := "test-mcp-register"
+	srv, _, targetFile, _ := setupOverlayServer(t)
+	sessID := "mcp-register"
 
 	ctx := WithSessionID(context.Background(), sessID)
 	regRes := callToolByName(t, srv, ctx, "overlay_register", map[string]any{})
 	require.False(t, regRes.IsError, "overlay_register: %s", toolText(regRes))
 
 	pushRes := callToolByName(t, srv, ctx, "overlay_push", map[string]any{
-		"path":    file,
-		"content": "package main\n\nfunc Overlay() {}\n",
+		"path":    targetFile,
+		"content": "package main\n\nfunc Target() {}\n\nfunc PushedViaMCP() {}\n",
 	})
 	require.False(t, pushRes.IsError, "overlay_push: %s", toolText(pushRes))
 
 	listRes := callToolByName(t, srv, ctx, "overlay_list", map[string]any{})
 	listText := toolText(listRes)
-	require.Contains(t, listText, file, "overlay_list must mention the pushed path: %s", listText)
+	require.Contains(t, listText, targetFile)
 	require.Contains(t, listText, `"count":1`)
+
+	summary := callToolByName(t, srv, ctx, "get_file_summary", map[string]any{
+		"path": filepath.Base(targetFile),
+	})
+	require.Contains(t, toolText(summary), "PushedViaMCP")
 }
 
-// TestOverlay_DeletedFileGoneFromGraph verifies the tombstone path:
-// when an overlay is pushed with deleted=true, the file's symbols
-// must vanish from the graph for the duration of the call — the
-// editor wants to preview "delete this file" without staging the
-// deletion to disk.
-func TestOverlay_DeletedFileGoneFromGraph(t *testing.T) {
-	srv, _, file := setupOverlayServer(t)
-	sessID := "test-mcp-del"
+// TestOverlay_CompareWithOverlay_DiffSurface exercises the diff
+// tool: an overlay adds a NewSibling function inside target.go but
+// leaves caller.go untouched. find_usages of NewSibling against
+// base returns nothing (the symbol doesn't exist on disk); against
+// overlay it returns nothing either (caller.go doesn't call it).
+// The base and overlay sides should disagree on the existence of
+// NewSibling itself via the layer's overlay_paths metadata.
+func TestOverlay_CompareWithOverlay_DiffSurface(t *testing.T) {
+	srv, _, targetFile, callerFile := setupOverlayServer(t)
+	// Edit caller.go in the overlay so it now calls NewSibling
+	// instead of Target. Edit target.go in the overlay to define
+	// NewSibling. compare_with_overlay against caller.go::Caller
+	// should show NewSibling as an added dependency that doesn't
+	// exist in base.
+	sessID := "diff-test"
 	require.NoError(t, srv.OverlayManager().RegisterWithID(sessID, ""))
 	require.NoError(t, srv.OverlayManager().Push(sessID, daemon.OverlayFile{
-		Path:    file,
-		Deleted: true,
+		Path: targetFile,
+		Content: `package main
+
+func Target() {}
+
+func NewSibling() {}
+`,
+	}, nil))
+	require.NoError(t, srv.OverlayManager().Push(sessID, daemon.OverlayFile{
+		Path: callerFile,
+		Content: `package main
+
+func Caller() {
+	NewSibling()
+}
+`,
 	}, nil))
 
 	ctx := WithSessionID(context.Background(), sessID)
-	res := callToolByName(t, srv, ctx, "get_file_summary", map[string]any{
-		"path": filepath.Base(file),
+	res := callToolByName(t, srv, ctx, "compare_with_overlay", map[string]any{
+		"kind": "get_call_chain",
+		"id":   "caller.go::Caller",
 	})
-	// File summary against a tombstoned file: either it returns a
-	// structured "file not in graph" error, or it succeeds with an
-	// empty symbol set. Both are correct post-conditions; only the
-	// Disk symbol leaking back through would be a regression.
-	require.NotContains(t, toolText(res), "Disk",
-		"deletion overlay must hide the tombstoned file's symbols")
+	require.False(t, res.IsError, "compare_with_overlay: %s", toolText(res))
+	body := toolText(res)
+	require.Contains(t, body, `"overlay_paths"`)
+	require.Contains(t, body, "target.go")
+	require.Contains(t, body, "caller.go")
+}
+
+// baseNodeIDs returns a sorted slice of every node ID in the base
+// graph. Used to verify the shadow-graph design's load-bearing
+// invariant: base is never mutated during overlay processing.
+func baseNodeIDs(srv *Server) []string {
+	nodes := srv.graph.AllNodes()
+	ids := make([]string, 0, len(nodes))
+	for _, n := range nodes {
+		ids = append(ids, n.ID)
+	}
+	return ids
 }

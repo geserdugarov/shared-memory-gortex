@@ -60,6 +60,11 @@ func (s *Server) registerOverlayTools() {
 		),
 		s.handleOverlayDrop,
 	)
+
+	// compare_with_overlay runs a query against both base and the
+	// session's overlay view and returns the delta — the core
+	// payoff of the shadow-graph design.
+	s.registerOverlayDiffTool()
 }
 
 // overlaySessionID returns the calling MCP session ID, or a structured

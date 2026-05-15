@@ -439,18 +439,21 @@ Wired across every running language server (gopls, tsserver, pyright, rust-analy
 | `list_repos` | List every project/repo in the active workspace |
 | `workspace_info` | Workspace identity — bind mode, root directory, marker contents, discovered member set |
 
-### Live Editor Buffers (Overlay Sessions)
-Editor extensions push in-flight (unsaved) buffers as **overlays**; every subsequent `tools/call` from the same MCP session sees the overlaid view. Graph-walking tools (`find_usages`, `get_call_chain`, `analyze`, …) and source-reading tools (`get_symbol_source`, `get_editing_context`, …) all read the editor-buffer version without per-tool changes. Pass an editor-captured git blob SHA as `base_sha` for drift detection; push with `deleted: true` to preview a deletion. Sessions auto-expire after 5 minutes of inactivity.
+### Live Editor Buffers (Shadow-Graph Overlay Sessions)
+Editor extensions push in-flight (unsaved) buffers as **overlays**. Gortex composes a per-request **shadow view** on top of the immutable base graph and threads it through the tool dispatch context — every subsequent `tools/call` from the same MCP session reads through the shadow. Graph-walking tools (`find_usages`, `get_call_chain`, `analyze`, …) and source-reading tools (`get_symbol_source`, `get_editing_context`, …) all see the editor-buffer state without per-tool changes.
+
+**Base is never mutated by overlay flow.** Concurrent sessions (multiple users, multiple windows of the same user) each see their own view; the file watcher's reindex passes don't race with overlay queries; cross-file edges from non-overlaid files into overlaid symbols (`Caller → Target`) are preserved.
 
 | Tool | Description |
 |------|-------------|
 | `overlay_register` | Bind an overlay session to the current MCP session ID (idempotent) |
-| `overlay_push` | Push (or update) a single file overlay |
+| `overlay_push` | Push (or update) a single file overlay; `base_sha` enables drift detection, `deleted: true` previews a delete |
 | `overlay_list` | List every overlay attached to the session — path / size / deleted / base_sha |
 | `overlay_delete` | Remove one overlay from the session |
 | `overlay_drop` | Tear down the session and discard every overlay |
+| `compare_with_overlay` | Run `find_usages` / `get_callers` / `get_call_chain` / `get_dependencies` / `get_dependents` against base AND overlay; returns added / removed / common ID sets |
 
-HTTP transport mirrors the surface at `/v1/overlay/sessions/*`; the `/v1/tools/<name>` entry point reads the overlay session from `Mcp-Session-Id` (preferred), `X-Gortex-Overlay-Session`, or `?session_id=`.
+HTTP transport mirrors the surface at `/v1/overlay/sessions/*`; the `/v1/tools/<name>` entry point reads the overlay session from `Mcp-Session-Id` (preferred), `X-Gortex-Overlay-Session`, or `?session_id=`. Sessions auto-expire after 5 minutes of inactivity.
 
 ## MCP Resources (16)
 

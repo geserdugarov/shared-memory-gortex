@@ -150,22 +150,25 @@ type Server struct {
 	toolScopes *scopeRegistry
 
 	// overlays is the optional editor-overlay manager. When non-nil,
-	// every `tools/call` is wrapped (via s.addTool) with the
-	// apply/revert middleware in overlay.go so MCP tools see the
-	// caller's editor-buffer content for the duration of the call.
-	// Wired post-construction by SetOverlayManager.
+	// every `tools/call` whose session carries overlay buffers is
+	// wrapped (via s.addTool → wrapToolHandler) with the per-request
+	// shadow-graph middleware that builds an OverlaidView over the
+	// immutable base graph. Wired post-construction by
+	// SetOverlayManager.
 	overlays *daemon.OverlayManager
 
-	// overlayApplyMu serialises overlay-active tool calls so two
-	// in-flight requests can't race on the same overlay path's
-	// evict/re-add pair. Held for the full apply+handler+revert
-	// window; transparent (untaken) when the caller has no overlay.
-	overlayApplyMu sync.Mutex
+	// overlayLayerCache memoises per-session parsed overlay layers
+	// keyed by (sessionID, content-hash sum). Cache hits avoid the
+	// per-request re-parse when an editor pushes the same buffer to a
+	// long sequence of tool calls. Entries are dropped on overlay
+	// session Drop / Push / Delete via overlayCacheInvalidate.
+	overlayLayerCache   sync.Map // map[string]*overlayLayerCacheEntry; key = layerCacheKey
+	overlayLayerBuildMu sync.Mutex
 
 	// registerOverlayToolsOnce gates the overlay MCP tool family
 	// (overlay_register / overlay_push / overlay_list /
-	// overlay_delete / overlay_drop) so a second SetOverlayManager
-	// call doesn't double-register them.
+	// overlay_delete / overlay_drop / compare_with_overlay) so a
+	// second SetOverlayManager call doesn't double-register them.
 	registerOverlayToolsOnce sync.Once
 }
 

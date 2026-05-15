@@ -965,54 +965,14 @@ func (mi *MultiIndexer) GetIndexer(repoPrefix string) *Indexer {
 
 // IndexerForFile routes an absolute path to the per-repo Indexer that
 // owns it. Returns (nil, "") when no tracked repo contains the path.
-// This is the multi-repo counterpart to the single-Indexer overlay
-// path: the MCP overlay middleware calls it to find the right Indexer
-// for each pushed file before invoking IndexFileFromContent.
+// Used by the MCP overlay middleware to find the right Indexer for a
+// pushed file when constructing the per-request overlay layer.
 func (mi *MultiIndexer) IndexerForFile(absPath string) (*Indexer, string) {
 	prefix := mi.RepoForFile(absPath)
 	if prefix == "" {
 		return nil, ""
 	}
 	return mi.GetIndexer(prefix), prefix
-}
-
-// IndexFileFromContent routes an overlay apply through MultiIndexer.
-// Forwards to the per-repo Indexer.IndexFileFromContent; returns nil
-// (a no-op) when no tracked repo owns absPath. The no-op behaviour
-// matches the on-disk path: the overlay middleware silently skips
-// untracked paths instead of failing the whole tool call.
-func (mi *MultiIndexer) IndexFileFromContent(absPath string, src []byte) error {
-	idx, _ := mi.IndexerForFile(absPath)
-	if idx == nil {
-		return nil
-	}
-	return idx.IndexFileFromContent(absPath, src, true)
-}
-
-// EvictFileByAbs routes a deletion overlay through MultiIndexer.
-// Forwards to the per-repo Indexer.EvictFile; no-op when no tracked
-// repo owns the path. The bool return reports whether eviction
-// actually happened — useful to the overlay middleware so it can skip
-// scheduling a restore-from-disk for paths it didn't touch.
-func (mi *MultiIndexer) EvictFileByAbs(absPath string) bool {
-	idx, _ := mi.IndexerForFile(absPath)
-	if idx == nil {
-		return false
-	}
-	idx.EvictFile(absPath)
-	return true
-}
-
-// ReindexFromDisk routes an overlay-revert through MultiIndexer.
-// Forwards to the per-repo Indexer.IndexFile; no-op when no tracked
-// repo owns absPath. Used by the overlay middleware to restore the
-// on-disk view after a tool call completes.
-func (mi *MultiIndexer) ReindexFromDisk(absPath string) error {
-	idx, _ := mi.IndexerForFile(absPath)
-	if idx == nil {
-		return nil
-	}
-	return idx.IndexFile(absPath)
 }
 
 // ResolveFilePath takes a repo-prefixed relative path (e.g. "ade/internal/foo.go")

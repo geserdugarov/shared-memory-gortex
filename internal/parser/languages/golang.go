@@ -177,6 +177,18 @@ type goDeferredCall struct {
 	// server-side handler method.
 	grpcRegService string
 	grpcRegArgNode *sitter.Node
+	// Temporal SDK call attribution. tempKind is "" for non-Temporal
+	// calls; "activity" / "workflow" / "register_activity" /
+	// "register_workflow" identifies which Temporal pattern this call
+	// is. tempName is the activity / workflow name extracted from the
+	// call (function reference or string literal). tempLocal flags
+	// `workflow.ExecuteLocalActivity`. The actual edge target +
+	// `via=temporal.stub` / `via=temporal.register` meta is stamped
+	// in the call post-pass below; the resolver's ResolveTemporalCalls
+	// pass joins stub calls to the registered handler.
+	tempKind  string
+	tempName  string
+	tempLocal bool
 }
 
 type goDeferredTypeRef struct {
@@ -296,15 +308,32 @@ func (e *GoExtractor) Extract(filePath string, src []byte) (*parser.ExtractionRe
 		case m.Captures["callm.expr"] != nil:
 			expr := m.Captures["callm.expr"]
 			method := m.Captures["callm.method"].Text
+			receiver := m.Captures["callm.receiver"].Text
 			dc := goDeferredCall{
 				method:     method,
-				receiver:   m.Captures["callm.receiver"].Text,
+				receiver:   receiver,
 				line:       expr.StartLine + 1,
 				isSelector: true,
 				spawn:      isGoroutineSpawn(expr.Node),
 			}
 			if svc, argNode, ok := grpcRegisterArgNode(expr.Node, method); ok {
 				dc.grpcRegService, dc.grpcRegArgNode = svc, argNode
+			}
+			// Temporal workflow → activity dispatch:
+			// `workflow.ExecuteActivity(ctx, X, ...)` etc.
+			if kind, local, ok := goTemporalDispatchKind(receiver, method); ok {
+				if name := goTemporalDispatchName(expr.Node, src); name != "" {
+					dc.tempKind = kind
+					dc.tempName = name
+					dc.tempLocal = local
+				}
+			} else if kind, _, ok := goTemporalRegisterKind(method); ok {
+				// Temporal worker registration:
+				// `w.RegisterActivity(F)` etc.
+				if name := goTemporalRegisterName(expr.Node, src); name != "" {
+					dc.tempKind = "register_" + kind
+					dc.tempName = name
+				}
 			}
 			calls = append(calls, dc)
 			if name, ok := detectGoLogEvent(expr.Node, method, src); ok {
@@ -555,6 +584,32 @@ func (e *GoExtractor) Extract(filePath string, src []byte) (*parser.ExtractionRe
 				emitGoSpawnEdge(c, callerID, target, filePath, result)
 				continue
 			}
+			// Temporal workflow → activity / child-workflow dispatch:
+			// `workflow.ExecuteActivity(ctx, X, ...)` etc. Emitted to a
+			// dedicated placeholder that the resolver's
+			// ResolveTemporalCalls pass lands on the activity / workflow
+			// function the worker has registered under that name.
+			// Intercepted ahead of normal selector handling so the call
+			// doesn't resolve onto the SDK's generic `ExecuteActivity`
+			// helper instead of the actual activity body.
+			if c.tempKind == "activity" || c.tempKind == "workflow" {
+				target := "unresolved::temporal::" + c.tempKind + "::" + c.tempName
+				meta := map[string]any{
+					"via":           "temporal.stub",
+					"temporal_kind": c.tempKind,
+					"temporal_name": c.tempName,
+				}
+				if c.tempLocal {
+					meta["temporal_local"] = true
+				}
+				result.Edges = append(result.Edges, &graph.Edge{
+					From: callerID, To: target,
+					Kind: graph.EdgeCalls, FilePath: filePath, Line: c.line,
+					Meta: meta,
+				})
+				emitGoSpawnEdge(c, callerID, target, filePath, result)
+				continue
+			}
 		}
 		var target string
 		if !c.isSelector {
@@ -564,6 +619,7 @@ func (e *GoExtractor) Extract(filePath string, src []byte) (*parser.ExtractionRe
 				Kind: graph.EdgeCalls, FilePath: filePath, Line: c.line,
 			}
 			applyGoGRPCRegisterMeta(edge, c, src, tenv)
+			applyGoTemporalRegisterMeta(edge, c)
 			result.Edges = append(result.Edges, edge)
 			emitGoSpawnEdge(c, callerID, target, filePath, result)
 			continue
@@ -575,6 +631,7 @@ func (e *GoExtractor) Extract(filePath string, src []byte) (*parser.ExtractionRe
 				Kind: graph.EdgeCalls, FilePath: filePath, Line: c.line,
 			}
 			applyGoGRPCRegisterMeta(edge, c, src, tenv)
+			applyGoTemporalRegisterMeta(edge, c)
 			result.Edges = append(result.Edges, edge)
 			emitGoSpawnEdge(c, callerID, target, filePath, result)
 			continue
@@ -605,6 +662,7 @@ func (e *GoExtractor) Extract(filePath string, src []byte) (*parser.ExtractionRe
 			}
 		}
 		applyGoGRPCRegisterMeta(edge, c, src, tenv)
+		applyGoTemporalRegisterMeta(edge, c)
 		result.Edges = append(result.Edges, edge)
 		emitGoSpawnEdge(c, callerID, target, filePath, result)
 	}

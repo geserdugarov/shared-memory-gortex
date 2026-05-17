@@ -56,7 +56,7 @@ func Alpha() {}
 	// First upgrade: text side transitions BM25 → Bleve. We don't
 	// care about identity here — just capture the post-upgrade
 	// Bleve pointer so we can compare to the second run.
-	idx.upgradeSearchToBleve()
+	idx.upgradeSearchToBleve(idx.snapshotBleveEntries())
 	firstHybrid, ok := sw.Inner().(*search.HybridBackend)
 	require.True(t, ok, "after first upgrade, inner must be Hybrid(Bleve, Vector)")
 	firstBleve, ok := firstHybrid.TextBackend().(*search.BleveBackend)
@@ -64,7 +64,7 @@ func Alpha() {}
 
 	// Second upgrade must early-return. No new Bleve is built, no
 	// Swap happens.
-	idx.upgradeSearchToBleve()
+	idx.upgradeSearchToBleve(idx.snapshotBleveEntries())
 	secondHybrid, ok := sw.Inner().(*search.HybridBackend)
 	require.True(t, ok, "inner should still be Hybrid after no-op second call")
 	secondBleve, ok := secondHybrid.TextBackend().(*search.BleveBackend)

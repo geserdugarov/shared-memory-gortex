@@ -82,7 +82,7 @@ func Beta() {}
 	// Force the upgrade directly — don't go through the AutoThreshold
 	// check. Under the bug the resulting inner is a raw *BleveBackend.
 	// Under the fix it is a new Hybrid wrapping the same vector.
-	idx.upgradeSearchToBleve()
+	idx.upgradeSearchToBleve(idx.snapshotBleveEntries())
 
 	postHybrid, ok := sw.Inner().(*search.HybridBackend)
 	require.True(t, ok, "post-upgrade inner must still be *HybridBackend")

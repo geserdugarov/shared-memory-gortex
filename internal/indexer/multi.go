@@ -269,6 +269,15 @@ func (mi *MultiIndexer) RunGlobalGraphPasses() {
 			zap.Int("edges", grpcResolved),
 		)
 	}
+	// Temporal stub-call resolution mirrors the gRPC staging — Java
+	// interface→impl propagation needs EdgeImplements already
+	// materialised; cross-repo workflow→activity dispatch then picks
+	// up its parallel cross_repo_calls edge below.
+	if temporalResolved := resolver.ResolveTemporalCalls(mi.graph); temporalResolved > 0 {
+		mi.logger.Info("Temporal stub calls resolved (global)",
+			zap.Int("edges", temporalResolved),
+		)
+	}
 	// Cross-repo edge layer. Runs after InferImplements / InferOverrides
 	// so the implements / extends edges they materialise across repo
 	// boundaries pick up their parallel cross_repo_* edges.

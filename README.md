@@ -615,6 +615,7 @@ contracts {action: "check"}      # find mismatches and orphans
 | **WebSocket** | Event emit/listen patterns | emit() | on() |
 | **Env Vars** | os.Getenv, process.env, .env files | Setenv / .env | Getenv / process.env |
 | **OpenAPI** | Swagger/OpenAPI spec files | Spec paths | (linked to HTTP routes) |
+| **Temporal Workflows** | Go SDK `worker.RegisterActivity` / Java `@ActivityInterface` / `@WorkflowInterface` annotations | Activity / workflow function (carries `temporal_role` Meta) | `workflow.ExecuteActivity` / `ExecuteChildWorkflow` / `newActivityStub` calls |
 
 Contracts are normalized to canonical IDs (e.g., `http::GET::/api/users/{id}`) and matched across repos to detect orphan providers/consumers and mismatches.
 

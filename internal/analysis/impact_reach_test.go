@@ -168,6 +168,17 @@ func TestAnalyzeImpact_FastPathSubMillisecond(t *testing.T) {
 	if testing.Short() {
 		t.Skip("perf gate skipped under -short")
 	}
+	if raceEnabled {
+		// Race instrumentation adds per-memory-op overhead to both the
+		// fast path and the live walk equally, but it compresses the
+		// ratio toward 1.0 — the live walk's BFS is small enough that
+		// race overhead dominates its wall time, while the fast path's
+		// map lookups gain almost no headroom. Under -race the
+		// observed speedup collapses below the 1.3x gate even though
+		// the precomputed index still saves real work; this test
+		// belongs to the non-race build only.
+		t.Skip("perf gate skipped under -race (race instrumentation distorts the ratio)")
+	}
 	g := newFanInChain(1000)
 	reach.BuildIndex(g)
 	seed := "sink"

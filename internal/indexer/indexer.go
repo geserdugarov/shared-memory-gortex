@@ -239,7 +239,36 @@ func (idx *Indexer) shouldIndexForSearch(n *graph.Node) bool {
 // if Bleve construction fails (caller already hit AutoThreshold but the
 // in-memory backend keeps serving correctly, just with worse memory
 // characteristics).
-func (idx *Indexer) upgradeSearchToBleve() {
+// bleveUpgradeEntry is one row of the snapshot the upgrade goroutine
+// works from. Snapshotting (id, name, file, signature) up front in
+// the foreground — before the goroutine starts reading them — keeps
+// the goroutine race-free against subsequent Index calls' Meta-writing
+// passes (reach.BuildIndex, ResolveTemporalCalls, ...).
+type bleveUpgradeEntry struct {
+	id   string
+	name string
+	file string
+	sig  string
+}
+
+// snapshotBleveEntries captures every node currently eligible for the
+// search index plus its `signature` Meta string. Called synchronously
+// from IndexCtx after every Node.Meta mutating pass has returned, so
+// the read of n.Meta happens with no concurrent writer.
+func (idx *Indexer) snapshotBleveEntries() []bleveUpgradeEntry {
+	nodes := idx.graph.AllNodes()
+	out := make([]bleveUpgradeEntry, 0, len(nodes))
+	for _, n := range nodes {
+		if !idx.shouldIndexForSearch(n) {
+			continue
+		}
+		sig, _ := n.Meta["signature"].(string)
+		out = append(out, bleveUpgradeEntry{id: n.ID, name: n.Name, file: n.FilePath, sig: sig})
+	}
+	return out
+}
+
+func (idx *Indexer) upgradeSearchToBleve(snapshot []bleveUpgradeEntry) {
 	// Defensive early-return: if the active text backend is already
 	// Bleve, there is nothing to upgrade. IndexCtx's sync.Once guard
 	// prevents re-entry from the auto-upgrade path, but direct
@@ -282,12 +311,14 @@ func (idx *Indexer) upgradeSearchToBleve() {
 		}
 	}
 
-	for _, n := range idx.graph.AllNodes() {
-		if !idx.shouldIndexForSearch(n) {
-			continue
-		}
-		sig, _ := n.Meta["signature"].(string)
-		blv.Add(n.ID, n.Name, n.FilePath, sig)
+	// Use the foreground snapshot the spawner captured rather than
+	// re-walking idx.graph here: the goroutine outlives the spawning
+	// IndexCtx call, and subsequent Index calls' Meta-writing passes
+	// (reach.BuildIndex, ResolveTemporalCalls, ...) mutate Node.Meta
+	// on the same Node objects. Reading sig from a live n.Meta here
+	// would race with those writes.
+	for _, e := range snapshot {
+		blv.Add(e.id, e.name, e.file, e.sig)
 	}
 
 	// Preserve the vector index if one is wired up. The previous inner
@@ -407,6 +438,15 @@ func (idx *Indexer) RunGlobalGraphPasses() {
 	if grpcResolved := resolver.ResolveGRPCStubCalls(idx.graph); grpcResolved > 0 {
 		idx.logger.Info("gRPC stub calls resolved (global)",
 			zap.Int("edges", grpcResolved),
+		)
+	}
+	// Temporal workflow → activity stub-call resolution. Same ordering
+	// constraints as gRPC: needs InferImplements (Java interface chain)
+	// to have run; runs before DetectCrossRepoEdges so cross-repo
+	// Temporal dispatch gets its parallel cross_repo_calls edge.
+	if temporalResolved := resolver.ResolveTemporalCalls(idx.graph); temporalResolved > 0 {
+		idx.logger.Info("Temporal stub calls resolved (global)",
+			zap.Int("edges", temporalResolved),
 		)
 	}
 	// Cross-repo edge layer. Runs after InferImplements / InferOverrides
@@ -1548,6 +1588,12 @@ func (idx *Indexer) IndexCtx(ctx context.Context, root string) (*IndexResult, er
 					zap.Int("edges", grpcResolved),
 				)
 			}
+			// Temporal stub-call resolution — same staging as gRPC.
+			if temporalResolved := resolver.ResolveTemporalCalls(idx.graph); temporalResolved > 0 {
+				idx.logger.Info("Temporal stub calls resolved",
+					zap.Int("edges", temporalResolved),
+				)
+			}
 			// Reachability index — depth-1/2/3 incoming-reach sets on
 			// every impact seed, stamped into Node.Meta so AnalyzeImpact
 			// answers in O(seeds × reach) map lookups instead of a live
@@ -1582,7 +1628,12 @@ func (idx *Indexer) IndexCtx(ctx context.Context, root string) (*IndexResult, er
 			idx.upgradeSpawnedMu.Lock()
 			idx.upgradeSpawned++
 			idx.upgradeSpawnedMu.Unlock()
-			go idx.upgradeSearchToBleve()
+			// Snapshot upfront so the background goroutine doesn't
+			// read Node.Meta concurrently with subsequent Index
+			// calls' Meta-writing passes (reach.BuildIndex,
+			// ResolveTemporalCalls, ...).
+			snapshot := idx.snapshotBleveEntries()
+			go idx.upgradeSearchToBleve(snapshot)
 		})
 	}
 
@@ -1731,6 +1782,9 @@ func (idx *Indexer) ResolveAll() {
 	// gRPC stub-call resolution depends on InferImplements (its
 	// interface-satisfaction fallback signal) having run first.
 	resolver.ResolveGRPCStubCalls(idx.graph)
+	// Temporal stub-call resolution piggybacks on the same staging —
+	// Java interface→impl propagation depends on EdgeImplements.
+	resolver.ResolveTemporalCalls(idx.graph)
 	// CPG-lite dataflow rewriting must run after the call resolver
 	// has lifted unresolved:: targets; arg_of edges then point at
 	// real function/method nodes whose param nodes can be found,
@@ -2127,6 +2181,8 @@ func (idx *Indexer) IncrementalReindex(root string) (*IndexResult, error) {
 		// dropped a handler or a registration edge, and the handler
 		// index must be rebuilt against the fresh graph.
 		resolver.ResolveGRPCStubCalls(idx.graph)
+		// Temporal stub-call resolution — same re-run rationale.
+		resolver.ResolveTemporalCalls(idx.graph)
 		// Clone detection is not re-run here: each stale file was
 		// re-indexed through IndexFile above, whose resolve pass
 		// already recomputed EdgeSimilarTo against the fresh graph,

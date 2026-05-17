@@ -78,7 +78,7 @@ func TestSnapshotRoundTrip_Contracts(t *testing.T) {
 	}
 
 	g := graph.New()
-	saveSnapshot(g, nil, wire, "v-test", zap.NewNop())
+	saveSnapshot(g, nil, wire, version, zap.NewNop())
 
 	restored := graph.New()
 	result, err := loadSnapshot(restored, zap.NewNop())
@@ -121,7 +121,7 @@ func TestSnapshotRoundTrip_EmptyContractsCompat(t *testing.T) {
 	g := graph.New()
 	g.AddNode(&graph.Node{ID: "a.go::Foo", Name: "Foo", Kind: graph.KindFunction, FilePath: "a.go"})
 
-	saveSnapshot(g, nil, nil, "v-test", zap.NewNop())
+	saveSnapshot(g, nil, nil, version, zap.NewNop())
 
 	restored := graph.New()
 	result, err := loadSnapshot(restored, zap.NewNop())

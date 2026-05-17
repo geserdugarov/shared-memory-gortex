@@ -28,7 +28,7 @@ func TestSnapshotRoundTrip(t *testing.T) {
 	orig.AddNode(&graph.Node{ID: "b.go::Bar", Name: "Bar", Kind: graph.KindMethod, FilePath: "b.go"})
 	orig.AddEdge(&graph.Edge{From: "b.go::Bar", To: "a.go::Foo", Kind: graph.EdgeCalls, FilePath: "b.go", Line: 12})
 
-	saveSnapshot(orig, nil, nil, "v-test", zap.NewNop())
+	saveSnapshot(orig, nil, nil, version, zap.NewNop())
 
 	restored := graph.New()
 	result, err := loadSnapshot(restored, zap.NewNop())
@@ -88,7 +88,7 @@ func TestLoadSnapshot_DropsStaleAbsPathNodes(t *testing.T) {
 		Kind: graph.EdgeCalls,
 	})
 
-	saveSnapshot(orig, nil, nil, "v-test", zap.NewNop())
+	saveSnapshot(orig, nil, nil, version, zap.NewNop())
 
 	restored := graph.New()
 	result, err := loadSnapshot(restored, zap.NewNop())
@@ -135,7 +135,7 @@ func TestSnapshotRoundTrip_NodeMetaWithShape(t *testing.T) {
 		},
 	})
 
-	saveSnapshot(orig, nil, nil, "v-test", zap.NewNop())
+	saveSnapshot(orig, nil, nil, version, zap.NewNop())
 
 	info, err := os.Stat(path)
 	require.NoError(t, err, "snapshot file must exist — encode must not have aborted")
@@ -185,7 +185,7 @@ func TestSnapshotRoundTrip_NodeMetaWithGenericTypes(t *testing.T) {
 		},
 	})
 
-	saveSnapshot(orig, nil, nil, "v-test", zap.NewNop())
+	saveSnapshot(orig, nil, nil, version, zap.NewNop())
 
 	info, err := os.Stat(path)
 	require.NoError(t, err, "snapshot file must exist — encode must not have aborted")
@@ -239,7 +239,7 @@ func TestSnapshotRoundTrip_ContractMetaWithSliceOfMaps(t *testing.T) {
 		},
 	}}
 
-	saveSnapshot(orig, nil, snapContracts, "v-test", zap.NewNop())
+	saveSnapshot(orig, nil, snapContracts, version, zap.NewNop())
 
 	info, err := os.Stat(path)
 	require.NoError(t, err, "snapshot file must exist — encode must not have aborted on []map[string]any")
@@ -269,6 +269,47 @@ func TestLoadSnapshot_MissingFile_NotAnError(t *testing.T) {
 	require.NoError(t, err, "missing snapshot must not surface as an error — first-run path")
 	assert.False(t, result.Loaded, "no snapshot means loaded=false")
 	assert.Equal(t, 0, g.NodeCount())
+}
+
+// Regression: a snapshot written by an older binary must not be loaded
+// silently. Earlier symptoms — methods like (*Node).Inner showing zero
+// callers even though the source has 19 call sites — traced back to the
+// resolver having improved between daemon versions while the persisted
+// edges kept their older (wrong) targets forever. The version field on
+// the snapshot header is what protects us; this test pins that gate.
+func TestLoadSnapshot_BinaryVersionMismatch_Discards(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "older.gob.gz")
+	t.Setenv("GORTEX_DAEMON_SNAPSHOT", path)
+
+	// Write a snapshot stamped with a different binary version.
+	src := graph.New()
+	src.AddNode(&graph.Node{ID: "a.go::Foo", Kind: graph.KindFunction, Name: "Foo", FilePath: "a.go", Language: "go"})
+	require.NoError(t, saveSnapshotTo(src, nil, nil, "0.0.0-from-an-older-daemon", path, zap.NewNop()))
+
+	g := graph.New()
+	result, err := loadSnapshot(g, zap.NewNop())
+	require.NoError(t, err, "version mismatch is not an error — daemon falls back to full re-index")
+	assert.False(t, result.Loaded, "older-binary snapshot must not be loaded into a newer daemon")
+	assert.Equal(t, 0, g.NodeCount(), "graph must remain empty so the warmup path re-indexes from source")
+}
+
+// Round-trip with the current binary's version stamp must succeed —
+// version-gating mustn't break the normal "same-binary" path.
+func TestLoadSnapshot_SameBinaryVersion_Loads(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "same.gob.gz")
+	t.Setenv("GORTEX_DAEMON_SNAPSHOT", path)
+
+	src := graph.New()
+	src.AddNode(&graph.Node{ID: "a.go::Foo", Kind: graph.KindFunction, Name: "Foo", FilePath: "a.go", Language: "go"})
+	require.NoError(t, saveSnapshotTo(src, nil, nil, version, path, zap.NewNop()))
+
+	g := graph.New()
+	result, err := loadSnapshot(g, zap.NewNop())
+	require.NoError(t, err)
+	assert.True(t, result.Loaded)
+	assert.Equal(t, 1, g.NodeCount())
 }
 
 func TestLoadSnapshot_CorruptFile_ReportsError(t *testing.T) {

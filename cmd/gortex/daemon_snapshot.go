@@ -94,8 +94,17 @@ func isStaleAbsPathID(id string) bool {
 type snapshotHeader struct {
 	SchemaVersion int
 	Version       string
-	NodeCount     int
-	EdgeCount     int
+	// BinaryMtimeUnix is the Unix epoch (seconds) of the daemon binary
+	// that wrote this snapshot. Added additively — older snapshots decode
+	// as zero and skip the binary-mtime check entirely. Set on save via
+	// os.Stat(os.Executable()); used on load to discard snapshots written
+	// by a different build of the same `version` string (i.e. every
+	// `go build` rebuild during development). Without this, a buggy
+	// resolver's mis-resolved edges persist across local rebuilds forever
+	// because per-repo ResolveAll only revisits files whose mtime changed.
+	BinaryMtimeUnix int64
+	NodeCount       int
+	EdgeCount       int
 	// RepoCount is the number of snapshotRepo records that follow the
 	// nodes and edges sections. Added additively in the resilience work;
 	// older snapshots decode this as zero (gob skips unknown fields),
@@ -221,12 +230,13 @@ func saveSnapshotTo(g *graph.Graph, repos []snapshotRepo, snapContracts []snapsh
 	edges := g.AllEdges()
 
 	header := snapshotHeader{
-		SchemaVersion: snapshotSchemaVersion,
-		Version:       version,
-		NodeCount:     len(nodes),
-		EdgeCount:     len(edges),
-		RepoCount:     len(repos),
-		ContractCount: len(snapContracts),
+		SchemaVersion:   snapshotSchemaVersion,
+		Version:         version,
+		BinaryMtimeUnix: currentBinaryMtimeUnix(),
+		NodeCount:       len(nodes),
+		EdgeCount:       len(edges),
+		RepoCount:       len(repos),
+		ContractCount:   len(snapContracts),
 	}
 
 	// Helper to clean up after any failure.
@@ -390,6 +400,52 @@ func loadSnapshotFrom(g *graph.Graph, path string, logger *zap.Logger) (snapshot
 		return result, nil
 	}
 
+	// Binary-version gate. The snapshot persists already-resolved edges
+	// (e.g. `runQuery → Node.Inner`). When the resolver changes between
+	// daemon versions — bug fixes, new edge kinds, tighter scope rules —
+	// edges that were correctly resolved by the OLD resolver may now
+	// look stale, and edges that were misresolved by the OLD resolver
+	// will keep their wrong targets forever (per-repo ResolveAll only
+	// rewrites edges whose source file's mtime changed, and most files
+	// stay untouched across daemon restarts). Bumping any resolver
+	// behaviour without bumping snapshotSchemaVersion silently degrades
+	// query quality until the user thinks to wipe ~/.cache/gortex.
+	//
+	// Cheap fix: if the binary that wrote the snapshot has a different
+	// version string than the binary loading it, discard. Cost is one
+	// full re-index per daemon upgrade — measured at ~2 minutes for a
+	// 100k-node workspace, an entirely fair tax for a stale-cache class
+	// of bugs that's otherwise invisible.
+	if header.Version != "" && header.Version != version {
+		logger.Info("snapshot: binary version mismatch, discarding to force a fresh resolve",
+			zap.String("on_disk", header.Version),
+			zap.String("running", version))
+		return result, nil
+	}
+
+	// Same-version rebuild gate. A `go build` of the same `version` string
+	// produces a binary with a newer mtime; if the snapshot was written by
+	// an earlier build, discard. Critical for developer workflow where
+	// resolver/indexer changes ship without a version bump — without this,
+	// every rebuild silently inherits the previous build's potentially
+	// stale or buggy resolutions.
+	//
+	// Legacy snapshots written before this field existed decode as zero;
+	// we treat that as "can't verify, don't trust" and discard exactly
+	// once. The cost is one full re-index for every user upgrading past
+	// this commit, which is the right cost — those users are precisely
+	// the ones carrying stale resolutions from older resolver behaviour.
+	if header.BinaryMtimeUnix == 0 {
+		logger.Info("snapshot: legacy (no binary mtime stamp), discarding once to force a fresh resolve")
+		return result, nil
+	}
+	if mt := currentBinaryMtimeUnix(); mt > 0 && header.BinaryMtimeUnix != mt {
+		logger.Info("snapshot: binary rebuilt since last save, discarding to force a fresh resolve",
+			zap.Int64("snapshot_binary_mtime", header.BinaryMtimeUnix),
+			zap.Int64("running_binary_mtime", mt))
+		return result, nil
+	}
+
 	// Snapshots can carry stale nodes whose IDs begin with an absolute
 	// filesystem path — leftovers from prior-version indexing bugs. Drop
 	// them on load; re-indexing the tracked repos recreates clean
@@ -541,4 +597,30 @@ validate:
 		zap.Int("corrupt_contracts_skipped", corruptContracts))
 	result.Loaded = true
 	return result, nil
+}
+
+// currentBinaryMtimeUnix returns the Unix timestamp (seconds) of the
+// daemon executable's mtime. Used in the snapshot header to invalidate
+// caches across `go build` rebuilds that don't bump the version string.
+// Returns 0 on any error so the load-time check can skip the comparison
+// rather than risk false-positive cache discards.
+func currentBinaryMtimeUnix() int64 {
+	exe, err := os.Executable()
+	if err != nil {
+		return 0
+	}
+	// Follow symlinks — homebrew installs gortex as a symlink to the
+	// real binary and we want the real binary's mtime, not the symlink's.
+	resolved, err := os.Readlink(exe)
+	if err == nil && resolved != "" {
+		if !strings.HasPrefix(resolved, "/") {
+			resolved = exe + "/../" + resolved
+		}
+		exe = resolved
+	}
+	info, err := os.Stat(exe)
+	if err != nil {
+		return 0
+	}
+	return info.ModTime().Unix()
 }

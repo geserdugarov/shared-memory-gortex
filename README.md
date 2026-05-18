@@ -79,7 +79,7 @@ For Homebrew, package managers (`.deb` / `.rpm` / `.apk`), direct binary downloa
 - **Benchmarked** — per-language parsing, query engine, indexer benchmarks
 - **Per-community skills** — `gortex init --skills` (default on) auto-generates SKILL.md per detected community with key files, entry points, cross-community connections, and MCP tool invocations for Claude Code auto-discovery; the same routing table lands in every detected agent's per-repo instructions file
 - **Eval framework** — SWE-bench harness for A/B benchmarking tool effectiveness with Docker-based environments and multi-model support
-- **`gortex eval` CLI** — first-class evaluation harness. Subcommands: `recall` (fixture-driven any-hit R@1/5/20 + MRR per ranker, per-tier breakdown, p50/p95 latency, tokens-returned, optional LLM judge for CQS-style dual-judge scoring), `embedders` (ONNX variant comparison — size + init + embed latency + end-to-end quality across MiniLM variants, BGE, Jina), `swebench` (passthrough), `tokens` (GCX1 wire-format bench). Seed fixture at [`bench/fixtures/retrieval.yaml`](bench/fixtures/retrieval.yaml); published BM25 baseline on Gortex: **R@1 42.3% · R@5 56.4% · R@20 69.9% · exact R@5 95.2%**
+- **`gortex eval` CLI** — first-class evaluation harness. Subcommands: `recall` (fixture-driven any-hit R@1/5/20 + MRR per ranker, per-tier breakdown, p50/p95 latency, tokens-returned, optional LLM judge for CQS-style dual-judge scoring), `embedders` (ONNX variant comparison — size + init + embed latency + end-to-end quality across MiniLM variants, BGE, Jina; `list` subcommand surfaces the next-gen Python-backed model registry — EmbeddingGemma / Qwen3-Embedding-8B / NV-Embed-v2 / potion-code-16m — with availability + install hints), `baselines` (NDCG@10 + latency vs ripgrep / probe / colgrep / grepai / coderankembed / semble; `--smoke` verifies wiring without paying for heavy Python deps), `quality {drift|confidence|replay|tune}` (measurement infra: embedder drift detector + per-query confidence summary + ranker-config replay + rerank weight-tuning suggestion), `swebench` (passthrough), `tokens` (GCX1 wire-format bench). Seed fixture at [`bench/fixtures/retrieval.yaml`](bench/fixtures/retrieval.yaml); published BM25 baseline on Gortex: **R@1 42.3% · R@5 56.4% · R@20 69.9% · exact R@5 95.2%**. Published reproducible benches in [`BENCHMARK.md`](BENCHMARK.md); SWE-bench results template in [`BENCHMARK-SWE.md`](BENCHMARK-SWE.md); methodology in [`docs/04-evaluation/`](docs/04-evaluation/).
 - **Zero dependencies** — everything runs in-process, in memory, no external services
 
 ## Quick Start
@@ -143,7 +143,7 @@ gortex mcp --no-daemon --watch          # explicit embedded mode
 ```bash
 gortex server --index .                  # HTTP/JSON API on :4747 (/v1/*). UI lives at github.com/gortexhq/web.
 gortex savings [--verbose] [--json]      # Today / Last 7 days / All time bar-chart dashboard + $ avoided
-gortex bench <sub>                       # user-facing benchmark suite (recall / tokens / embedders / swebench / all)
+gortex bench <sub>                       # user-facing benchmark suite (recall / tokens / tokens-efficiency / perf / embedders / swebench / all)
 gortex gain [--since 7d]                 # forward-looking per-call USD savings + optional history slice
 gortex version
 ```
@@ -305,9 +305,9 @@ gortex init doctor           Zero-op drift report across all detected agents (hu
 gortex mcp [flags]            Start the MCP stdio server (auto-detects daemon; --no-daemon / --proxy; --server adds HTTP API)
 gortex server [flags]         Start the HTTP/JSON API under /v1/* (--bind, --auth-token, --watch, --cors-origin)
 gortex daemon <subcommand>   start / stop / restart / reload / status / logs / install-service / service-status / uninstall-service / server (multi-server roster)
-gortex eval <subcommand>     Retrieval + token benchmarks — recall, embedders, swebench, tokens (substrate; prefer `gortex bench` for the user-facing surface)
+gortex eval <subcommand>     Retrieval + token benchmarks — recall / embedders / swebench / tokens / baselines / quality (substrate; prefer `gortex bench` for the user-facing surface). `eval embedders list` shows the next-gen model registry; `eval quality {drift|confidence|replay|tune}` runs the measurement-infra analyzers; `eval baselines --against ripgrep,...` runs the NDCG@10 adapter harness
 gortex eval-server [flags]   HTTP server used by the swebench harness
-gortex bench <subcommand>    User-facing benchmark suite — recall / tokens / embedders / swebench / all; `bench tokens` adds a USD-per-model card (per-day + per-month projections); `--out-dir DIR` writes per-run artifacts
+gortex bench <subcommand>    User-facing benchmark suite — recall / tokens / tokens-efficiency / embedders / perf / swebench / all; `bench tokens` adds a USD-per-model card (per-day + per-month projections); `bench perf` runs the reference-repo perf table with budget gates; `bench tokens-efficiency` runs the 3-pipeline vs-ripgrep comparison with recall@k; `--out-dir DIR` writes per-run artifacts
 gortex gain [flags]          Forward-looking per-call USD savings projection from the latest bench tokens output; optional `--since DURATION` cumulative-history slice
 gortex context [flags]       Generate portable context briefing for a task
 gortex savings [flags]       Token-savings dashboard (Today / Last 7 days / All time bars + USD avoided; --verbose, --json, --model, --utc, --reset)

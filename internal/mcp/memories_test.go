@@ -548,3 +548,103 @@ func TestRegisterMemoriesTools_Wired(t *testing.T) {
 	// The handlers themselves are exercised by the tests above; this
 	// stub confirms the manager pointer survives construction.
 }
+
+// check_onboarding_performed — readiness probe for the gortex-onboarding
+// skill. Performed iff every essential kind clears min_per_kind.
+
+func TestCheckOnboardingPerformed_EmptyStore(t *testing.T) {
+	s := newMemoryTestServer(t)
+	res := callMemHandler(t, s.handleCheckOnboardingPerformed, map[string]any{})
+	out := unmarshalMemResult(t, res)
+
+	assert.Equal(t, false, out["performed"])
+	assert.EqualValues(t, 0, out["total_memories"].(float64))
+	missing, _ := out["missing_kinds"].([]any)
+	assert.Len(t, missing, len(defaultEssentialKinds), "every default kind is missing in an empty store")
+}
+
+func TestCheckOnboardingPerformed_AllKindsSatisfied(t *testing.T) {
+	s := newMemoryTestServer(t)
+	for _, kind := range defaultEssentialKinds {
+		_ = callMemHandler(t, s.handleStoreMemory, map[string]any{
+			"body": kind + " memory",
+			"kind": kind,
+		})
+	}
+
+	res := callMemHandler(t, s.handleCheckOnboardingPerformed, map[string]any{})
+	out := unmarshalMemResult(t, res)
+
+	assert.Equal(t, true, out["performed"])
+	missing, _ := out["missing_kinds"].([]any)
+	assert.Empty(t, missing, "no kinds should be missing when each has a memory")
+	counts := out["counts_by_kind"].(map[string]any)
+	for _, k := range defaultEssentialKinds {
+		assert.EqualValues(t, 1, counts[k].(float64), "kind %s count", k)
+	}
+}
+
+func TestCheckOnboardingPerformed_OneKindMissing(t *testing.T) {
+	s := newMemoryTestServer(t)
+	// Only invariant + decision; convention deliberately absent.
+	_ = callMemHandler(t, s.handleStoreMemory, map[string]any{"body": "x", "kind": "invariant"})
+	_ = callMemHandler(t, s.handleStoreMemory, map[string]any{"body": "y", "kind": "decision"})
+
+	res := callMemHandler(t, s.handleCheckOnboardingPerformed, map[string]any{})
+	out := unmarshalMemResult(t, res)
+
+	assert.Equal(t, false, out["performed"])
+	missing, _ := out["missing_kinds"].([]any)
+	require.Len(t, missing, 1)
+	assert.Equal(t, "convention", missing[0].(string))
+}
+
+func TestCheckOnboardingPerformed_CustomKindsAndThresholds(t *testing.T) {
+	s := newMemoryTestServer(t)
+	// Two gotchas, one reference.
+	_ = callMemHandler(t, s.handleStoreMemory, map[string]any{"body": "g1", "kind": "gotcha"})
+	_ = callMemHandler(t, s.handleStoreMemory, map[string]any{"body": "g2", "kind": "gotcha"})
+	_ = callMemHandler(t, s.handleStoreMemory, map[string]any{"body": "r1", "kind": "reference"})
+
+	res := callMemHandler(t, s.handleCheckOnboardingPerformed, map[string]any{
+		"essential_kinds": "gotcha,reference",
+		"min_per_kind":    2,
+	})
+	out := unmarshalMemResult(t, res)
+
+	// Gotcha clears 2; reference is at 1 (< min 2).
+	assert.Equal(t, false, out["performed"])
+	missing, _ := out["missing_kinds"].([]any)
+	require.Len(t, missing, 1)
+	assert.Equal(t, "reference", missing[0].(string))
+}
+
+func TestCheckOnboardingPerformed_MinTotalGate(t *testing.T) {
+	s := newMemoryTestServer(t)
+	// Satisfy all essential kinds, but min_total=10 demands more.
+	for _, k := range defaultEssentialKinds {
+		_ = callMemHandler(t, s.handleStoreMemory, map[string]any{"body": k, "kind": k})
+	}
+
+	res := callMemHandler(t, s.handleCheckOnboardingPerformed, map[string]any{"min_total": 10})
+	out := unmarshalMemResult(t, res)
+	assert.Equal(t, false, out["performed"], "min_total=10 not reached with 3 memories")
+
+	res2 := callMemHandler(t, s.handleCheckOnboardingPerformed, map[string]any{"min_total": 3})
+	out2 := unmarshalMemResult(t, res2)
+	assert.Equal(t, true, out2["performed"], "min_total=3 satisfied by 3 memories")
+}
+
+func TestCheckOnboardingPerformed_EmptyEssentialKinds(t *testing.T) {
+	s := newMemoryTestServer(t)
+	_ = callMemHandler(t, s.handleStoreMemory, map[string]any{"body": "anything"})
+
+	res := callMemHandler(t, s.handleCheckOnboardingPerformed, map[string]any{
+		"essential_kinds": "",
+	})
+	out := unmarshalMemResult(t, res)
+	// No essential kinds → no missing entries; performed gated only by min_total (default 0).
+	assert.Equal(t, true, out["performed"])
+	missing, _ := out["missing_kinds"].([]any)
+	assert.Empty(t, missing)
+}

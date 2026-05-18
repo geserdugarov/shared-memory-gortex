@@ -85,6 +85,17 @@ func (s *Server) registerMemoriesTools() {
 		),
 		s.handleSurfaceMemories,
 	)
+
+	s.addTool(
+		mcp.NewTool("check_onboarding_performed",
+			mcp.WithDescription("Light-weight readiness probe for the gortex-onboarding skill. Returns {performed, total_memories, counts_by_kind, missing_kinds}. `performed` is true iff every essential memory kind has at least `min_per_kind` entries in the session's workspace; `missing_kinds` lists the categories that fall short. Agents call this before deciding to run the onboarding playbook — if performed=false, run the skill and store the durable knowledge as memories."),
+			mcp.WithString("essential_kinds", mcp.Description("Comma-separated kinds that must each have at least `min_per_kind` memories (default: invariant,convention,decision — the three durable-knowledge categories from CLAUDE.md). Pass an empty string to disable kind checking; then `performed` is true iff total_memories >= min_total.")),
+			mcp.WithNumber("min_per_kind", mcp.Description("Minimum memories required per essential kind (default: 1).")),
+			mcp.WithNumber("min_total", mcp.Description("Minimum total memories required (default: 0 — no total threshold).")),
+			mcp.WithString("format", mcp.Description("Output format: json (default), gcx, or toon")),
+		),
+		s.handleCheckOnboardingPerformed,
+	)
 }
 
 // handleStoreMemory — create-or-update entry point. Update mode is
@@ -399,4 +410,67 @@ func requestBoolDefault(req mcp.CallToolRequest, key string, def bool) bool {
 		return def
 	}
 	return req.GetBool(key, def)
+}
+
+// defaultEssentialKinds is the kind list check_onboarding_performed
+// uses when the caller doesn't override it — the three durable
+// knowledge categories CLAUDE.md tells agents to record. Onboarding
+// is "done" when each has at least one anchored memory in the
+// workspace.
+var defaultEssentialKinds = []string{"invariant", "convention", "decision"}
+
+// handleCheckOnboardingPerformed is the onboarding-readiness probe.
+// Returns whether each essential memory kind has min_per_kind
+// memories anchored in the session's workspace, plus the per-kind
+// breakdown so the caller can tell exactly which categories are
+// missing before deciding to run the onboarding playbook.
+func (s *Server) handleCheckOnboardingPerformed(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	if s.memories == nil {
+		return mcp.NewToolResultError("memories storage not initialised"), nil
+	}
+
+	var essentialKinds []string
+	if requestHasArg(req, "essential_kinds") {
+		essentialKinds = splitCSV(req.GetString("essential_kinds", ""))
+	} else {
+		essentialKinds = append(essentialKinds, defaultEssentialKinds...)
+	}
+
+	minPerKind := max(req.GetInt("min_per_kind", 1), 1)
+	minTotal := max(req.GetInt("min_total", 0), 0)
+
+	workspaceID := ""
+	if id, _, bound := s.sessionScope(ctx); bound {
+		workspaceID = id
+	}
+
+	// One Query per kind. The store is in-memory so this is cheap;
+	// the readability win over a single Query+group-by is worth
+	// the extra calls.
+	countsByKind := make(map[string]int, len(essentialKinds))
+	missing := make([]string, 0)
+	for _, k := range essentialKinds {
+		entries := s.memories.Query(MemoryQueryFilter{
+			Kind:        k,
+			WorkspaceID: workspaceID,
+		})
+		countsByKind[k] = len(entries)
+		if len(entries) < minPerKind {
+			missing = append(missing, k)
+		}
+	}
+
+	// total counts every workspace-scoped memory regardless of kind.
+	total := len(s.memories.Query(MemoryQueryFilter{WorkspaceID: workspaceID}))
+
+	performed := len(missing) == 0 && total >= minTotal
+	return s.respondJSONOrTOON(ctx, req, map[string]any{
+		"performed":       performed,
+		"total_memories":  total,
+		"essential_kinds": essentialKinds,
+		"min_per_kind":    minPerKind,
+		"min_total":       minTotal,
+		"counts_by_kind":  countsByKind,
+		"missing_kinds":   missing,
+	})
 }

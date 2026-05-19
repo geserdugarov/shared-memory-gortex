@@ -101,6 +101,34 @@ var Servers = []ServerSpec{
 		MaxParallel: 10,
 	},
 	{
+		// tsgo is the native-Go TypeScript compiler (the
+		// @typescript/native-preview package). Its LSP mode is offered
+		// at a lower precedence than typescript-language-server so the
+		// default routing is unchanged for anyone who has both — a
+		// user opts in by raising its priority in .gortex.yaml.
+		Name:      "tsgo",
+		Command:   "tsgo",
+		Args:      []string{"--lsp", "--stdio"},
+		Languages: []string{"typescript", "javascript"},
+		Extensions: []string{
+			".ts", ".tsx", ".mts", ".cts",
+			".js", ".jsx", ".mjs", ".cjs",
+		},
+		LanguageIDs: map[string]string{
+			".ts":  "typescript",
+			".tsx": "typescriptreact",
+			".mts": "typescript",
+			".cts": "typescript",
+			".js":  "javascript",
+			".jsx": "javascriptreact",
+			".mjs": "javascript",
+			".cjs": "javascript",
+		},
+		Priority:    6,
+		Daemon:      true,
+		MaxParallel: 10,
+	},
+	{
 		Name:       "pyright",
 		Command:    "pyright-langserver",
 		Args:       []string{"--stdio"},
@@ -118,6 +146,24 @@ var Servers = []ServerSpec{
 			{Command: "jedi-language-server"},
 			{Command: "pylsp"},
 		},
+	},
+	{
+		// pyrefly is Meta's Rust-based Python type checker (the Pyre
+		// successor). Offered at a lower precedence than pyright so the
+		// default routing is unchanged for anyone who has both — a user
+		// opts in by raising its priority in .gortex.yaml.
+		Name:       "pyrefly",
+		Command:    "pyrefly",
+		Args:       []string{"lsp"},
+		Languages:  []string{"python"},
+		Extensions: []string{".py", ".pyi"},
+		LanguageIDs: map[string]string{
+			".py":  "python",
+			".pyi": "python",
+		},
+		Priority:    6,
+		Daemon:      true,
+		MaxParallel: 10,
 	},
 	{
 		Name:       "rust-analyzer",

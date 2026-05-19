@@ -135,3 +135,46 @@ func TestExtensionsCoverEverySpec(t *testing.T) {
 		}
 	}
 }
+
+// TestPyreflyAndTsgoSpecs verifies the pyrefly and tsgo LSP servers are
+// registered as first-class specs without disturbing the default
+// Python / TypeScript routing.
+func TestPyreflyAndTsgoSpecs(t *testing.T) {
+	pyrefly := SpecByName("pyrefly")
+	if pyrefly == nil {
+		t.Fatal("pyrefly spec not registered")
+	}
+	if pyrefly.Command != "pyrefly" || len(pyrefly.Args) == 0 {
+		t.Errorf("pyrefly invocation: %s %v", pyrefly.Command, pyrefly.Args)
+	}
+	if len(pyrefly.Languages) == 0 || pyrefly.Languages[0] != "python" {
+		t.Errorf("pyrefly should cover python, got %v", pyrefly.Languages)
+	}
+
+	tsgo := SpecByName("tsgo")
+	if tsgo == nil {
+		t.Fatal("tsgo spec not registered")
+	}
+	if tsgo.Command != "tsgo" || len(tsgo.Args) == 0 {
+		t.Errorf("tsgo invocation: %s %v", tsgo.Command, tsgo.Args)
+	}
+
+	// Default extension routing must be unchanged — the incumbents
+	// register earlier in Servers and keep .py / .ts.
+	if s := SpecForExtension(".py"); s == nil || s.Name != "pyright" {
+		t.Errorf(".py should still route to pyright, got %v", s)
+	}
+	if s := SpecForExtension(".ts"); s == nil || s.Name != "typescript-language-server" {
+		t.Errorf(".ts should still route to typescript-language-server, got %v", s)
+	}
+
+	// Both must be contributed to the default provider list.
+	cfg := semantic.DefaultConfig()
+	have := map[string]bool{}
+	for _, p := range cfg.Providers {
+		have[p.Name] = true
+	}
+	if !have["pyrefly"] || !have["tsgo"] {
+		t.Errorf("pyrefly/tsgo missing from DefaultConfig providers")
+	}
+}

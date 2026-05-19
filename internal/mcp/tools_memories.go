@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
@@ -45,6 +46,7 @@ func (s *Server) registerMemoriesTools() {
 			mcp.WithString("superseded_by", mcp.Description("(Update-only) explicitly mark this memory as superseded by another memory ID — hides it from surface_memories.")),
 			mcp.WithString("id", mcp.Description("Existing memory ID — passing it switches the call from create to update.")),
 			mcp.WithBoolean("no_autolink", mcp.Description("Skip the body→symbol auto-linker.")),
+			mcp.WithString("scope", mcp.Description("Memory scope: workspace (default — per-repo) or global (~/.gortex/memories — shared across every workspace this user touches).")),
 			mcp.WithString("format", mcp.Description("Output format: json (default), gcx, or toon")),
 		),
 		s.handleStoreMemory,
@@ -65,6 +67,7 @@ func (s *Server) registerMemoriesTools() {
 			mcp.WithBoolean("pinned_only", mcp.Description("Return only pinned memories.")),
 			mcp.WithBoolean("include_superseded", mcp.Description("Include superseded memories (default false).")),
 			mcp.WithNumber("limit", mcp.Description("Cap the result set (default: 50).")),
+			mcp.WithString("scope", mcp.Description("Memory scope: workspace (default), global, or both.")),
 			mcp.WithString("format", mcp.Description("Output format: json (default), gcx, or toon")),
 		),
 		s.handleQueryMemories,
@@ -81,10 +84,13 @@ func (s *Server) registerMemoriesTools() {
 			mcp.WithNumber("min_score", mcp.Description("Drop hits below this score (default: 0).")),
 			mcp.WithBoolean("include_superseded", mcp.Description("Include superseded memories (default false).")),
 			mcp.WithBoolean("mark_accessed", mcp.Description("Increment AccessCount + LastAccessed on returned memories (default true).")),
+			mcp.WithString("scope", mcp.Description("Memory scope: workspace (default), global, or both.")),
 			mcp.WithString("format", mcp.Description("Output format: json (default), gcx, or toon")),
 		),
 		s.handleSurfaceMemories,
 	)
+
+	s.registerMemoryHierarchyTools()
 
 	s.addTool(
 		mcp.NewTool("check_onboarding_performed",
@@ -101,7 +107,12 @@ func (s *Server) registerMemoriesTools() {
 // handleStoreMemory — create-or-update entry point. Update mode is
 // selected by passing an existing `id`; everything else is a create.
 func (s *Server) handleStoreMemory(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	if s.memories == nil {
+	scope := strings.TrimSpace(req.GetString("scope", ""))
+	store := s.resolveMemoryStore(scope)
+	if store == nil {
+		if scope == "global" {
+			return mcp.NewToolResultError("global memory store not available (could not resolve ~/.gortex)"), nil
+		}
 		return mcp.NewToolResultError("memories storage not initialised"), nil
 	}
 
@@ -164,7 +175,7 @@ func (s *Server) handleStoreMemory(ctx context.Context, req mcp.CallToolRequest)
 		if !noAutolink && body != "" {
 			patch.AddLinks = autoLinkBody(body, s.graph, sessionWorkspaceIDOrEmpty(s, ctx), defaultAutoLinkOptions())
 		}
-		updated, err := s.memories.Update(id, patch)
+		updated, err := store.Update(id, patch)
 		if err != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("update memory: %v", err)), nil
 		}
@@ -174,11 +185,11 @@ func (s *Server) handleStoreMemory(ctx context.Context, req mcp.CallToolRequest)
 			if oldID == id {
 				continue
 			}
-			if _, ok := s.memories.Get(oldID); !ok {
+			if _, ok := store.Get(oldID); !ok {
 				continue
 			}
 			newID := id
-			_, _ = s.memories.Update(oldID, MemoryPatch{SupersededBy: &newID})
+			_, _ = store.Update(oldID, MemoryPatch{SupersededBy: &newID})
 		}
 		return s.respondJSONOrTOON(ctx, req, memoryEntryToWire(updated))
 	}
@@ -226,7 +237,7 @@ func (s *Server) handleStoreMemory(ctx context.Context, req mcp.CallToolRequest)
 		Pinned:      pinned,
 	}
 
-	newID, err := s.memories.Save(entry)
+	newID, err := store.Save(entry)
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("save memory: %v", err)), nil
 	}
@@ -236,14 +247,14 @@ func (s *Server) handleStoreMemory(ctx context.Context, req mcp.CallToolRequest)
 		if oldID == newID {
 			continue
 		}
-		if _, ok := s.memories.Get(oldID); !ok {
+		if _, ok := store.Get(oldID); !ok {
 			continue
 		}
 		nid := newID
-		_, _ = s.memories.Update(oldID, MemoryPatch{SupersededBy: &nid})
+		_, _ = store.Update(oldID, MemoryPatch{SupersededBy: &nid})
 	}
 
-	saved, _ := s.memories.Get(newID)
+	saved, _ := store.Get(newID)
 	return s.respondJSONOrTOON(ctx, req, memoryEntryToWire(saved))
 }
 
@@ -251,7 +262,9 @@ func (s *Server) handleStoreMemory(ctx context.Context, req mcp.CallToolRequest)
 // workspace boundary: every result lives inside the session's
 // workspace (or carries no workspace when the session is unbound).
 func (s *Server) handleQueryMemories(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	if s.memories == nil {
+	scope := strings.ToLower(strings.TrimSpace(req.GetString("scope", "")))
+	stores := s.resolveMemoryStores(scope)
+	if len(stores) == 0 {
 		return mcp.NewToolResultError("memories storage not initialised"), nil
 	}
 
@@ -280,14 +293,34 @@ func (s *Server) handleQueryMemories(ctx context.Context, req mcp.CallToolReques
 		yes := true
 		filter.Pinned = &yes
 	}
-	if workspaceID, _, bound := s.sessionScope(ctx); bound {
-		filter.WorkspaceID = workspaceID
-	}
 
-	memories := s.memories.Query(filter)
-	wire := make([]map[string]any, 0, len(memories))
-	for _, m := range memories {
-		wire = append(wire, memoryEntryToWire(m))
+	wire := make([]map[string]any, 0)
+	for _, store := range stores {
+		// Per-store WorkspaceID filter: only applies to the workspace
+		// store, not global. Global entries have no WorkspaceID by
+		// construction, so the filter would silently drop them.
+		perStoreFilter := filter
+		if store != s.globalMemories {
+			if workspaceID, _, bound := s.sessionScope(ctx); bound {
+				perStoreFilter.WorkspaceID = workspaceID
+			}
+		} else {
+			perStoreFilter.WorkspaceID = ""
+		}
+		for _, m := range store.Query(perStoreFilter) {
+			row := memoryEntryToWire(m)
+			if store == s.globalMemories {
+				row["scope"] = "global"
+			} else {
+				row["scope"] = "workspace"
+			}
+			wire = append(wire, row)
+		}
+	}
+	// When both stores were consulted, the combined list may exceed
+	// limit; trim at the call boundary so the contract holds.
+	if limit > 0 && len(wire) > limit {
+		wire = wire[:limit]
 	}
 	return s.respondJSONOrTOON(ctx, req, map[string]any{
 		"memories": wire,
@@ -299,7 +332,12 @@ func (s *Server) handleQueryMemories(ctx context.Context, req mcp.CallToolReques
 // working set. Defaults to mark_accessed=true so the access stats
 // stay accurate.
 func (s *Server) handleSurfaceMemories(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	if s.memories == nil {
+	scope := strings.ToLower(strings.TrimSpace(req.GetString("scope", "")))
+	store := s.resolveMemoryStore(scope)
+	if store == nil {
+		if scope == "global" {
+			return mcp.NewToolResultError("global memory store not available"), nil
+		}
 		return mcp.NewToolResultError("memories storage not initialised"), nil
 	}
 
@@ -313,12 +351,17 @@ func (s *Server) handleSurfaceMemories(ctx context.Context, req mcp.CallToolRequ
 		IncludeSuperseded: req.GetBool("include_superseded", false),
 		MarkAccessed:      requestBoolDefault(req, "mark_accessed", true),
 	}
-	if workspaceID, projectID, bound := s.sessionScope(ctx); bound {
-		opts.WorkspaceID = workspaceID
-		opts.ProjectID = projectID
+	// Workspace scoping only applies to the workspace store. Global
+	// entries don't carry a WorkspaceID, so leaving the opts default
+	// is correct.
+	if store != s.globalMemories {
+		if workspaceID, projectID, bound := s.sessionScope(ctx); bound {
+			opts.WorkspaceID = workspaceID
+			opts.ProjectID = projectID
+		}
 	}
 
-	res := s.memories.Surface(opts, func(id string) *graph.Node {
+	res := store.Surface(opts, func(id string) *graph.Node {
 		if s.graph == nil {
 			return nil
 		}
@@ -473,4 +516,164 @@ func (s *Server) handleCheckOnboardingPerformed(ctx context.Context, req mcp.Cal
 		"counts_by_kind":  countsByKind,
 		"missing_kinds":   missing,
 	})
+}
+
+// registerMemoryHierarchyTools wires edit_memory + rename_memory —
+// the two operations that extend the existing memory triplet with
+// scope migration (workspace ↔ global) and in-place body edits
+// (regex or literal find/replace). Closes serena's 6-tool surface
+// gap (we previously had 3 + check_onboarding_performed; now 6).
+func (s *Server) registerMemoryHierarchyTools() {
+	s.addTool(
+		mcp.NewTool("edit_memory",
+			mcp.WithDescription("In-place find/replace inside a memory's body. Use when a memory is mostly right but one detail drifted — beats supersede-and-recreate. Returns the updated entry. mode=regex (default) treats `pattern` as a Go regexp; mode=literal escapes it. Updates UpdatedAt; preserves Importance / Confidence / Pinned / SymbolIDs / FilePaths."),
+			mcp.WithString("id", mcp.Description("Memory ID to edit.")),
+			mcp.WithString("pattern", mcp.Description("Find pattern. Treated as a regexp under mode=regex; as a literal substring under mode=literal.")),
+			mcp.WithString("replacement", mcp.Description("Replacement text. Regex groups (`$1`, `$2`) work under mode=regex.")),
+			mcp.WithString("mode", mcp.Description("regex (default) or literal.")),
+			mcp.WithString("scope", mcp.Description("workspace (default) or global.")),
+			mcp.WithString("format", mcp.Description("Output format: json (default), gcx, or toon")),
+		),
+		s.handleEditMemory,
+	)
+
+	s.addTool(
+		mcp.NewTool("rename_memory",
+			mcp.WithDescription("Move a memory between workspace and global scope. Preserves Body / Title / Kind / Tags / SymbolIDs / FilePaths / Importance / Confidence / Pinned; clears WorkspaceID + ProjectID when promoting to global, otherwise stamps them from the session. Returns the entry as it landed in the new scope. The original entry is deleted on success."),
+			mcp.WithString("id", mcp.Description("Memory ID to move.")),
+			mcp.WithString("to_scope", mcp.Description("Target scope: workspace or global.")),
+			mcp.WithString("from_scope", mcp.Description("Source scope (default: workspace).")),
+			mcp.WithString("format", mcp.Description("Output format: json (default), gcx, or toon")),
+		),
+		s.handleRenameMemory,
+	)
+}
+
+// handleEditMemory applies an in-place find/replace to the memory's
+// body and persists the result. Regex mode is the default — pass
+// mode=literal for a verbatim substring replace.
+func (s *Server) handleEditMemory(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	id, err := req.RequireString("id")
+	if err != nil {
+		return mcp.NewToolResultError("id is required"), nil
+	}
+	pattern, err := req.RequireString("pattern")
+	if err != nil {
+		return mcp.NewToolResultError("pattern is required"), nil
+	}
+	replacement := req.GetString("replacement", "")
+	mode := strings.ToLower(strings.TrimSpace(req.GetString("mode", "regex")))
+	scope := strings.TrimSpace(req.GetString("scope", ""))
+
+	store := s.resolveMemoryStore(scope)
+	if store == nil {
+		return mcp.NewToolResultError("memories storage not initialised"), nil
+	}
+	current, ok := store.Get(id)
+	if !ok {
+		return mcp.NewToolResultError(fmt.Sprintf("memory %q not found in %s scope", id, defaultIfEmpty(scope, "workspace"))), nil
+	}
+
+	var newBody string
+	switch mode {
+	case "literal":
+		newBody = strings.ReplaceAll(current.Body, pattern, replacement)
+	case "regex", "":
+		re, rerr := regexp.Compile(pattern)
+		if rerr != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("invalid regex: %v", rerr)), nil
+		}
+		newBody = re.ReplaceAllString(current.Body, replacement)
+	default:
+		return mcp.NewToolResultError(fmt.Sprintf("unknown mode %q (use regex or literal)", mode)), nil
+	}
+
+	if newBody == current.Body {
+		// No change — return current entry so callers can detect
+		// idempotent application without an extra round-trip.
+		return s.respondJSONOrTOON(ctx, req, memoryEntryToWire(current))
+	}
+
+	updated, uerr := store.Update(id, MemoryPatch{Body: &newBody})
+	if uerr != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("update memory: %v", uerr)), nil
+	}
+	return s.respondJSONOrTOON(ctx, req, memoryEntryToWire(updated))
+}
+
+// handleRenameMemory moves a memory between workspace and global
+// scope. Preserves every field except WorkspaceID / ProjectID which
+// are cleared on the promote-to-global path and re-stamped from
+// the session on the demote-to-workspace path. The original entry
+// is deleted on success.
+func (s *Server) handleRenameMemory(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	id, err := req.RequireString("id")
+	if err != nil {
+		return mcp.NewToolResultError("id is required"), nil
+	}
+	toScope := strings.ToLower(strings.TrimSpace(req.GetString("to_scope", "")))
+	if toScope != "workspace" && toScope != "global" {
+		return mcp.NewToolResultError("to_scope must be 'workspace' or 'global'"), nil
+	}
+	fromScope := strings.ToLower(strings.TrimSpace(req.GetString("from_scope", "workspace")))
+	if fromScope == toScope {
+		return mcp.NewToolResultError("from_scope and to_scope are identical — nothing to do"), nil
+	}
+
+	fromStore := s.resolveMemoryStore(fromScope)
+	toStore := s.resolveMemoryStore(toScope)
+	if fromStore == nil {
+		return mcp.NewToolResultError(fmt.Sprintf("%s memory store not initialised", fromScope)), nil
+	}
+	if toStore == nil {
+		return mcp.NewToolResultError(fmt.Sprintf("%s memory store not initialised", toScope)), nil
+	}
+
+	current, ok := fromStore.Get(id)
+	if !ok {
+		return mcp.NewToolResultError(fmt.Sprintf("memory %q not found in %s scope", id, fromScope)), nil
+	}
+
+	// Build the new entry. Drop the ID so the destination store
+	// generates a fresh one — the move semantically creates a new
+	// memory at the destination and removes the source.
+	moved := current
+	moved.ID = ""
+	switch toScope {
+	case "global":
+		moved.WorkspaceID = ""
+		moved.ProjectID = ""
+		moved.RepoPrefix = ""
+	case "workspace":
+		if workspaceID, projectID, bound := s.sessionScope(ctx); bound {
+			moved.WorkspaceID = workspaceID
+			moved.ProjectID = projectID
+		}
+	}
+
+	newID, serr := toStore.Save(moved)
+	if serr != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("save to %s: %v", toScope, serr)), nil
+	}
+	if derr := fromStore.Delete(id); derr != nil {
+		// Save succeeded but delete failed — leave both copies in
+		// place rather than risk losing the entry. Surface the
+		// inconsistency to the caller.
+		return mcp.NewToolResultError(fmt.Sprintf("saved to %s but could not delete from %s: %v (memory now exists in both scopes)", toScope, fromScope, derr)), nil
+	}
+
+	saved, _ := toStore.Get(newID)
+	wire := memoryEntryToWire(saved)
+	wire["scope"] = toScope
+	wire["previous_id"] = id
+	return s.respondJSONOrTOON(ctx, req, wire)
+}
+
+// defaultIfEmpty returns def when s is the empty string. Tiny helper
+// kept inline because the two-line alternative is everywhere.
+func defaultIfEmpty(s, def string) string {
+	if s == "" {
+		return def
+	}
+	return s
 }

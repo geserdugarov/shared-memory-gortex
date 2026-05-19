@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"math"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -118,6 +120,12 @@ type Server struct {
 	feedback         *feedbackManager
 	notes            *notesManager
 	memories         *memoryManager
+	// globalMemories holds the user-level memory store shared across
+	// every workspace this user touches — lives at ~/.gortex/memories/.
+	// Tools default to the workspace store; `scope:"global"` routes
+	// to this one. Nil when InitMemories was called with the legacy
+	// single-arg surface or when the user-home cannot be resolved.
+	globalMemories *memoryManager
 	combo            *comboManager
 	frecency         *frecencyTracker
 
@@ -741,6 +749,56 @@ func (s *Server) InitNotes(cacheDir, repoPath string) {
 // shares the store.
 func (s *Server) InitMemories(cacheDir, repoPath string) {
 	s.memories = newMemoryManager(cacheDir, repoPath)
+	// Mount the user-level global store at ~/.gortex/memories/.
+	// Failures (no $HOME, unreadable home) leave globalMemories nil;
+	// tools detect that and surface a clear error rather than
+	// silently dropping global writes.
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		s.globalMemories = newMemoryManager(filepath.Join(home, ".gortex", "memories-cache"), "global")
+	}
+}
+
+// resolveMemoryStore picks the right memoryManager for the requested
+// scope. Defaults to the workspace store; "global" returns the
+// user-level store mounted at ~/.gortex/memories-cache/. Unknown
+// scope values fall through to workspace so callers don't have to
+// guard against typos.
+func (s *Server) resolveMemoryStore(scope string) *memoryManager {
+	switch strings.ToLower(strings.TrimSpace(scope)) {
+	case "global":
+		return s.globalMemories
+	default:
+		return s.memories
+	}
+}
+
+// resolveMemoryStores returns every memoryManager that matches the
+// scope argument. `both` returns workspace + global; `workspace`
+// (default) returns just workspace; `global` returns just global.
+// Nil managers are excluded from the result so callers can rely on
+// the slice being non-empty before iterating.
+func (s *Server) resolveMemoryStores(scope string) []*memoryManager {
+	switch strings.ToLower(strings.TrimSpace(scope)) {
+	case "both":
+		stores := []*memoryManager{}
+		if s.memories != nil {
+			stores = append(stores, s.memories)
+		}
+		if s.globalMemories != nil {
+			stores = append(stores, s.globalMemories)
+		}
+		return stores
+	case "global":
+		if s.globalMemories != nil {
+			return []*memoryManager{s.globalMemories}
+		}
+		return nil
+	default:
+		if s.memories != nil {
+			return []*memoryManager{s.memories}
+		}
+		return nil
+	}
 }
 
 // WorkspaceScope returns the default workspace slug filter applied

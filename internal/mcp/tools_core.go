@@ -57,13 +57,14 @@ func (s *Server) isTOON(ctx context.Context, req mcp.CallToolRequest) bool {
 
 // toonNodeRow is a TOON-optimized flat representation of a graph node.
 type toonNodeRow struct {
-	ID        string `toon:"id"`
-	Kind      string `toon:"kind"`
-	Name      string `toon:"name"`
-	FilePath  string `toon:"file_path"`
-	StartLine int    `toon:"start_line"`
-	IsTest    bool   `toon:"is_test"`
-	TestRole  string `toon:"test_role"`
+	ID         string `toon:"id"`
+	Kind       string `toon:"kind"`
+	Name       string `toon:"name"`
+	FilePath   string `toon:"file_path"`
+	StartLine  int    `toon:"start_line"`
+	IsTest     bool   `toon:"is_test"`
+	TestRole   string `toon:"test_role"`
+	TestRunner string `toon:"test_runner,omitempty"`
 }
 
 // toonEdgeRow is a TOON-optimized flat representation of a graph edge.
@@ -101,14 +102,16 @@ func nodesToTOONRows(nodes []*graph.Node) []toonNodeRow {
 		}
 		isTest, _ := n.Meta["is_test"].(bool)
 		testRole, _ := n.Meta["test_role"].(string)
+		testRunner, _ := n.Meta["test_runner"].(string)
 		rows = append(rows, toonNodeRow{
-			ID:        n.ID,
-			Kind:      string(n.Kind),
-			Name:      n.Name,
-			FilePath:  n.FilePath,
-			StartLine: n.StartLine,
-			IsTest:    isTest,
-			TestRole:  testRole,
+			ID:         n.ID,
+			Kind:       string(n.Kind),
+			Name:       n.Name,
+			FilePath:   n.FilePath,
+			StartLine:  n.StartLine,
+			IsTest:     isTest,
+			TestRole:   testRole,
+			TestRunner: testRunner,
 		})
 	}
 	return rows

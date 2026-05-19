@@ -129,6 +129,20 @@ func nodeTestRole(n *graph.Node) string {
 	return r
 }
 
+// nodeTestRunner returns the node's resolved test-runner identifier —
+// "mocha" / "bun-test" / "jest" / "vitest" / "node-test" / "playwright"
+// / "cypress" / "gotest" / "pytest" / "unittest" / "rspec" / "minitest"
+// — or "" when the test-edge pass found no signal. Surfaced on the
+// listing rows alongside is_test / test_role so agents can scope test
+// pickers per runner (e.g. `--testNamePattern` vs `--grep`).
+func nodeTestRunner(n *graph.Node) string {
+	if n == nil || n.Meta == nil {
+		return ""
+	}
+	r, _ := n.Meta["test_runner"].(string)
+	return r
+}
+
 // shouldSkipGraphNode filters File and Import pseudo-nodes the way the
 // legacy compact / TOON formatters do — they add noise without
 // informational value in symbol-oriented outputs.
@@ -154,7 +168,7 @@ func encodeWinnowSymbols(rows []winnowResult, total, limit int, weights map[stri
 	}
 	var buf bytes.Buffer
 	enc := newGCX(&buf, "winnow_symbols",
-		[]string{"id", "kind", "name", "path", "line", "sig", "score", "fan_in", "fan_out", "churn", "community", "contributions", "is_test", "test_role"},
+		[]string{"id", "kind", "name", "path", "line", "sig", "score", "fan_in", "fan_out", "churn", "community", "contributions", "is_test", "test_role", "test_runner"},
 		"total", fmt.Sprintf("%d", total),
 		"truncated", boolString(truncated),
 		"weights", formatAxisWeights(weights),
@@ -181,6 +195,7 @@ func encodeWinnowSymbols(rows []winnowResult, total, limit int, weights map[stri
 			formatContributions(r.Contributions),
 			nodeIsTest(r.Node),
 			nodeTestRole(r.Node),
+			nodeTestRunner(r.Node),
 		); err != nil {
 			return nil, err
 		}
@@ -223,7 +238,7 @@ func encodeSearchSymbols(nodes []*graph.Node, total, limit int) ([]byte, error) 
 	}
 	var buf bytes.Buffer
 	enc := newGCX(&buf, "search_symbols",
-		[]string{"id", "kind", "name", "path", "line", "sig", "is_test", "test_role"},
+		[]string{"id", "kind", "name", "path", "line", "sig", "is_test", "test_role", "test_runner"},
 		"total", fmt.Sprintf("%d", total),
 		"truncated", boolString(truncated),
 	)
@@ -243,6 +258,7 @@ func encodeSearchSymbols(nodes []*graph.Node, total, limit int) ([]byte, error) 
 			nodeSig(n),
 			nodeIsTest(n),
 			nodeTestRole(n),
+			nodeTestRunner(n),
 		); err != nil {
 			return nil, err
 		}
@@ -314,7 +330,7 @@ func encodeBatchSymbols(rows []map[string]any, includeSource bool) ([]byte, erro
 func encodeFindUsages(sg *query.SubGraph) ([]byte, error) {
 	var buf bytes.Buffer
 	enc := newGCX(&buf, "find_usages",
-		[]string{"from", "to", "edge_kind", "origin", "tier", "confidence", "from_name", "from_path", "from_line", "from_is_test", "from_test_role"},
+		[]string{"from", "to", "edge_kind", "origin", "tier", "confidence", "from_name", "from_path", "from_line", "from_is_test", "from_test_role", "from_test_runner"},
 		"edges", fmt.Sprintf("%d", len(sg.Edges)),
 	)
 	nodeIdx := indexNodes(sg.Nodes)
@@ -333,7 +349,7 @@ func encodeFindUsages(sg *query.SubGraph) ([]byte, error) {
 		}
 		if err := enc.WriteRow(
 			e.From, e.To, string(e.Kind), e.Origin, tier, e.Confidence,
-			fname, fpath, fline, nodeIsTest(fn), nodeTestRole(fn),
+			fname, fpath, fline, nodeIsTest(fn), nodeTestRole(fn), nodeTestRunner(fn),
 		); err != nil {
 			return nil, err
 		}
@@ -354,12 +370,12 @@ func encodeSubGraph(tool string, sg *query.SubGraph) ([]byte, error) {
 		nodes = append(nodes, n)
 	}
 	nodeEnc := newGCX(&buf, tool+".nodes",
-		[]string{"id", "kind", "name", "path", "line", "is_test", "test_role"},
+		[]string{"id", "kind", "name", "path", "line", "is_test", "test_role", "test_runner"},
 		"total", fmt.Sprintf("%d", sg.TotalNodes),
 		"truncated", boolString(sg.Truncated),
 	)
 	for _, n := range nodes {
-		if err := nodeEnc.WriteRow(n.ID, string(n.Kind), nodeShort(n), n.FilePath, n.StartLine, nodeIsTest(n), nodeTestRole(n)); err != nil {
+		if err := nodeEnc.WriteRow(n.ID, string(n.Kind), nodeShort(n), n.FilePath, n.StartLine, nodeIsTest(n), nodeTestRole(n), nodeTestRunner(n)); err != nil {
 			return nil, err
 		}
 	}

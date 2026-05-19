@@ -378,6 +378,17 @@ func (e *TypeScriptExtractor) Extract(filePath string, src []byte) (*parser.Extr
 		func(line int) string { return findEnclosingFunc(funcRanges, line) },
 		filePath, "typescript", result)
 
+	// Test-runner classification (Mocha / Bun-test / Jest / Vitest /
+	// node:test / Playwright / Cypress). Stamped on the file node so
+	// the indexer's test-edge pass can propagate it to every is_test
+	// function/method without re-reading the file.
+	if runner := DetectJSTSTestRunner(filePath, src, importPaths); runner != "" {
+		if fileNode.Meta == nil {
+			fileNode.Meta = map[string]any{}
+		}
+		fileNode.Meta["test_runner"] = runner
+	}
+
 	return result, nil
 }
 

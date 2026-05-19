@@ -1,6 +1,9 @@
 package indexer
 
 import (
+	"path/filepath"
+	"strings"
+
 	"github.com/zzet/gortex/internal/graph"
 )
 
@@ -38,7 +41,8 @@ func markTestSymbolsAndEmitEdges(g *graph.Graph) (markedTests int, edgesEmitted 
 	defer g.ResolveMutex().Unlock()
 
 	// Pass 1: classify file nodes, then function/method nodes.
-	testFiles := map[string]bool{} // file node ID → is test file
+	testFiles := map[string]bool{}          // file node ID → is test file
+	fileRunners := map[string]string{}      // file FilePath → test runner
 	for _, n := range g.AllNodes() {
 		if n == nil || n.Kind != graph.KindFile {
 			continue
@@ -49,6 +53,10 @@ func markTestSymbolsAndEmitEdges(g *graph.Graph) (markedTests int, edgesEmitted 
 				n.Meta = map[string]any{}
 			}
 			n.Meta["is_test_file"] = true
+			if runner := detectTestRunnerForFile(g, n); runner != "" {
+				n.Meta["test_runner"] = runner
+				fileRunners[n.FilePath] = runner
+			}
 		}
 	}
 
@@ -78,6 +86,9 @@ func markTestSymbolsAndEmitEdges(g *graph.Graph) (markedTests int, edgesEmitted 
 		}
 		n.Meta["is_test"] = true
 		n.Meta["test_role"] = role
+		if runner := fileRunners[n.FilePath]; runner != "" {
+			n.Meta["test_runner"] = runner
+		}
 		markedTests++
 	}
 
@@ -136,4 +147,127 @@ func isTestNode(n *graph.Node) bool {
 	}
 	v, _ := n.Meta["is_test"].(bool)
 	return v
+}
+
+// detectTestRunnerForFile resolves the runner identifier for a test file
+// node by consulting three signals, in priority order:
+//
+//  1. The file node's own Meta["test_runner"] — stamped by the JS / TS
+//     extractors at parse time using DetectJSTSTestRunner. This is the
+//     strongest signal because it has the file bytes to disambiguate
+//     Mocha-TDD `suite(` from BDD `describe`.
+//
+//  2. Outgoing EdgeImports targets — the import path is preserved in
+//     the target ID (e.g. `unresolved::import::pytest`) until the
+//     resolver promotes the edge. Used as the primary signal for
+//     languages where the parser does not run the JS / TS classifier
+//     (Python: pytest vs unittest; Ruby: rspec vs minitest).
+//
+//  3. Language-level defaults that hold regardless of imports:
+//     - Go always uses `gotest` — `go test` is the only runner.
+//     - Python defaults to `pytest` (auto-discovery picks up unittest
+//       test cases too; rare files that import only `unittest` are
+//       caught by step 2).
+//     - Ruby falls back to `rspec` for `_spec.rb` and `minitest` for
+//       `_test.rb`.
+//
+// Returns "" when no signal applies; the caller leaves test_runner
+// unset rather than guessing.
+func detectTestRunnerForFile(g *graph.Graph, fileNode *graph.Node) string {
+	if fileNode == nil {
+		return ""
+	}
+	// 1) Parser-stamped runner (JS / TS).
+	if fileNode.Meta != nil {
+		if v, ok := fileNode.Meta["test_runner"].(string); ok && v != "" {
+			return v
+		}
+	}
+	// 2) Import-edge signal.
+	if runner := detectRunnerFromImportEdges(g, fileNode); runner != "" {
+		return runner
+	}
+	// 3) Language-level defaults.
+	switch fileNode.Language {
+	case "go":
+		return "gotest"
+	case "python":
+		return "pytest"
+	case "ruby":
+		base := strings.ToLower(filepath.Base(fileNode.FilePath))
+		stem := strings.TrimSuffix(base, filepath.Ext(base))
+		switch {
+		case strings.HasSuffix(stem, "_spec"):
+			return "rspec"
+		case strings.HasSuffix(stem, "_test"):
+			return "minitest"
+		}
+	}
+	return ""
+}
+
+// detectRunnerFromImportEdges scans the outgoing EdgeImports of a test
+// file node and returns a runner ID inferred from import paths. The
+// import target ID format `unresolved::import::<path>` is preserved by
+// the extractors until the resolver promotes the edge, which never
+// happens for third-party / built-in modules — so this signal stays
+// valid for the runner identifiers we care about. Supports JS / TS
+// (mirrors DetectJSTSTestRunner so files compiled by a non-JS / TS
+// extractor still classify correctly), Python (pytest / unittest),
+// and Ruby (rspec / minitest).
+func detectRunnerFromImportEdges(g *graph.Graph, fileNode *graph.Node) string {
+	const prefix = "unresolved::import::"
+	for _, e := range g.GetOutEdges(fileNode.ID) {
+		if e == nil || e.Kind != graph.EdgeImports {
+			continue
+		}
+		path := e.To
+		if strings.HasPrefix(path, prefix) {
+			path = strings.TrimPrefix(path, prefix)
+		}
+		path = strings.Trim(path, "\"'`")
+		switch fileNode.Language {
+		case "javascript", "typescript", "tsx", "jsx":
+			switch {
+			case path == "bun:test":
+				return "bun-test"
+			case path == "vitest" || strings.HasPrefix(path, "vitest/"):
+				return "vitest"
+			case path == "@playwright/test" || strings.HasPrefix(path, "@playwright/test/"):
+				return "playwright"
+			case path == "cypress" || strings.HasPrefix(path, "cypress/"):
+				return "cypress"
+			case path == "node:test" || strings.HasPrefix(path, "node:test/"):
+				return "node-test"
+			case path == "@jest/globals" || strings.HasPrefix(path, "@jest/globals/"),
+				path == "jest" || strings.HasPrefix(path, "jest/"),
+				path == "jest-mock", path == "ts-jest", path == "babel-jest",
+				path == "@types/jest":
+				return "jest"
+			case path == "mocha" || strings.HasPrefix(path, "mocha/"),
+				path == "@types/mocha", path == "mochawesome":
+				return "mocha"
+			}
+		case "python":
+			switch {
+			case path == "pytest" || strings.HasPrefix(path, "pytest."),
+				path == "pytest_asyncio" || path == "_pytest" || strings.HasPrefix(path, "_pytest."):
+				return "pytest"
+			case path == "unittest" || strings.HasPrefix(path, "unittest."):
+				return "unittest"
+			}
+		case "ruby":
+			switch {
+			case path == "rspec" || strings.HasPrefix(path, "rspec/"),
+				path == "rspec-core", path == "rspec/core":
+				return "rspec"
+			case path == "minitest" || strings.HasPrefix(path, "minitest/"),
+				path == "minitest/autorun":
+				return "minitest"
+			case path == "test/unit":
+				return "test-unit"
+			}
+		}
+	}
+	return ""
 }

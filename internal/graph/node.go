@@ -231,6 +231,9 @@ func (n *Node) Brief() map[string]any {
 	if r, ok := n.Meta["test_role"].(string); ok && r != "" {
 		b["test_role"] = r
 	}
+	if r, ok := n.Meta["test_runner"].(string); ok && r != "" {
+		b["test_runner"] = r
+	}
 	if v, ok := n.Meta["is_test_file"].(bool); ok && v {
 		b["is_test_file"] = true
 	}

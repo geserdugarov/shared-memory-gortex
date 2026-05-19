@@ -37,7 +37,7 @@ func TestEncodeSearchSymbols_HeaderAndRows(t *testing.T) {
 	h, err := dec.Header()
 	require.NoError(t, err)
 	require.Equal(t, "search_symbols", h.Tool)
-	require.Equal(t, []string{"id", "kind", "name", "path", "line", "sig", "is_test", "test_role"}, h.Fields)
+	require.Equal(t, []string{"id", "kind", "name", "path", "line", "sig", "is_test", "test_role", "test_runner"}, h.Fields)
 	require.Equal(t, "2", h.Meta["total"])
 	require.Equal(t, "false", h.Meta["truncated"])
 

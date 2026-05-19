@@ -13,6 +13,7 @@ import (
 
 	"go.uber.org/zap"
 
+	"github.com/zzet/gortex/internal/astquery"
 	"github.com/zzet/gortex/internal/config"
 	"github.com/zzet/gortex/internal/contracts"
 	"github.com/zzet/gortex/internal/daemon"
@@ -163,6 +164,24 @@ func buildDaemonState(logger *zap.Logger) (*daemonState, error) {
 	cfg, err := config.Load(cfgFile)
 	if err != nil {
 		return nil, fmt.Errorf("load config: %w", err)
+	}
+
+	// Load user-defined domain-extractor rules — TOML files of
+	// tree-sitter patterns surfaced through `analyze kind=domain`.
+	for _, pattern := range cfg.RuleFiles {
+		matches, _ := filepath.Glob(pattern)
+		if len(matches) == 0 {
+			matches = []string{pattern}
+		}
+		for _, rp := range matches {
+			if n, lerr := astquery.LoadUserRulesFile(rp); lerr != nil {
+				logger.Warn("daemon: failed to load domain rule file",
+					zap.String("file", rp), zap.Error(lerr))
+			} else if n > 0 {
+				logger.Info("daemon: loaded domain-extractor rules",
+					zap.String("file", rp), zap.Int("rules", n))
+			}
+		}
 	}
 
 	g := graph.New()

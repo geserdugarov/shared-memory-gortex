@@ -213,6 +213,13 @@ type Config struct {
 	// re-include something an outer layer excluded.
 	Exclude []string `mapstructure:"exclude" yaml:"exclude,omitempty"`
 
+	// RuleFiles are paths (or globs) to TOML files of user-defined
+	// domain-extractor rules. Each rule is a tree-sitter pattern that
+	// becomes a registered detector surfaced through `analyze
+	// kind=domain` — the pluggable way to extract HTTP routes, CLI
+	// commands, feature flags, i18n keys, event-bus topics, etc.
+	RuleFiles []string `mapstructure:"rule_files" yaml:"rule_files,omitempty"`
+
 	// RespectGitignore controls whether the repo's `.gitignore` file is
 	// read and its patterns added to the effective exclude list. Default
 	// is true (respect .gitignore); set `respect_gitignore: false` in

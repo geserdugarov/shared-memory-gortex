@@ -23,6 +23,7 @@ import (
 	"github.com/zzet/gortex/internal/config"
 	"github.com/zzet/gortex/internal/contracts"
 	"github.com/zzet/gortex/internal/embedding"
+	"github.com/zzet/gortex/internal/entrypoints"
 	"github.com/zzet/gortex/internal/excludes"
 	"github.com/zzet/gortex/internal/fixtures"
 	"github.com/zzet/gortex/internal/graph"
@@ -805,6 +806,10 @@ func (idx *Indexer) applyCoverageDomains(relPath, lang string, src []byte, resul
 			result.Edges = append(result.Edges, extra...)
 		}
 	}
+	// Framework entry points (Alembic migrations / Next.js pages /
+	// ASP.NET host files): symbols reachable only from a runtime.
+	// Stamped so dead-code analysis treats them as live roots.
+	entrypoints.Detect(relPath, lang, result.Nodes)
 	if !idx.config.Coverage.IsEnabled("function_shape") {
 		stripFunctionShape(result)
 	}

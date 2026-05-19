@@ -195,6 +195,16 @@ func incomingUsageKinds(k graph.NodeKind) []graph.EdgeKind {
 	}
 }
 
+// isEntryPointNode reports whether n was stamped as a framework entry
+// point (Alembic / Next.js / ASP.NET) by the entrypoints detector.
+func isEntryPointNode(n *graph.Node) bool {
+	if n == nil || n.Meta == nil {
+		return false
+	}
+	v, _ := n.Meta["entry_point"].(bool)
+	return v
+}
+
 // FindDeadCode returns all symbols with zero incoming calls or references,
 // excluding entry points, test functions, exported symbols, and user-excluded patterns.
 // By default, variables are excluded (see FindDeadCodeOptions for rationale).
@@ -225,12 +235,28 @@ func FindDeadCode(g *graph.Graph, processes *ProcessResult, excludePatterns []st
 		}
 	}
 
+	// Files holding a framework entry point (Alembic migrations,
+	// Next.js pages, ASP.NET host files) — every symbol inside is
+	// reachable from a runtime, not application-dead.
+	entryPointFiles := make(map[string]bool)
+	for _, n := range nodes {
+		if n.Kind == graph.KindFile && isEntryPointNode(n) {
+			entryPointFiles[n.FilePath] = true
+		}
+	}
+
 	var result []DeadCodeEntry
 	for _, n := range nodes {
 		// Skip kinds the analyzer never reports — structural,
 		// extracted metadata, infra, function-shape, and value-only
 		// nodes. See neverDeadCodeKinds for the full list and why.
 		if neverDeadCodeKinds[n.Kind] {
+			continue
+		}
+
+		// Framework entry points, and everything in an entry-point
+		// file, are invoked by a runtime — never dead.
+		if isEntryPointNode(n) || entryPointFiles[n.FilePath] {
 			continue
 		}
 

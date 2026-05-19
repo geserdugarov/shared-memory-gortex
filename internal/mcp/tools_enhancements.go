@@ -777,6 +777,10 @@ func (s *Server) handleAnalyze(ctx context.Context, req mcp.CallToolRequest) (*m
 		return s.handleAnalyzeRole(ctx, req)
 	case "constructors_missing_fields":
 		return s.handleAnalyzeConstructorsMissingFields(ctx, req)
+	case "clusters":
+		return s.handleAnalyzeClusters(ctx, req)
+	case "concepts":
+		return s.handleAnalyzeConcepts(ctx, req)
 	default:
 		return mcp.NewToolResultError("unknown analyze kind: " + kind + " (expected: dead_code, hotspots, cycles, would_create_cycle, todos, blame, coverage, stale_code, ownership, coverage_gaps, stale_flags, releases, cgo_users, wasm_users, orphan_tables, unreferenced_tables, coverage_summary, channel_ops, goroutine_spawns, field_writers, race_writes, unclosed_channels, unsafe_patterns, health_score, annotation_users, config_readers, event_emitters, pubsub, string_emitters, error_surface, log_events, sql_rebuild, external_calls, routes, models, components, k8s_resources, images, kustomize, cross_repo, dbt_models)"), nil
 	}

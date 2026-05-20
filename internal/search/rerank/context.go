@@ -43,6 +43,12 @@ type Context struct {
 	// Node.Meta["last_authored"]. Returning 0 means "no churn data".
 	ChurnOf func(nodeID string) int
 
+	// CoChangeOf returns, for a file path, the set of file paths that
+	// co-change with it mapped to an association score in [0, 1].
+	// Source: the EdgeCoChange enrichment, exposed by the MCP server.
+	// When nil the co-change signal sits at 0.
+	CoChangeOf func(filePath string) map[string]float64
+
 	// FeedbackOf returns a per-symbol "useful to past tasks" score in
 	// [-1, 1] (the same shape as feedbackManager.GetSymbolScore).
 	// When nil the feedback component sits at 0.

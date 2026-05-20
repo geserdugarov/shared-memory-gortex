@@ -100,6 +100,19 @@ type Server struct {
 	processes      *analysis.ProcessResult
 	analysisMu     sync.RWMutex
 
+	// cochange caches the git-history co-change graph. cochangeByFile
+	// maps a file path to its co-changing file paths and association
+	// scores (0..1); cochangeCount holds the matching commit-overlap
+	// counts. Lazily populated once per daemon lifetime by
+	// ensureCoChange — mining git log and materialising EdgeCoChange
+	// edges. The find_co_changing_symbols tool reads both maps; the
+	// search rerank pipeline consumes cochangeByFile as the co_change
+	// signal via buildRerankContext.
+	cochangeOnce   sync.Once
+	cochangeMu     sync.RWMutex
+	cochangeByFile map[string]map[string]float64
+	cochangeCount  map[string]map[string]int
+
 	// session / symHistory / tokenStats are the shared-default per-client
 	// state for the embedded stdio path (one implicit client per process).
 	// Tool handlers reach per-session activity via sessionFor(ctx); that
@@ -130,8 +143,8 @@ type Server struct {
 	// .gortex/notebook/<id>.md files committed alongside the repo.
 	// Nil until InitNotebook fires; tools surface a clear error.
 	notebook *notebookManager
-	combo            *comboManager
-	frecency         *frecencyTracker
+	combo    *comboManager
+	frecency *frecencyTracker
 
 	// diagBroadcaster forwards LSP `publishDiagnostics` payloads to
 	// MCP clients as `notifications/diagnostics`. Lazy-initialised by
@@ -679,6 +692,7 @@ func NewServer(engine *query.Engine, g *graph.Graph, idx *indexer.Indexer, watch
 	s.registerGenerateSkillTool()
 	s.registerInspectionsTools()
 	s.registerChurnRateTool()
+	s.registerCoChangeTool()
 	s.registerCouplingMetricsTool()
 	s.registerExtractionCandidatesTool()
 	s.registerCheckReferencesTool()

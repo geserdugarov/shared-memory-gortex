@@ -58,5 +58,12 @@ func (s *Server) buildRerankContext(ctx context.Context, query string) *rerank.C
 		}
 	}
 
+	// Co-change feeds the rerank pipeline once the git-history mine
+	// has run (lazily, on the first find_co_changing_symbols call, or
+	// from an enriched snapshot). Until then the signal sits at 0.
+	if s.hasCoChangeData() {
+		rctx.CoChangeOf = s.coChangeScores
+	}
+
 	return rctx
 }

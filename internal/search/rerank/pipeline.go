@@ -162,6 +162,7 @@ func DefaultSignals() []Signal {
 		FanInSignal{},
 		FanOutSignal{},
 		ChurnSignal{},
+		CoChangeSignal{},
 		CommunitySignal{},
 		MinHashSignal{},
 		APISignatureSignal{},
@@ -194,6 +195,7 @@ func DefaultWeights() map[string]float64 {
 		SignalFanIn:          0.60,
 		SignalFanOut:         0.20,
 		SignalChurn:          0.30,
+		SignalCoChange:       0.25,
 		SignalCommunity:      0.30,
 		SignalMinHash:        0.30,
 		SignalAPISignature:   0.45,
@@ -214,6 +216,7 @@ const (
 	SignalFanIn          = "fan_in"
 	SignalFanOut         = "fan_out"
 	SignalChurn          = "churn"
+	SignalCoChange       = "co_change"
 	SignalCommunity      = "community"
 	SignalMinHash        = "minhash"
 	SignalAPISignature   = "api_signature"
@@ -234,6 +237,7 @@ func AllSignalNames() []string {
 		SignalFanIn,
 		SignalFanOut,
 		SignalChurn,
+		SignalCoChange,
 		SignalCommunity,
 		SignalMinHash,
 		SignalAPISignature,

@@ -8,6 +8,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/zzet/gortex/internal/blame"
+	"github.com/zzet/gortex/internal/cochange"
 	"github.com/zzet/gortex/internal/config"
 	"github.com/zzet/gortex/internal/coverage"
 	"github.com/zzet/gortex/internal/graph"
@@ -33,10 +34,12 @@ var (
 	enrichBlameSnapshot    string
 	enrichCoverageSnapshot string
 	enrichReleasesSnapshot string
+	enrichCochangeSnapshot string
 
 	enrichAllSnapshot string
 	enrichAllBlame    bool
 	enrichAllReleases bool
+	enrichAllCochange bool
 	enrichAllProfile  string
 )
 
@@ -59,6 +62,13 @@ var enrichReleasesCmd = &cobra.Command{
 	Short: "Stamp meta.added_in on every file from git tag history",
 	Args:  cobra.MaximumNArgs(1),
 	RunE:  runEnrichReleases,
+}
+
+var enrichCochangeCmd = &cobra.Command{
+	Use:   "cochange [path]",
+	Short: "Add co_change edges between files that git history shows change together",
+	Args:  cobra.MaximumNArgs(1),
+	RunE:  runEnrichCochange,
 }
 
 var enrichAllCmd = &cobra.Command{
@@ -84,17 +94,22 @@ func init() {
 		"write the enriched graph as a gob.gz snapshot to this path")
 	enrichReleasesCmd.Flags().StringVar(&enrichReleasesSnapshot, "snapshot", "",
 		"write the enriched graph as a gob.gz snapshot to this path")
+	enrichCochangeCmd.Flags().StringVar(&enrichCochangeSnapshot, "snapshot", "",
+		"write the enriched graph as a gob.gz snapshot to this path")
 	enrichAllCmd.Flags().StringVar(&enrichAllSnapshot, "snapshot", "",
 		"write the enriched graph as a gob.gz snapshot to this path")
 	enrichAllCmd.Flags().BoolVar(&enrichAllBlame, "blame", true,
 		"run blame enrichment (default: on)")
 	enrichAllCmd.Flags().BoolVar(&enrichAllReleases, "releases", true,
 		"run releases enrichment (default: on)")
+	enrichAllCmd.Flags().BoolVar(&enrichAllCochange, "cochange", true,
+		"run co-change enrichment (default: on)")
 	enrichAllCmd.Flags().StringVar(&enrichAllProfile, "coverage", "",
 		"path to a Go cover.out profile — coverage enrichment is skipped when empty")
 	enrichCmd.AddCommand(enrichBlameCmd)
 	enrichCmd.AddCommand(enrichCoverageCmd)
 	enrichCmd.AddCommand(enrichReleasesCmd)
+	enrichCmd.AddCommand(enrichCochangeCmd)
 	enrichCmd.AddCommand(enrichAllCmd)
 	rootCmd.AddCommand(enrichCmd)
 }
@@ -147,6 +162,17 @@ func runEnrichAll(cmd *cobra.Command, args []string) error {
 		sp.Set("", fmt.Sprintf("%d files stamped", count))
 		sp.Done()
 		result["releases_enriched"] = count
+	}
+	if enrichAllCochange {
+		sp := newCLISpinner(cmd, "Mining co-change")
+		count, err := cochange.EnrichGraph(g, idx.RootPath(), "")
+		if err != nil {
+			sp.Fail(err)
+			return fmt.Errorf("cochange: %w", err)
+		}
+		sp.Set("", fmt.Sprintf("%d edges added", count))
+		sp.Done()
+		result["cochange_edges"] = count
 	}
 	if enrichAllProfile != "" {
 		sp := newCLISpinner(cmd, "Stamping coverage")
@@ -214,6 +240,51 @@ func runEnrichReleases(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("write snapshot %s: %w", enrichReleasesSnapshot, err)
 		}
 		result["snapshot"] = enrichReleasesSnapshot
+	}
+	return printEnrichResult(result)
+}
+
+func runEnrichCochange(cmd *cobra.Command, args []string) error {
+	logger := newLogger()
+	defer func() { _ = logger.Sync() }()
+
+	path := "."
+	if len(args) >= 1 {
+		path = args[0]
+	}
+
+	cfg, err := config.Load(cfgFile)
+	if err != nil {
+		return err
+	}
+
+	g := graph.New()
+	reg := parser.NewRegistry()
+	languages.RegisterAll(reg)
+	idx := indexer.New(g, reg, cfg.Index, loggerForSpinner(cmd, logger))
+
+	if err := indexWithSpinner(cmd, idx, path); err != nil {
+		return err
+	}
+
+	sp := newCLISpinner(cmd, "Mining co-change")
+	count, err := cochange.EnrichGraph(g, idx.RootPath(), "")
+	if err != nil {
+		sp.Fail(err)
+		return fmt.Errorf("cochange: %w", err)
+	}
+	sp.Set("", fmt.Sprintf("%d edges added", count))
+	sp.Done()
+
+	result := map[string]any{
+		"enriched": count,
+		"root":     idx.RootPath(),
+	}
+	if enrichCochangeSnapshot != "" {
+		if err := saveSnapshotTo(g, nil, nil, "gortex-enrich-cochange", enrichCochangeSnapshot, logger); err != nil {
+			return fmt.Errorf("write snapshot %s: %w", enrichCochangeSnapshot, err)
+		}
+		result["snapshot"] = enrichCochangeSnapshot
 	}
 	return printEnrichResult(result)
 }

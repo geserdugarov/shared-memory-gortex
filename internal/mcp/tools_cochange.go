@@ -1,0 +1,220 @@
+package mcp
+
+import (
+	"context"
+	"sort"
+	"strings"
+
+	"github.com/mark3labs/mcp-go/mcp"
+	"github.com/zzet/gortex/internal/cochange"
+	"github.com/zzet/gortex/internal/graph"
+)
+
+// registerCoChangeTool wires find_co_changing_symbols — the MCP
+// surface over the git-history co-change graph.
+func (s *Server) registerCoChangeTool() {
+	s.addTool(
+		mcp.NewTool("find_co_changing_symbols",
+			mcp.WithDescription("Files (and their symbols) that change together with a target across git history — \"logical coupling\" the import graph cannot see: a handler and its test, a struct and the serializer that mirrors it, a schema and its migration are coupled even when neither imports the other. Mines `git log` for files co-occurring in a commit, weighted by a cosine association score over per-file commit counts. Pass either symbol_id or file_path. Returns co-changing files ranked by score with {file, score, count, symbols}. The same signal also materialises EdgeCoChange graph edges and feeds search ranking as the co_change rerank signal."),
+			mcp.WithString("symbol_id", mcp.Description("Symbol node ID — resolved to its defining file. One of symbol_id / file_path is required.")),
+			mcp.WithString("file_path", mcp.Description("File path to analyse directly. One of symbol_id / file_path is required.")),
+			mcp.WithNumber("limit", mcp.Description("Cap the number of co-changing files returned (default: 20).")),
+			mcp.WithNumber("min_score", mcp.Description("Drop co-change relationships scoring below this threshold, 0..1 (default: 0).")),
+			mcp.WithString("format", mcp.Description("Output format: json (default), gcx, or toon")),
+		),
+		s.handleFindCoChangingSymbols,
+	)
+}
+
+type coChangeRow struct {
+	File    string   `json:"file"`
+	Score   float64  `json:"score"`
+	Count   int      `json:"count"`
+	Symbols []string `json:"symbols,omitempty"`
+}
+
+func (s *Server) handleFindCoChangingSymbols(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	symbolID := strings.TrimSpace(req.GetString("symbol_id", ""))
+	filePath := strings.TrimSpace(req.GetString("file_path", ""))
+	limit := max(req.GetInt("limit", 20), 1)
+	minScore := 0.0
+	if v, ok := req.GetArguments()["min_score"].(float64); ok {
+		minScore = v
+	}
+
+	var targetFile string
+	switch {
+	case symbolID != "":
+		n := s.graph.GetNode(symbolID)
+		if n == nil {
+			return mcp.NewToolResultError("symbol not found: " + symbolID), nil
+		}
+		targetFile = n.FilePath
+	case filePath != "":
+		targetFile = filePath
+	default:
+		return mcp.NewToolResultError("one of symbol_id or file_path is required"), nil
+	}
+	if targetFile == "" {
+		return mcp.NewToolResultError("target symbol has no file path"), nil
+	}
+
+	s.ensureCoChange()
+	scores := s.coChangeScores(targetFile)
+	counts := s.coChangeCounts(targetFile)
+
+	rows := make([]coChangeRow, 0, len(scores))
+	for file, score := range scores {
+		if score < minScore {
+			continue
+		}
+		rows = append(rows, coChangeRow{
+			File:    file,
+			Score:   roundScore(score),
+			Count:   counts[file],
+			Symbols: s.symbolNamesInFile(file),
+		})
+	}
+	sort.Slice(rows, func(i, j int) bool {
+		if rows[i].Score != rows[j].Score {
+			return rows[i].Score > rows[j].Score
+		}
+		return rows[i].File < rows[j].File
+	})
+	truncated := false
+	if len(rows) > limit {
+		rows = rows[:limit]
+		truncated = true
+	}
+
+	result := map[string]any{
+		"target_file": targetFile,
+		"co_changing": rows,
+		"total":       len(rows),
+		"truncated":   truncated,
+	}
+	if symbolID != "" {
+		result["symbol_id"] = symbolID
+	}
+	return s.respondJSONOrTOON(ctx, req, result)
+}
+
+// ensureCoChange mines the co-change graph exactly once per daemon
+// lifetime. Safe for concurrent callers — later callers block until
+// the first mine completes, then return immediately.
+func (s *Server) ensureCoChange() {
+	s.cochangeOnce.Do(s.mineCoChange)
+}
+
+// mineCoChange populates the co-change caches. It prefers EdgeCoChange
+// edges already present in the graph (an enriched snapshot); only when
+// none exist does it mine `git log` and materialise the edges.
+func (s *Server) mineCoChange() {
+	scores := map[string]map[string]float64{}
+	counts := map[string]map[string]int{}
+
+	if s.coChangeFromEdges(scores, counts) {
+		s.storeCoChange(scores, counts)
+		return
+	}
+
+	for prefix, root := range s.collectRepoRoots("") {
+		res := cochange.Mine(context.Background(), root, cochange.Options{})
+		if len(res.Pairs) == 0 {
+			continue
+		}
+		cochange.AddEdges(s.graph, res.Pairs, prefix)
+		for _, p := range res.Pairs {
+			fa, fb := p.FileA, p.FileB
+			if prefix != "" {
+				fa = prefix + "/" + fa
+				fb = prefix + "/" + fb
+			}
+			addCoChangeLink(scores, counts, fa, fb, p.Score, p.Count)
+			addCoChangeLink(scores, counts, fb, fa, p.Score, p.Count)
+		}
+	}
+	s.storeCoChange(scores, counts)
+}
+
+// coChangeFromEdges rebuilds the path-keyed caches from EdgeCoChange
+// edges already in the graph. Returns true when at least one edge was
+// found — the signal that an enriched snapshot is loaded and no fresh
+// git mine is needed.
+func (s *Server) coChangeFromEdges(scores map[string]map[string]float64, counts map[string]map[string]int) bool {
+	found := false
+	for _, e := range s.graph.AllEdges() {
+		if e.Kind != graph.EdgeCoChange {
+			continue
+		}
+		from := s.graph.GetNode(e.From)
+		to := s.graph.GetNode(e.To)
+		if from == nil || to == nil {
+			continue
+		}
+		found = true
+		score := e.Confidence
+		if e.Meta != nil {
+			if v, ok := e.Meta["score"].(float64); ok {
+				score = v
+			}
+		}
+		count := 0
+		if e.Meta != nil {
+			switch v := e.Meta["count"].(type) {
+			case int:
+				count = v
+			case int64:
+				count = int(v)
+			case float64:
+				count = int(v)
+			}
+		}
+		addCoChangeLink(scores, counts, from.FilePath, to.FilePath, score, count)
+	}
+	return found
+}
+
+// addCoChangeLink records one directed co-change relationship.
+func addCoChangeLink(scores map[string]map[string]float64, counts map[string]map[string]int, from, to string, score float64, count int) {
+	if scores[from] == nil {
+		scores[from] = map[string]float64{}
+	}
+	if counts[from] == nil {
+		counts[from] = map[string]int{}
+	}
+	scores[from][to] = score
+	counts[from][to] = count
+}
+
+// storeCoChange publishes the freshly built caches under the lock.
+func (s *Server) storeCoChange(scores map[string]map[string]float64, counts map[string]map[string]int) {
+	s.cochangeMu.Lock()
+	s.cochangeByFile = scores
+	s.cochangeCount = counts
+	s.cochangeMu.Unlock()
+}
+
+// coChangeScores returns the co-changing file -> score map for a file,
+// or nil when the file has no co-change data.
+func (s *Server) coChangeScores(filePath string) map[string]float64 {
+	s.cochangeMu.RLock()
+	defer s.cochangeMu.RUnlock()
+	return s.cochangeByFile[filePath]
+}
+
+// coChangeCounts returns the co-changing file -> commit-overlap count
+// map for a file.
+func (s *Server) coChangeCounts(filePath string) map[string]int {
+	s.cochangeMu.RLock()
+	defer s.cochangeMu.RUnlock()
+	return s.cochangeCount[filePath]
+}
+
+// hasCoChangeData reports whether the co-change caches hold anything —
+// used by buildRerankContext to decide whether to wire the signal.
+func (s *Server) hasCoChangeData() bool {
+	s.cochangeMu.RLock()
+	defer s.cochangeMu.RUnlock()
+	return len(s.cochangeByFile) > 0
+}

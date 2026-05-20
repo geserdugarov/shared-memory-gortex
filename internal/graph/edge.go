@@ -344,6 +344,23 @@ const (
 	// of live code" — a near-duplicate of a live function that itself
 	// has zero callers.
 	EdgeSimilarTo EdgeKind = "similar_to"
+	// EdgeCoChange links two KindFile nodes that git history shows are
+	// repeatedly committed together — "logical coupling". This is the
+	// relationship the import graph cannot see: a handler and its
+	// test, a struct and the serializer that mirrors it, a schema and
+	// its migration are coupled even when neither imports the other.
+	// Materialised by the cochange enrichment pass (`gortex enrich
+	// cochange`, or lazily by the find_co_changing_symbols tool):
+	// `git log --name-only` is mined for files that co-occur in a
+	// commit, weighted by a cosine association score over per-file
+	// commit-touch counts. Emitted symmetrically — both fA→fB and
+	// fB→fA — so "what co-changes with X" is a single out-edge walk
+	// from either endpoint. Meta["count"] carries the number of
+	// commits touching both files; Meta["score"] (and Confidence)
+	// carry the association strength (0..1). Origin: ast_inferred —
+	// the relationship is a statistical estimate over git history,
+	// not a structural fact.
+	EdgeCoChange EdgeKind = "co_change"
 	// Cross-repo edge kinds. Materialised by the resolver's
 	// detectCrossRepoEdges pass: whenever a calls / implements / extends
 	// edge has a From node and a To node in two different repos, a

@@ -411,6 +411,13 @@ func (e *Engine) SearchSymbolsRanked(query string, limit int, opts QueryOptions,
 		cands = kept
 	}
 
+	// Cross-repo RRF: when the candidate set spans repositories, the
+	// per-channel ranks are reassigned repo by repo so each repo's
+	// strongest hits compete on even footing. The rerank's RRF-kernel
+	// bm25 and semantic signals then fuse across repos rather than
+	// ranking within one merged corpus. No-op for a single-repo set.
+	crossRepoRerank(cands)
+
 	if e.rerank != nil {
 		ctx := rctx
 		if ctx == nil {

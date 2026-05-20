@@ -305,6 +305,14 @@ type IndexConfig struct {
 	// `.gortex.yaml::index::crash_isolation: true` or the
 	// GORTEX_PARSER_ISOLATION=1 environment override.
 	CrashIsolation bool `mapstructure:"crash_isolation" yaml:"crash_isolation,omitempty"`
+	// Merkle switches incremental re-index change detection from
+	// per-file mtime comparison to a BLAKE3 Merkle tree. The tree is
+	// content-addressed, so a file touched without a content change is
+	// not re-indexed, and an unchanged subtree is skipped wholesale.
+	// Off by default — mtime detection is cheaper when most touches
+	// are real edits. Opt in via `.gortex.yaml::index::merkle: true`
+	// or the GORTEX_MERKLE=1 environment override.
+	Merkle bool `mapstructure:"merkle" yaml:"merkle,omitempty"`
 	// MaxExtractMillis caps how long a single file's extraction may
 	// run. A file that exceeds the budget is skipped with a synthetic
 	// node carrying Meta["skipped_due_to_timeout"] instead of stalling
@@ -358,7 +366,7 @@ type TransformRule struct {
 //
 //   - FunctionShape: true  (params/returns/generics/closures — Phase 1)
 //   - Concurrency:   true  (closures already covered by FunctionShape;
-//                            this gates EdgeSpawns / channel I/O)
+//     this gates EdgeSpawns / channel I/O)
 //   - Constants:     true  (cheap, structural)
 //   - TypeShape:     true  (aliases vs newtypes vs composition)
 //   - Codegen:       true  (// Code generated markers)
@@ -377,23 +385,23 @@ type TransformRule struct {
 //
 // Setting any leaf Enabled explicitly overrides the default.
 type CoverageConfig struct {
-	FunctionShape DomainToggle    `mapstructure:"function_shape" yaml:"function_shape,omitempty"`
-	Concurrency   DomainToggle    `mapstructure:"concurrency"    yaml:"concurrency,omitempty"`
-	Constants     DomainToggle    `mapstructure:"constants"      yaml:"constants,omitempty"`
-	TypeShape     DomainToggle    `mapstructure:"type_shape"     yaml:"type_shape,omitempty"`
-	Codegen       DomainToggle    `mapstructure:"codegen"        yaml:"codegen,omitempty"`
-	Todos         TodoConfig      `mapstructure:"todos"          yaml:"todos,omitempty"`
-	Ownership     DomainToggle    `mapstructure:"ownership"      yaml:"ownership,omitempty"`
-	Licenses      DomainToggle    `mapstructure:"licenses"       yaml:"licenses,omitempty"`
-	Modules       DomainToggle    `mapstructure:"modules"        yaml:"modules,omitempty"`
-	Configs       DomainToggle    `mapstructure:"configs"        yaml:"configs,omitempty"`
-	Flags         FlagConfig      `mapstructure:"flags"          yaml:"flags,omitempty"`
-	Observability DomainToggle    `mapstructure:"observability"  yaml:"observability,omitempty"`
-	Pubsub        DomainToggle    `mapstructure:"pubsub"         yaml:"pubsub,omitempty"`
-	SQL           SQLConfig       `mapstructure:"sql"            yaml:"sql,omitempty"`
-	Fixtures      DomainToggle    `mapstructure:"fixtures"       yaml:"fixtures,omitempty"`
-	CrossLanguage DomainToggle    `mapstructure:"cross_language" yaml:"cross_language,omitempty"`
-	Clones        ClonesConfig    `mapstructure:"clones"         yaml:"clones,omitempty"`
+	FunctionShape DomainToggle `mapstructure:"function_shape" yaml:"function_shape,omitempty"`
+	Concurrency   DomainToggle `mapstructure:"concurrency"    yaml:"concurrency,omitempty"`
+	Constants     DomainToggle `mapstructure:"constants"      yaml:"constants,omitempty"`
+	TypeShape     DomainToggle `mapstructure:"type_shape"     yaml:"type_shape,omitempty"`
+	Codegen       DomainToggle `mapstructure:"codegen"        yaml:"codegen,omitempty"`
+	Todos         TodoConfig   `mapstructure:"todos"          yaml:"todos,omitempty"`
+	Ownership     DomainToggle `mapstructure:"ownership"      yaml:"ownership,omitempty"`
+	Licenses      DomainToggle `mapstructure:"licenses"       yaml:"licenses,omitempty"`
+	Modules       DomainToggle `mapstructure:"modules"        yaml:"modules,omitempty"`
+	Configs       DomainToggle `mapstructure:"configs"        yaml:"configs,omitempty"`
+	Flags         FlagConfig   `mapstructure:"flags"          yaml:"flags,omitempty"`
+	Observability DomainToggle `mapstructure:"observability"  yaml:"observability,omitempty"`
+	Pubsub        DomainToggle `mapstructure:"pubsub"         yaml:"pubsub,omitempty"`
+	SQL           SQLConfig    `mapstructure:"sql"            yaml:"sql,omitempty"`
+	Fixtures      DomainToggle `mapstructure:"fixtures"       yaml:"fixtures,omitempty"`
+	CrossLanguage DomainToggle `mapstructure:"cross_language" yaml:"cross_language,omitempty"`
+	Clones        ClonesConfig `mapstructure:"clones"         yaml:"clones,omitempty"`
 }
 
 // ClonesConfig gates MinHash + LSH near-duplicate ("clone") detection.
@@ -437,8 +445,8 @@ type TodoConfig struct {
 // the built-in recognizers cover GrowthBook, LaunchDarkly, Unleash by
 // default.
 type FlagConfig struct {
-	Enabled     *bool             `mapstructure:"enabled"     yaml:"enabled,omitempty"`
-	Recognizers []FlagRecognizer  `mapstructure:"recognizers" yaml:"recognizers,omitempty"`
+	Enabled     *bool            `mapstructure:"enabled"     yaml:"enabled,omitempty"`
+	Recognizers []FlagRecognizer `mapstructure:"recognizers" yaml:"recognizers,omitempty"`
 }
 
 // FlagRecognizer maps a fully-qualified function name to a flag
@@ -452,11 +460,11 @@ type FlagRecognizer struct {
 // SQLConfig gates SQL schema extraction. Default-off because SQL
 // parsing is slow and string-literal SQL produces false positives.
 type SQLConfig struct {
-	Enabled        *bool          `mapstructure:"enabled"         yaml:"enabled,omitempty"`
-	Dialect        string         `mapstructure:"dialect"         yaml:"dialect,omitempty"`
-	Migrations     SQLMigrations  `mapstructure:"migrations"      yaml:"migrations,omitempty"`
-	ORM            SQLOrm         `mapstructure:"orm"             yaml:"orm,omitempty"`
-	StringLiterals SQLStringLits  `mapstructure:"string_literals" yaml:"string_literals,omitempty"`
+	Enabled        *bool         `mapstructure:"enabled"         yaml:"enabled,omitempty"`
+	Dialect        string        `mapstructure:"dialect"         yaml:"dialect,omitempty"`
+	Migrations     SQLMigrations `mapstructure:"migrations"      yaml:"migrations,omitempty"`
+	ORM            SQLOrm        `mapstructure:"orm"             yaml:"orm,omitempty"`
+	StringLiterals SQLStringLits `mapstructure:"string_literals" yaml:"string_literals,omitempty"`
 }
 
 type SQLMigrations struct {

@@ -17,6 +17,7 @@ var Builtin = []string{
 	".svn/",
 	".terraform/",
 	".gortex-cache/",
+	".gortex/", // Gortex's per-repo state dir (quarantine, merkle tree)
 	".claude/",
 	".kiro/",
 	"node_modules/",

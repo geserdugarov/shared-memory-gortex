@@ -1747,6 +1747,12 @@ func (idx *Indexer) IndexCtx(ctx context.Context, root string) (*IndexResult, er
 
 	reporter.Report("indexing complete", int(fileCount), len(files))
 
+	// Persist the Merkle baseline so the next incremental pass diffs
+	// against content hashes rather than re-indexing the whole repo.
+	if idx.merkleEnabled() {
+		idx.saveMerkleBaseline(absRoot, files)
+	}
+
 	nodes, edges := idx.repoNodeEdgeCount()
 	result := &IndexResult{
 		NodeCount:        nodes,
@@ -2246,6 +2252,10 @@ func (idx *Indexer) IncrementalReindex(root string) (*IndexResult, error) {
 	diskFiles := make(map[string]bool)
 	var staleFiles []string
 
+	// Merkle mode replaces per-file mtime staleness with a
+	// content-addressed Merkle-tree diff computed after the walk.
+	merkleMode := idx.merkleEnabled()
+
 	err = filepath.WalkDir(absRoot, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return nil
@@ -2267,13 +2277,19 @@ func (idx *Indexer) IncrementalReindex(root string) (*IndexResult, error) {
 		relPath = filepath.ToSlash(relPath)
 		diskFiles[relPath] = true
 
-		if idx.IsStale(relPath) {
+		if !merkleMode && idx.IsStale(relPath) {
 			staleFiles = append(staleFiles, path)
 		}
 		return nil
 	})
 	if err != nil {
 		return nil, err
+	}
+
+	// In Merkle mode the per-file mtime check above is skipped; the
+	// stale set comes from a content-addressed tree diff instead.
+	if merkleMode {
+		staleFiles = idx.merkleStaleFiles(absRoot, diskFiles)
 	}
 
 	// Detect deleted files. A file that's tracked in fileMtimes but

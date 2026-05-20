@@ -303,7 +303,7 @@ func allSameSign(v []float64) bool {
 			neg = true
 		}
 	}
-	return !(pos && neg)
+	return !pos || !neg
 }
 
 func median(v []float64) float64 {

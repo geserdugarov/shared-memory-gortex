@@ -98,6 +98,7 @@ type Server struct {
 	logger         *zap.Logger
 	communities    *analysis.CommunityResult
 	processes      *analysis.ProcessResult
+	pageRank       *analysis.PageRankResult
 	analysisMu     sync.RWMutex
 
 	// cochange caches the git-history co-change graph. cochangeByFile
@@ -1253,6 +1254,7 @@ func (s *Server) RunAnalysis() {
 	s.analysisMu.Lock()
 	s.communities = analysis.DetectCommunities(s.graph)
 	s.processes = analysis.DiscoverProcesses(s.graph)
+	s.pageRank = analysis.ComputePageRank(s.graph)
 	s.analysisMu.Unlock()
 
 	// Bootstrap-resource payloads (graph_stats, index_health, etc.)
@@ -1271,6 +1273,12 @@ func (s *Server) getProcesses() *analysis.ProcessResult {
 	s.analysisMu.RLock()
 	defer s.analysisMu.RUnlock()
 	return s.processes
+}
+
+func (s *Server) getPageRank() *analysis.PageRankResult {
+	s.analysisMu.RLock()
+	defer s.analysisMu.RUnlock()
+	return s.pageRank
 }
 
 // WatchForReanalysis subscribes to hub events and re-runs analysis after

@@ -562,7 +562,7 @@ func (s *Server) handleGetSymbolSource(ctx context.Context, req mcp.CallToolRequ
 	// Server-side accounting only — the savings value isn't returned to
 	// the caller (agents don't act on it and it burns tokens in every
 	// response). Aggregated stats remain available via the `savings` tool.
-	returned := tokens.CountInt64(source)
+	returned := tokens.CachedCountInt64(source)
 	fullFile := int64(tokens.EstimateFromSample(totalFileChars, source))
 	s.tokenStatsFor(ctx).record(node, "get_symbol_source", returned, fullFile)
 
@@ -764,7 +764,7 @@ func (s *Server) handleBatchSymbols(ctx context.Context, req mcp.CallToolRequest
 				if source, fromLine, totalFileChars, err := s.readLinesForCtx(ctx, absPath, node.StartLine, node.EndLine, contextLines); err == nil {
 					entry["source"] = source
 					entry["from_line"] = fromLine
-					returned := tokens.CountInt64(source)
+					returned := tokens.CachedCountInt64(source)
 					fullFile := int64(tokens.EstimateFromSample(totalFileChars, source))
 					s.tokenStatsFor(ctx).record(node, "batch_symbols", returned, fullFile)
 				}
@@ -1398,7 +1398,7 @@ func (s *Server) handleSmartContext(ctx context.Context, req mcp.CallToolRequest
 				if source, _, totalFileChars, err := s.readLinesForCtx(ctx, absPath, sym.StartLine, sym.EndLine, 0); err == nil {
 					entry["source"] = source
 					sourcesEmbedded++
-					returned := tokens.CountInt64(source)
+					returned := tokens.CachedCountInt64(source)
 					fullFile := int64(tokens.EstimateFromSample(totalFileChars, source))
 					s.tokenStatsFor(ctx).record(sym, "smart_context", returned, fullFile)
 				}

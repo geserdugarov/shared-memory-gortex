@@ -13,11 +13,11 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/zzet/gortex/internal/config"
+	"github.com/zzet/gortex/internal/contracts"
 	"github.com/zzet/gortex/internal/daemon"
 	"github.com/zzet/gortex/internal/embedding"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/indexer"
-	"github.com/zzet/gortex/internal/contracts"
 	gortexmcp "github.com/zzet/gortex/internal/mcp"
 	"github.com/zzet/gortex/internal/parser"
 	"github.com/zzet/gortex/internal/parser/languages"
@@ -488,10 +488,11 @@ func runMCP(cmd *cobra.Command, args []string) error {
 	go func() {
 		if mcpIndex != "" {
 			commitHash := gitCommitHash(mcpIndex)
+			branch := gitBranch(mcpIndex)
 			cached := false
 
-			if commitHash != "" && store.Check(mcpIndex, commitHash) && store.Validate(mcpIndex, commitHash) {
-				snap, err := store.Load(mcpIndex, commitHash)
+			if commitHash != "" && store.Check(mcpIndex, branch, commitHash) && store.Validate(mcpIndex, branch, commitHash) {
+				snap, err := store.Load(mcpIndex, branch, commitHash)
 				if err == nil {
 					for _, n := range snap.Nodes {
 						g.AddNode(n)
@@ -602,6 +603,7 @@ func runMCP(cmd *cobra.Command, args []string) error {
 					Version:    version,
 					RepoPath:   mcpIndex,
 					CommitHash: commitHash,
+					Branch:     gitBranch(mcpIndex),
 					IndexedAt:  time.Now(),
 					Nodes:      g.AllNodes(),
 					Edges:      g.AllEdges(),

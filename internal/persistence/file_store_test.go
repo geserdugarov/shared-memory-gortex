@@ -16,6 +16,7 @@ func testSnapshot() *Snapshot {
 		Version:    "0.1.0-test",
 		RepoPath:   "/tmp/test-repo",
 		CommitHash: "abc123def456",
+		Branch:     "main",
 		IndexedAt:  time.Now().Truncate(time.Second),
 		Nodes: []*graph.Node{
 			{
@@ -50,23 +51,17 @@ func TestFileStore_RoundTrip(t *testing.T) {
 
 	snap := testSnapshot()
 
-	// Save.
 	require.NoError(t, fs.Save(snap))
+	assert.True(t, fs.Check(snap.RepoPath, snap.Branch, snap.CommitHash))
+	assert.True(t, fs.Validate(snap.RepoPath, snap.Branch, snap.CommitHash))
 
-	// Check.
-	assert.True(t, fs.Check(snap.RepoPath, snap.CommitHash))
-
-	// Validate.
-	assert.True(t, fs.Validate(snap.RepoPath, snap.CommitHash))
-
-	// Load.
-	loaded, err := fs.Load(snap.RepoPath, snap.CommitHash)
+	loaded, err := fs.Load(snap.RepoPath, snap.Branch, snap.CommitHash)
 	require.NoError(t, err)
 
-	// Verify.
 	assert.Equal(t, snap.Version, loaded.Version)
 	assert.Equal(t, snap.RepoPath, loaded.RepoPath)
 	assert.Equal(t, snap.CommitHash, loaded.CommitHash)
+	assert.Equal(t, snap.Branch, loaded.Branch)
 	assert.Equal(t, snap.IndexedAt, loaded.IndexedAt)
 
 	require.Len(t, loaded.Nodes, 2)
@@ -95,12 +90,12 @@ func TestFileStore_Validate_VersionMismatch(t *testing.T) {
 	require.NoError(t, fsV1.Save(snap))
 
 	// Same version validates.
-	assert.True(t, fsV1.Validate(snap.RepoPath, snap.CommitHash))
+	assert.True(t, fsV1.Validate(snap.RepoPath, snap.Branch, snap.CommitHash))
 
 	// Different version fails.
 	fsV2, err := NewFileStore(dir, "0.2.0")
 	require.NoError(t, err)
-	assert.False(t, fsV2.Validate(snap.RepoPath, snap.CommitHash))
+	assert.False(t, fsV2.Validate(snap.RepoPath, snap.Branch, snap.CommitHash))
 }
 
 func TestFileStore_Evict(t *testing.T) {
@@ -110,10 +105,10 @@ func TestFileStore_Evict(t *testing.T) {
 
 	snap := testSnapshot()
 	require.NoError(t, fs.Save(snap))
-	assert.True(t, fs.Check(snap.RepoPath, snap.CommitHash))
+	assert.True(t, fs.Check(snap.RepoPath, snap.Branch, snap.CommitHash))
 
-	require.NoError(t, fs.Evict(snap.RepoPath, snap.CommitHash))
-	assert.False(t, fs.Check(snap.RepoPath, snap.CommitHash))
+	require.NoError(t, fs.Evict(snap.RepoPath, snap.Branch, snap.CommitHash))
+	assert.False(t, fs.Check(snap.RepoPath, snap.Branch, snap.CommitHash))
 }
 
 func TestFileStore_Load_NotFound(t *testing.T) {
@@ -121,7 +116,7 @@ func TestFileStore_Load_NotFound(t *testing.T) {
 	fs, err := NewFileStore(dir, "0.1.0")
 	require.NoError(t, err)
 
-	_, err = fs.Load("/nonexistent", "abc123")
+	_, err = fs.Load("/nonexistent", "main", "abc123")
 	assert.ErrorIs(t, err, ErrNotFound)
 }
 
@@ -134,6 +129,7 @@ func TestFileStore_MetaWithSliceTypes(t *testing.T) {
 		Version:    "0.1.0",
 		RepoPath:   "/tmp/test",
 		CommitHash: "def789",
+		Branch:     "main",
 		IndexedAt:  time.Now().Truncate(time.Second),
 		Nodes: []*graph.Node{
 			{
@@ -147,7 +143,7 @@ func TestFileStore_MetaWithSliceTypes(t *testing.T) {
 
 	require.NoError(t, fs.Save(snap))
 
-	loaded, err := fs.Load(snap.RepoPath, snap.CommitHash)
+	loaded, err := fs.Load(snap.RepoPath, snap.Branch, snap.CommitHash)
 	require.NoError(t, err)
 
 	methods, ok := loaded.Nodes[0].Meta["methods"].([]string)
@@ -155,14 +151,63 @@ func TestFileStore_MetaWithSliceTypes(t *testing.T) {
 	assert.Equal(t, []string{"Read", "Close"}, methods)
 }
 
+// TestFileStore_BranchKeyedSlots proves snapshots are keyed by
+// (repo, branch): two branches of the same repo, even at the same
+// commit, occupy distinct slots, so switching branches never clobbers
+// the other branch's cached index.
+func TestFileStore_BranchKeyedSlots(t *testing.T) {
+	dir := t.TempDir()
+	fs, err := NewFileStore(dir, "0.1.0-test")
+	require.NoError(t, err)
+
+	main := testSnapshot()
+	main.Branch = "main"
+	feature := testSnapshot()
+	feature.Branch = "feature/login"
+	feature.Nodes[0].Name = "FeatureFoo"
+
+	require.NoError(t, fs.Save(main))
+	require.NoError(t, fs.Save(feature))
+
+	gotMain, err := fs.Load(main.RepoPath, "main", main.CommitHash)
+	require.NoError(t, err)
+	assert.Equal(t, "Foo", gotMain.Nodes[0].Name)
+
+	gotFeature, err := fs.Load(feature.RepoPath, "feature/login", feature.CommitHash)
+	require.NoError(t, err)
+	assert.Equal(t, "FeatureFoo", gotFeature.Nodes[0].Name)
+}
+
+// TestFileStore_DetachedHeadKeyedByCommit checks the detached-HEAD
+// fallback: with no branch the slot keys on the commit hash, so two
+// checked-out commits keep separate snapshots.
+func TestFileStore_DetachedHeadKeyedByCommit(t *testing.T) {
+	dir := t.TempDir()
+	fs, err := NewFileStore(dir, "0.1.0-test")
+	require.NoError(t, err)
+
+	a := testSnapshot()
+	a.Branch = ""
+	a.CommitHash = "aaaaaaaaaaaa"
+	b := testSnapshot()
+	b.Branch = ""
+	b.CommitHash = "bbbbbbbbbbbb"
+
+	require.NoError(t, fs.Save(a))
+	require.NoError(t, fs.Save(b))
+
+	assert.True(t, fs.Check(a.RepoPath, "", "aaaaaaaaaaaa"))
+	assert.True(t, fs.Check(b.RepoPath, "", "bbbbbbbbbbbb"))
+}
+
 func TestNopStore(t *testing.T) {
 	var s NopStore
-	assert.False(t, s.Check("x", "y"))
-	_, err := s.Load("x", "y")
+	assert.False(t, s.Check("x", "main", "y"))
+	_, err := s.Load("x", "main", "y")
 	assert.ErrorIs(t, err, ErrNotFound)
 	assert.NoError(t, s.Save(testSnapshot()))
-	assert.False(t, s.Validate("x", "y"))
-	assert.NoError(t, s.Evict("x", "y"))
+	assert.False(t, s.Validate("x", "main", "y"))
+	assert.NoError(t, s.Evict("x", "main", "y"))
 	assert.NoError(t, s.Close())
 }
 
@@ -199,7 +244,7 @@ func TestFileStore_ConcurrentSave(t *testing.T) {
 		require.NoError(t, e)
 	}
 
-	loaded, err := fs.Load("/tmp/test-repo", "abc123def456")
+	loaded, err := fs.Load("/tmp/test-repo", "main", "abc123def456")
 	require.NoError(t, err)
 	require.Len(t, loaded.Nodes, 2)
 	got, _ := loaded.Nodes[0].Meta["writer"].(string)
@@ -234,7 +279,7 @@ func TestFileStore_ConcurrentReadWrite(t *testing.T) {
 			if i%2 == 0 {
 				errs <- fs.Save(snap)
 			} else {
-				errs <- fs.Evict(snap.RepoPath, snap.CommitHash)
+				errs <- fs.Evict(snap.RepoPath, snap.Branch, snap.CommitHash)
 			}
 		}
 	}()
@@ -244,7 +289,7 @@ func TestFileStore_ConcurrentReadWrite(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for i := 0; i < 40; i++ {
-				_, err := fs.Load(snap.RepoPath, snap.CommitHash)
+				_, err := fs.Load(snap.RepoPath, snap.Branch, snap.CommitHash)
 				if err != nil && err != ErrNotFound {
 					errs <- err
 				}

@@ -46,27 +46,27 @@ func NewFileStore(dir, version string) (*FileStore, error) {
 	return &FileStore{dir: dir, version: version}, nil
 }
 
-func (fs *FileStore) entryDir(repoPath, commitHash string) string {
-	return filepath.Join(fs.dir, CacheKey(repoPath, commitHash))
+func (fs *FileStore) entryDir(repoPath, branch, commitHash string) string {
+	return filepath.Join(fs.dir, CacheKey(repoPath, branch, commitHash))
 }
 
 // lockPath is the advisory-lock file for one snapshot entry. It is a
 // sibling of the entry directory ({dir}/{cacheKey}.lock), deliberately
 // outside it so the lock survives the os.RemoveAll a writer runs against
 // the entry directory on Save/Evict.
-func (fs *FileStore) lockPath(repoPath, commitHash string) string {
-	return fs.entryDir(repoPath, commitHash) + ".lock"
+func (fs *FileStore) lockPath(repoPath, branch, commitHash string) string {
+	return fs.entryDir(repoPath, branch, commitHash) + ".lock"
 }
 
 // acquireWrite takes an exclusive cross-process advisory lock for one
 // snapshot entry. A second gortex process writing the same snapshot
 // blocks here instead of racing the RemoveAll/MkdirAll/write sequence,
 // which would otherwise leave a torn or empty index on disk.
-func (fs *FileStore) acquireWrite(repoPath, commitHash string) (*flock.Flock, error) {
+func (fs *FileStore) acquireWrite(repoPath, branch, commitHash string) (*flock.Flock, error) {
 	if err := os.MkdirAll(fs.dir, 0o755); err != nil {
 		return nil, fmt.Errorf("persistence: mkdir cache dir: %w", err)
 	}
-	fl := flock.New(fs.lockPath(repoPath, commitHash))
+	fl := flock.New(fs.lockPath(repoPath, branch, commitHash))
 	if err := fl.Lock(); err != nil {
 		return nil, fmt.Errorf("persistence: acquire index write lock: %w", err)
 	}
@@ -76,19 +76,19 @@ func (fs *FileStore) acquireWrite(repoPath, commitHash string) (*flock.Flock, er
 // acquireRead takes a shared cross-process advisory lock for one snapshot
 // entry, so a reader waits out an in-progress write instead of decoding a
 // half-written snapshot.
-func (fs *FileStore) acquireRead(repoPath, commitHash string) (*flock.Flock, error) {
+func (fs *FileStore) acquireRead(repoPath, branch, commitHash string) (*flock.Flock, error) {
 	if err := os.MkdirAll(fs.dir, 0o755); err != nil {
 		return nil, fmt.Errorf("persistence: mkdir cache dir: %w", err)
 	}
-	fl := flock.New(fs.lockPath(repoPath, commitHash))
+	fl := flock.New(fs.lockPath(repoPath, branch, commitHash))
 	if err := fl.RLock(); err != nil {
 		return nil, fmt.Errorf("persistence: acquire index read lock: %w", err)
 	}
 	return fl, nil
 }
 
-func (fs *FileStore) Check(repoPath, commitHash string) bool {
-	dir := fs.entryDir(repoPath, commitHash)
+func (fs *FileStore) Check(repoPath, branch, commitHash string) bool {
+	dir := fs.entryDir(repoPath, branch, commitHash)
 	info, err := os.Stat(dir)
 	if err != nil || !info.IsDir() {
 		return false
@@ -97,8 +97,8 @@ func (fs *FileStore) Check(repoPath, commitHash string) bool {
 	return err == nil
 }
 
-func (fs *FileStore) Validate(repoPath, commitHash string) bool {
-	dir := fs.entryDir(repoPath, commitHash)
+func (fs *FileStore) Validate(repoPath, branch, commitHash string) bool {
+	dir := fs.entryDir(repoPath, branch, commitHash)
 	data, err := os.ReadFile(filepath.Join(dir, versionFile))
 	if err != nil {
 		return false
@@ -106,14 +106,14 @@ func (fs *FileStore) Validate(repoPath, commitHash string) bool {
 	return strings.TrimSpace(string(data)) == fs.version
 }
 
-func (fs *FileStore) Load(repoPath, commitHash string) (*Snapshot, error) {
-	fl, err := fs.acquireRead(repoPath, commitHash)
+func (fs *FileStore) Load(repoPath, branch, commitHash string) (*Snapshot, error) {
+	fl, err := fs.acquireRead(repoPath, branch, commitHash)
 	if err != nil {
 		return nil, err
 	}
 	defer func() { _ = fl.Unlock() }()
 
-	dir := fs.entryDir(repoPath, commitHash)
+	dir := fs.entryDir(repoPath, branch, commitHash)
 	f, err := os.Open(filepath.Join(dir, snapshotFile))
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -138,13 +138,13 @@ func (fs *FileStore) Load(repoPath, commitHash string) (*Snapshot, error) {
 }
 
 func (fs *FileStore) Save(snap *Snapshot) error {
-	fl, err := fs.acquireWrite(snap.RepoPath, snap.CommitHash)
+	fl, err := fs.acquireWrite(snap.RepoPath, snap.Branch, snap.CommitHash)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = fl.Unlock() }()
 
-	dir := fs.entryDir(snap.RepoPath, snap.CommitHash)
+	dir := fs.entryDir(snap.RepoPath, snap.Branch, snap.CommitHash)
 
 	// Remove old entry if it exists.
 	_ = os.RemoveAll(dir)
@@ -185,13 +185,13 @@ func (fs *FileStore) Save(snap *Snapshot) error {
 	return nil
 }
 
-func (fs *FileStore) Evict(repoPath, commitHash string) error {
-	fl, err := fs.acquireWrite(repoPath, commitHash)
+func (fs *FileStore) Evict(repoPath, branch, commitHash string) error {
+	fl, err := fs.acquireWrite(repoPath, branch, commitHash)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = fl.Unlock() }()
-	return os.RemoveAll(fs.entryDir(repoPath, commitHash))
+	return os.RemoveAll(fs.entryDir(repoPath, branch, commitHash))
 }
 
 func (fs *FileStore) Close() error { return nil }

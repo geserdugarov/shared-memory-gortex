@@ -15,6 +15,7 @@ import (
 	"strings"
 
 	"github.com/zzet/gortex/internal/config"
+	"github.com/zzet/gortex/internal/contracts"
 	"github.com/zzet/gortex/internal/daemon"
 	"github.com/zzet/gortex/internal/embedding"
 	"github.com/zzet/gortex/internal/graph"
@@ -22,7 +23,6 @@ import (
 	gortexmcp "github.com/zzet/gortex/internal/mcp"
 	"github.com/zzet/gortex/internal/mcp/streamable"
 	"github.com/zzet/gortex/internal/parser"
-	"github.com/zzet/gortex/internal/contracts"
 	"github.com/zzet/gortex/internal/parser/languages"
 	"github.com/zzet/gortex/internal/persistence"
 	"github.com/zzet/gortex/internal/query"
@@ -571,10 +571,11 @@ func runServer(_ *cobra.Command, _ []string) error {
 			}
 		} else if serverIndex != "" {
 			commitHash := gitCommitHash(serverIndex)
+			branch := gitBranch(serverIndex)
 			cached := false
 
-			if commitHash != "" && store.Check(serverIndex, commitHash) && store.Validate(serverIndex, commitHash) {
-				snap, err := store.Load(serverIndex, commitHash)
+			if commitHash != "" && store.Check(serverIndex, branch, commitHash) && store.Validate(serverIndex, branch, commitHash) {
+				snap, err := store.Load(serverIndex, branch, commitHash)
 				if err == nil {
 					for _, n := range snap.Nodes {
 						g.AddNode(n)
@@ -644,6 +645,7 @@ func runServer(_ *cobra.Command, _ []string) error {
 					Version:    version,
 					RepoPath:   serverIndex,
 					CommitHash: commitHash,
+					Branch:     gitBranch(serverIndex),
 					IndexedAt:  time.Now(),
 					Nodes:      g.AllNodes(),
 					Edges:      g.AllEdges(),

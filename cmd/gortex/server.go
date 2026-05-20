@@ -572,10 +572,11 @@ func runServer(_ *cobra.Command, _ []string) error {
 		} else if serverIndex != "" {
 			commitHash := gitCommitHash(serverIndex)
 			branch := gitBranch(serverIndex)
+			repoKey := canonicalRepo(serverIndex)
 			cached := false
 
-			if commitHash != "" && store.Check(serverIndex, branch, commitHash) && store.Validate(serverIndex, branch, commitHash) {
-				snap, err := store.Load(serverIndex, branch, commitHash)
+			if commitHash != "" && store.Check(repoKey, branch, commitHash) && store.Validate(repoKey, branch, commitHash) {
+				snap, err := store.Load(repoKey, branch, commitHash)
 				if err == nil {
 					for _, n := range snap.Nodes {
 						g.AddNode(n)
@@ -643,7 +644,7 @@ func runServer(_ *cobra.Command, _ []string) error {
 			if commitHash != "" {
 				snap := &persistence.Snapshot{
 					Version:    version,
-					RepoPath:   serverIndex,
+					RepoPath:   canonicalRepo(serverIndex),
 					CommitHash: commitHash,
 					Branch:     gitBranch(serverIndex),
 					IndexedAt:  time.Now(),

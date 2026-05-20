@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"os/exec"
 	"strings"
+
+	"github.com/zzet/gortex/internal/indexer"
 )
 
 // gitCommitHash returns the HEAD commit hash for the repository at dir,
@@ -38,4 +40,13 @@ func gitBranch(dir string) string {
 		return "" // detached HEAD — no branch to key on
 	}
 	return branch
+}
+
+// canonicalRepo resolves a git worktree to the main repository it
+// shares a .git directory with, so every worktree of one repo keys its
+// index cache under a shared base — the per-branch snapshot slot then
+// gives each worktree its own entry. A non-worktree path is returned
+// unchanged.
+func canonicalRepo(dir string) string {
+	return indexer.ResolveWorktree(dir).MainRepoPath
 }

@@ -489,10 +489,11 @@ func runMCP(cmd *cobra.Command, args []string) error {
 		if mcpIndex != "" {
 			commitHash := gitCommitHash(mcpIndex)
 			branch := gitBranch(mcpIndex)
+			repoKey := canonicalRepo(mcpIndex)
 			cached := false
 
-			if commitHash != "" && store.Check(mcpIndex, branch, commitHash) && store.Validate(mcpIndex, branch, commitHash) {
-				snap, err := store.Load(mcpIndex, branch, commitHash)
+			if commitHash != "" && store.Check(repoKey, branch, commitHash) && store.Validate(repoKey, branch, commitHash) {
+				snap, err := store.Load(repoKey, branch, commitHash)
 				if err == nil {
 					for _, n := range snap.Nodes {
 						g.AddNode(n)
@@ -601,7 +602,7 @@ func runMCP(cmd *cobra.Command, args []string) error {
 			if commitHash != "" {
 				snap := &persistence.Snapshot{
 					Version:    version,
-					RepoPath:   mcpIndex,
+					RepoPath:   canonicalRepo(mcpIndex),
 					CommitHash: commitHash,
 					Branch:     gitBranch(mcpIndex),
 					IndexedAt:  time.Now(),

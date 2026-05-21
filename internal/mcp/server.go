@@ -192,6 +192,11 @@ type Server struct {
 	// "drop your caches" signal. Fired from RunAnalysis.
 	graphInvalidatedBroadcaster *graphInvalidatedBroadcaster
 
+	// sanitizeInjection gates the prompt-injection screening
+	// middleware (see sanitize.go). Set from GORTEX_MCP_SANITIZE in
+	// NewServer; on by default.
+	sanitizeInjection bool
+
 	// llmService is the optional LLM service backing the `ask` MCP tool
 	// and the `search_symbols` assist modes. nil until SetLLMService is
 	// called by the daemon entrypoint. The service wraps whichever
@@ -706,6 +711,7 @@ func NewServer(engine *query.Engine, g *graph.Graph, idx *indexer.Indexer, watch
 	// MCP server. attachLazyRegistry wires the promotion closure that
 	// tools_search uses to migrate a tool from deferred → live on
 	// first use. See lazy_tools.go for the hot-set selection rules.
+	s.sanitizeInjection = sanitizeEnabledFromEnv()
 	s.lazy = newLazyToolRegistry(lazyEnabledFromEnv())
 	s.attachLazyRegistry()
 	s.registerToolsSearch()

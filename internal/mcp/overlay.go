@@ -70,6 +70,9 @@ func (s *Server) OverlayManager() *daemon.OverlayManager { return s.overlays }
 // wired, this is a transparent pass-through (one map lookup, zero
 // parsing) — non-overlay traffic pays no cost.
 func (s *Server) wrapToolHandler(h mcpserver.ToolHandlerFunc) mcpserver.ToolHandlerFunc {
+	// Prompt-injection screening sits closest to the handler so it
+	// sees the real arguments and the real result (see sanitize.go).
+	h = s.sanitizeToolHandler(h)
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		view, err := s.buildOverlayViewForCtx(ctx)
 		if err != nil {

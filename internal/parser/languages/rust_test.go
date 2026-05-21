@@ -180,6 +180,33 @@ use tokio::net::TcpListener;
 	require.Len(t, imports, 2)
 }
 
+// TestRsExtractor_PubUseTaggedAsReExport checks that a `pub use`
+// (and `pub(crate) use`) declaration tags its import edge as a
+// re-export, while a plain private `use` does not — the signal the
+// re-export chain follower needs to distinguish a transparent forward
+// from a private import.
+func TestRsExtractor_PubUseTaggedAsReExport(t *testing.T) {
+	src := []byte(`use crate::internal::Private;
+pub use crate::api::Public;
+pub(crate) use crate::api::Shared;
+`)
+	e := NewRustExtractor()
+	result, err := e.Extract("lib.rs", src)
+	require.NoError(t, err)
+
+	reexport := map[string]bool{}
+	for _, edge := range edgesOfKind(result.Edges, graph.EdgeImports) {
+		isRe := edge.Meta != nil && edge.Meta["reexport"] == true
+		reexport[edge.To] = isRe
+	}
+	require.False(t, reexport["unresolved::import::crate/internal/Private"],
+		"a private `use` must not be tagged as a re-export")
+	require.True(t, reexport["unresolved::import::crate/api/Public"],
+		"`pub use` must be tagged as a re-export")
+	require.True(t, reexport["unresolved::import::crate/api/Shared"],
+		"`pub(crate) use` must be tagged as a re-export")
+}
+
 func TestRsExtractor_TypeEnv_ExplicitType(t *testing.T) {
 	src := []byte(`struct Config {
     port: u16,

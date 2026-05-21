@@ -161,7 +161,7 @@ func (e *RustExtractor) Extract(filePath string, src []byte) (*parser.Extraction
 			e.emitNamed(m, "static", filePath, fileID, result, seen)
 
 		case m.Captures["use.def"] != nil:
-			e.emitUse(m, filePath, fileID, result)
+			e.emitUse(m, filePath, fileID, src, result)
 
 		case m.Captures["lvar.def"] != nil:
 			d := rustDeferredLet{
@@ -895,13 +895,24 @@ func (e *RustExtractor) emitNamed(m parser.QueryResult, kind, filePath, fileID s
 	})
 }
 
-func (e *RustExtractor) emitUse(m parser.QueryResult, filePath, fileID string, result *parser.ExtractionResult) {
+func (e *RustExtractor) emitUse(m parser.QueryResult, filePath, fileID string, src []byte, result *parser.ExtractionResult) {
 	path := m.Captures["use.path"]
 	usePath := strings.ReplaceAll(path.Text, "::", "/")
-	result.Edges = append(result.Edges, &graph.Edge{
+	edge := &graph.Edge{
 		From: fileID, To: "unresolved::import::" + usePath,
 		Kind: graph.EdgeImports, FilePath: filePath, Line: path.StartLine + 1,
-	})
+	}
+	// A `pub use` (or `pub(crate) use`) declaration is a re-export: the
+	// names it brings into scope become part of this module's public
+	// surface. Tag the import edge so the re-export chain follower can
+	// tell a transparent forward from a private `use`. A plain `use`
+	// carries no tag and never forwards a name to a downstream consumer.
+	if def := m.Captures["use.def"]; def != nil {
+		if v := rustVisibility(def.Node, src); v == VisibilityPublic || v == VisibilityInternal {
+			edge.Meta = map[string]any{"reexport": true}
+		}
+	}
+	result.Edges = append(result.Edges, edge)
 }
 
 // --- Helpers --------------------------------------------------------

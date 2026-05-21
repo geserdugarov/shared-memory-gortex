@@ -80,14 +80,27 @@ func (s *Service) RerankSymbols(ctx context.Context, query string, cands []llm.R
 		return nil, errServiceUnavailable
 	}
 
-	resp, err := s.provider.Complete(ctx, llm.CompletionRequest{
-		Messages: []llm.Message{
-			{Role: llm.RoleSystem, Content: llm.RerankSystemPrompt(s.profile)},
-			{Role: llm.RoleUser, Content: buildRerankUser(query, cands)},
+	// An oversized candidate set that overflows the model's context
+	// window is bisected and re-ranked chunk-by-chunk rather than
+	// failing — see completeChunked. Each chunk yields a permutation
+	// of its own IDs; concatenating them keeps every candidate.
+	order, chunked, err := completeChunked(cands,
+		func(sub []llm.RerankCandidate) ([]string, error) {
+			resp, cerr := s.provider.Complete(ctx, llm.CompletionRequest{
+				Messages: []llm.Message{
+					{Role: llm.RoleSystem, Content: llm.RerankSystemPrompt(s.profile)},
+					{Role: llm.RoleUser, Content: buildRerankUser(query, sub)},
+				},
+				MaxTokens: rerankMaxTokens,
+				Shape:     llm.ShapeRerankOrder,
+			})
+			if cerr != nil {
+				return nil, cerr
+			}
+			return filterToInputAppend(parseStringList(resp.Text, "order"), sub), nil
 		},
-		MaxTokens: rerankMaxTokens,
-		Shape:     llm.ShapeRerankOrder,
-	})
+		concatDedupe,
+	)
 	if err != nil {
 		// Surface the error but keep input order intact so the caller
 		// can still return *something* — search-assist must never
@@ -95,10 +108,27 @@ func (s *Service) RerankSymbols(ctx context.Context, query string, cands []llm.R
 		return &llm.RerankResult{Order: candIDs(cands)}, err
 	}
 
-	rawOrder := parseStringList(resp.Text, "order")
-	order := filterToInputAppend(rawOrder, cands)
 	s.rerankCache.Set(key, order)
-	return &llm.RerankResult{Order: order}, nil
+	return &llm.RerankResult{Order: order, Chunked: chunked}, nil
+}
+
+// concatDedupe flattens per-chunk string slices into one slice,
+// dropping duplicates while preserving first-seen order. Adaptive
+// chunks are disjoint candidate ranges, so this is just a defensive
+// dedupe over an already-disjoint concatenation.
+func concatDedupe(parts [][]string) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, p := range parts {
+		for _, id := range p {
+			if seen[id] {
+				continue
+			}
+			seen[id] = true
+			out = append(out, id)
+		}
+	}
+	return out
 }
 
 // VerifyRelevance reads each candidate's code body and returns only
@@ -128,24 +158,35 @@ func (s *Service) VerifyRelevance(ctx context.Context, query string, cands []llm
 		return nil, errServiceUnavailable
 	}
 
-	resp, err := s.provider.Complete(ctx, llm.CompletionRequest{
-		Messages: []llm.Message{
-			{Role: llm.RoleSystem, Content: llm.VerifySystemPrompt(s.profile)},
-			{Role: llm.RoleUser, Content: buildVerifyUser(query, cands)},
+	// Verify judges each candidate independently, so an oversized set
+	// that overflows the context window can be bisected and verified
+	// chunk-by-chunk with no quality loss — see completeChunked. The
+	// kept-ID lists from disjoint chunks are concatenated.
+	keep, chunked, err := completeChunked(cands,
+		func(sub []llm.VerifyCandidate) ([]string, error) {
+			resp, cerr := s.provider.Complete(ctx, llm.CompletionRequest{
+				Messages: []llm.Message{
+					{Role: llm.RoleSystem, Content: llm.VerifySystemPrompt(s.profile)},
+					{Role: llm.RoleUser, Content: buildVerifyUser(query, sub)},
+				},
+				MaxTokens: verifyMaxTokens,
+				Shape:     llm.ShapeVerifyKeep,
+			})
+			if cerr != nil {
+				return nil, cerr
+			}
+			return filterKeepToInput(parseStringList(resp.Text, "keep"), sub), nil
 		},
-		MaxTokens: verifyMaxTokens,
-		Shape:     llm.ShapeVerifyKeep,
-	})
+		concatDedupe,
+	)
 	if err != nil {
 		// On failure, surface the error and keep all input candidates
 		// — better to over-include than to silently drop them.
 		return &llm.VerifyResult{Keep: verifyIDs(cands)}, err
 	}
 
-	rawKeep := parseStringList(resp.Text, "keep")
-	keep := filterKeepToInput(rawKeep, cands)
 	s.verifyCache.Set(key, keep)
-	return &llm.VerifyResult{Keep: keep}, nil
+	return &llm.VerifyResult{Keep: keep, Chunked: chunked}, nil
 }
 
 // buildVerifyUser formats the candidate list for the body-grounded

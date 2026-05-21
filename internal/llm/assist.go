@@ -30,6 +30,11 @@ type ExpandResult struct {
 type RerankResult struct {
 	Order  []string
 	Cached bool
+	// Chunked reports that the candidate set overflowed the model's
+	// context window and the order was assembled by adaptive
+	// chunk-bisection retry (each chunk ranked independently, then
+	// concatenated). Always false on a cache hit.
+	Chunked bool
 }
 
 // VerifyCandidate is one entry the caller asks the LLM to read +
@@ -67,4 +72,10 @@ type CallerInfo struct {
 type VerifyResult struct {
 	Keep   []string
 	Cached bool
+	// Chunked reports that the candidate set overflowed the model's
+	// context window and was verified by adaptive chunk-bisection
+	// retry. Because each candidate is judged independently, chunked
+	// verification is exact — no quality loss. Always false on a cache
+	// hit.
+	Chunked bool
 }

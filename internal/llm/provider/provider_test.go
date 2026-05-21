@@ -69,6 +69,31 @@ func TestNew_ClaudeCLIMissingBinary(t *testing.T) {
 	}
 }
 
+func TestNew_CodexMissingBinary(t *testing.T) {
+	cfg := llm.Config{Provider: "codex", Codex: llm.CodexConfig{Binary: "definitely-not-on-path-codex-xyz"}}.ApplyDefaults()
+	if _, err := New(cfg); err == nil {
+		t.Fatal("expected error when codex binary is not on PATH")
+	}
+}
+
+func TestNew_CodexOK(t *testing.T) {
+	// Use a real binary that exists on every Unix to satisfy the PATH
+	// lookup — the factory only verifies presence, it doesn't invoke it.
+	bin := "/bin/echo"
+	if _, err := os.Stat(bin); err != nil {
+		t.Skip("/bin/echo not available — skipping codex factory test")
+	}
+	cfg := llm.Config{Provider: "codex", Codex: llm.CodexConfig{Binary: bin}}.ApplyDefaults()
+	p, err := New(cfg)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	defer func() { _ = p.Close() }()
+	if p.Name() != "codex" {
+		t.Errorf("Name()=%q want codex", p.Name())
+	}
+}
+
 func TestNew_GeminiMissingKey(t *testing.T) {
 	t.Setenv("GEMINI_API_KEY", "")
 	if _, err := New(llm.Config{Provider: "gemini"}.ApplyDefaults()); err == nil {

@@ -2,13 +2,14 @@
 //
 // Provider isolates every LLM operation (the agent tool-loop and the
 // three search-assist passes) from where inference actually runs.
-// Eight implementations live under internal/llm/provider/: a llama.cpp
+// Nine implementations live under internal/llm/provider/: a llama.cpp
 // `local` provider (CGO, `-tags llama`), six pure-Go HTTP providers
 // (`anthropic`, `openai`, `ollama`, `gemini`, `bedrock` — SigV4-signed,
-// no AWS SDK — and `deepseek`), and a subprocess `claudecli` provider
-// that shells out to the user's `claude` binary (reusing their Claude
-// Code subscription — no Anthropic API key needed). They are swapped
-// via the `llm.provider` config key — see Config.
+// no AWS SDK — and `deepseek`), and two subprocess CLI providers,
+// `claudecli` and `codex`, that shell out to the user's `claude` /
+// `codex` binary (reusing their existing Claude Code / Codex sign-in —
+// no API key needed). They are swapped via the `llm.provider` config
+// key — see Config.
 //
 // The whole surface is a single method, Complete: one structured
 // single-turn call. The agent loop is just repeated Complete calls
@@ -101,7 +102,7 @@ type CompletionResponse struct {
 // the search-assist passes are both built on repeated Complete calls.
 type Provider interface {
 	// Name returns the provider's short identifier — one of "local",
-	// "anthropic", "openai", "ollama", "claudecli", "gemini",
+	// "anthropic", "openai", "ollama", "claudecli", "codex", "gemini",
 	// "bedrock", "deepseek". Used to pick the prompt tier (see
 	// PromptProfile) and for diagnostics.
 	Name() string

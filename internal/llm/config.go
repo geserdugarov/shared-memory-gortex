@@ -26,8 +26,9 @@ type Config struct {
 	// Provider selects the inference backend: "local" (llama.cpp,
 	// in-process, requires a `-tags llama` build), "anthropic",
 	// "openai", "ollama", "claudecli" (subprocess against the
-	// user's `claude` binary), "gemini" (Google Gemini REST API),
-	// "bedrock" (AWS Bedrock Converse API, SigV4-signed) or
+	// user's `claude` binary), "codex" (subprocess against the
+	// user's OpenAI `codex` binary), "gemini" (Google Gemini REST
+	// API), "bedrock" (AWS Bedrock Converse API, SigV4-signed) or
 	// "deepseek" (DeepSeek Chat Completions, OpenAI-compatible).
 	// Empty defaults to "local".
 	Provider string `mapstructure:"provider" yaml:"provider,omitempty"`
@@ -55,6 +56,8 @@ type Config struct {
 	// DeepSeek configures the hosted DeepSeek Chat Completions
 	// provider (api.deepseek.com, OpenAI-compatible wire format).
 	DeepSeek RemoteConfig `mapstructure:"deepseek" yaml:"deepseek,omitempty"`
+	// Codex configures the OpenAI Codex CLI subprocess provider.
+	Codex CodexConfig `mapstructure:"codex" yaml:"codex,omitempty"`
 }
 
 // LocalConfig is the `llm.local:` sub-block — settings for the
@@ -144,6 +147,26 @@ type ClaudeCLIConfig struct {
 	TimeoutSeconds int `mapstructure:"timeout_seconds" yaml:"timeout_seconds,omitempty"`
 }
 
+// CodexConfig is the `llm.codex:` sub-block — settings for the
+// subprocess provider that shells out to the user's local OpenAI
+// Codex CLI. The binary must already be installed and signed in;
+// gortex never touches credentials directly. Field shape mirrors
+// ClaudeCLIConfig — both are CLI-subprocess providers.
+type CodexConfig struct {
+	// Binary is the executable name or absolute path. Empty defaults
+	// to "codex" (resolved via $PATH).
+	Binary string `mapstructure:"binary" yaml:"binary,omitempty"`
+	// Model is the model slug forwarded as `--model` (e.g. "gpt-5-codex",
+	// "o4-mini"). Empty lets the CLI pick its own default.
+	Model string `mapstructure:"model" yaml:"model,omitempty"`
+	// Args is a list of extra arguments inserted before the prompt
+	// positional. Useful for `--sandbox workspace-write` or a `--config`
+	// override when the defaults don't fit.
+	Args []string `mapstructure:"args" yaml:"args,omitempty"`
+	// TimeoutSeconds caps one Complete call. 0 → 180s.
+	TimeoutSeconds int `mapstructure:"timeout_seconds" yaml:"timeout_seconds,omitempty"`
+}
+
 // Default endpoints / key env vars, applied by ApplyDefaults.
 const (
 	defaultAnthropicModel   = "claude-sonnet-4-6"
@@ -157,6 +180,8 @@ const (
 	defaultOllamaHost = "http://localhost:11434"
 
 	defaultClaudeCLIBinary = "claude"
+
+	defaultCodexBinary = "codex"
 
 	defaultGeminiModel   = "gemini-2.5-pro"
 	defaultGeminiBaseURL = "https://generativelanguage.googleapis.com"
@@ -198,7 +223,7 @@ func (c Config) IsEnabled() bool {
 		return strings.TrimSpace(c.OpenAI.Model) != ""
 	case "ollama":
 		return strings.TrimSpace(c.Ollama.Model) != ""
-	case "claudecli":
+	case "claudecli", "codex":
 		return true
 	case "gemini":
 		return strings.TrimSpace(c.Gemini.Model) != ""
@@ -234,6 +259,8 @@ func (c Config) MergeEnv() Config {
 			c.Ollama.Model = v
 		case "claudecli":
 			c.ClaudeCLI.Model = v
+		case "codex":
+			c.Codex.Model = v
 		case "gemini":
 			c.Gemini.Model = v
 		case "bedrock":
@@ -246,6 +273,9 @@ func (c Config) MergeEnv() Config {
 	}
 	if v := os.Getenv("GORTEX_LLM_CLAUDECLI_BINARY"); v != "" {
 		c.ClaudeCLI.Binary = v
+	}
+	if v := os.Getenv("GORTEX_LLM_CODEX_BINARY"); v != "" {
+		c.Codex.Binary = v
 	}
 	if v := os.Getenv("GORTEX_LLM_BEDROCK_REGION"); v != "" {
 		c.Bedrock.Region = v
@@ -324,6 +354,11 @@ func (c Config) ApplyDefaults() Config {
 		c.ClaudeCLI.Binary = defaultClaudeCLIBinary
 	}
 
+	// codex
+	if c.Codex.Binary == "" {
+		c.Codex.Binary = defaultCodexBinary
+	}
+
 	// gemini
 	if c.Gemini.Model == "" {
 		c.Gemini.Model = defaultGeminiModel
@@ -383,6 +418,7 @@ func (c Config) MergedWith(fb Config) Config {
 	c.Gemini = c.Gemini.mergedWith(fb.Gemini)
 	c.Bedrock = c.Bedrock.mergedWith(fb.Bedrock)
 	c.DeepSeek = c.DeepSeek.mergedWith(fb.DeepSeek)
+	c.Codex = c.Codex.mergedWith(fb.Codex)
 	return c
 }
 
@@ -448,6 +484,22 @@ func (b BedrockConfig) mergedWith(fb BedrockConfig) BedrockConfig {
 }
 
 func (c ClaudeCLIConfig) mergedWith(fb ClaudeCLIConfig) ClaudeCLIConfig {
+	if c.Binary == "" {
+		c.Binary = fb.Binary
+	}
+	if c.Model == "" {
+		c.Model = fb.Model
+	}
+	if len(c.Args) == 0 {
+		c.Args = fb.Args
+	}
+	if c.TimeoutSeconds == 0 {
+		c.TimeoutSeconds = fb.TimeoutSeconds
+	}
+	return c
+}
+
+func (c CodexConfig) mergedWith(fb CodexConfig) CodexConfig {
 	if c.Binary == "" {
 		c.Binary = fb.Binary
 	}

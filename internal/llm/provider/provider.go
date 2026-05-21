@@ -16,6 +16,7 @@ import (
 	"github.com/zzet/gortex/internal/llm/provider/anthropic"
 	"github.com/zzet/gortex/internal/llm/provider/bedrock"
 	"github.com/zzet/gortex/internal/llm/provider/claudecli"
+	"github.com/zzet/gortex/internal/llm/provider/codex"
 	"github.com/zzet/gortex/internal/llm/provider/deepseek"
 	"github.com/zzet/gortex/internal/llm/provider/gemini"
 	"github.com/zzet/gortex/internal/llm/provider/local"
@@ -28,8 +29,8 @@ import (
 // HTTP providers rely on the defaulted model / endpoint / key-env
 // values. Returns an error when the provider is unknown or
 // misconfigured (missing model, unset API key) or, for "local", when
-// the binary was built without `-tags llama`; for "claudecli", when
-// the `claude` binary is not on $PATH.
+// the binary was built without `-tags llama`; for "claudecli" /
+// "codex", when the `claude` / `codex` binary is not on $PATH.
 func New(cfg llm.Config) (llm.Provider, error) {
 	switch cfg.ProviderName() {
 	case "local":
@@ -42,6 +43,8 @@ func New(cfg llm.Config) (llm.Provider, error) {
 		return ollama.New(cfg.Ollama)
 	case "claudecli":
 		return claudecli.New(cfg.ClaudeCLI)
+	case "codex":
+		return codex.New(cfg.Codex)
 	case "gemini":
 		return gemini.New(cfg.Gemini)
 	case "bedrock":
@@ -49,6 +52,6 @@ func New(cfg llm.Config) (llm.Provider, error) {
 	case "deepseek":
 		return deepseek.New(cfg.DeepSeek)
 	default:
-		return nil, fmt.Errorf("llm: unknown provider %q (want local|anthropic|openai|ollama|claudecli|gemini|bedrock|deepseek)", cfg.ProviderName())
+		return nil, fmt.Errorf("llm: unknown provider %q (want local|anthropic|openai|ollama|claudecli|codex|gemini|bedrock|deepseek)", cfg.ProviderName())
 	}
 }

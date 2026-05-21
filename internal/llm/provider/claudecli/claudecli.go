@@ -13,21 +13,21 @@
 // agent tool-call shape) is obtained by appending a JSON-Schema
 // instruction to the system prompt and parsing the first valid JSON
 // object out of the response — the CLI has no native structured-
-// output mechanism. The agent tool-loop itself uses the *emulated*
-// protocol: tool calls and results travel as plain text turns, so a
-// single llm.Message shape works across all five providers.
+// output mechanism. That schema-rider + JSON-extraction logic is
+// shared with the `codex` provider; it lives in llm.AppendSchema-
+// Instruction / llm.ExtractJSON. The agent tool-loop itself uses the
+// *emulated* protocol: tool calls and results travel as plain text
+// turns, so a single llm.Message shape works across all providers.
 package claudecli
 
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os/exec"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	"github.com/zzet/gortex/internal/llm"
 )
@@ -90,24 +90,19 @@ func (p *Provider) Complete(ctx context.Context, req llm.CompletionRequest) (llm
 	system, prompt := flatten(req.Messages)
 	structured := req.Shape != llm.ShapeFreeform
 	if structured {
-		system = appendSchemaInstruction(system, req.Shape, req.Tools)
+		system = llm.AppendSchemaInstruction(system, req.Shape, req.Tools)
 	}
 
 	args := []string{"--print", "--output-format", "text"}
 	if p.model != "" {
 		args = append(args, "--model", p.model)
 	}
-	if req.MaxTokens > 0 {
-		// max-turns caps the agent loop inside Claude Code, not the
-		// per-response token budget — but pinning it to 1 keeps the
-		// CLI single-shot, which is what every llm.Provider caller
-		// already assumes. The token cap itself is best-effort: the
-		// CLI exposes no equivalent flag, so we lean on the model's
-		// own behaviour given a short system prompt.
-		args = append(args, "--max-turns", "1")
-	} else {
-		args = append(args, "--max-turns", "1")
-	}
+	// --max-turns pins the agent loop inside Claude Code to a single
+	// turn — every llm.Provider caller assumes one single-shot
+	// response. The per-response token cap (req.MaxTokens) is
+	// best-effort: the CLI exposes no equivalent flag, so we lean on
+	// the model's own behaviour given a short system prompt.
+	args = append(args, "--max-turns", "1")
 	if system != "" {
 		args = append(args, "--append-system-prompt", system)
 	}
@@ -130,9 +125,9 @@ func (p *Provider) Complete(ctx context.Context, req llm.CompletionRequest) (llm
 		// Distinguish a context-timeout from an exec failure so the
 		// agent loop can log something meaningful.
 		if errors.Is(runCtx.Err(), context.DeadlineExceeded) {
-			return llm.CompletionResponse{}, fmt.Errorf("claudecli: timed out after %s: %s", p.timeout, snippet(stderr.Bytes()))
+			return llm.CompletionResponse{}, fmt.Errorf("claudecli: timed out after %s: %s", p.timeout, llm.Snippet(stderr.Bytes()))
 		}
-		if msg := snippet(stderr.Bytes()); msg != "" {
+		if msg := llm.Snippet(stderr.Bytes()); msg != "" {
 			return llm.CompletionResponse{}, fmt.Errorf("claudecli: %w: %s", err, msg)
 		}
 		return llm.CompletionResponse{}, fmt.Errorf("claudecli: %w", err)
@@ -143,9 +138,9 @@ func (p *Provider) Complete(ctx context.Context, req llm.CompletionRequest) (llm
 		return llm.CompletionResponse{}, errors.New("claudecli: empty response from CLI")
 	}
 	if structured {
-		extracted, ok := extractJSON(text)
+		extracted, ok := llm.ExtractJSON(text)
 		if !ok {
-			return llm.CompletionResponse{}, fmt.Errorf("claudecli: response carried no JSON: %s", snippet([]byte(text)))
+			return llm.CompletionResponse{}, fmt.Errorf("claudecli: response carried no JSON: %s", llm.Snippet([]byte(text)))
 		}
 		text = extracted
 	}
@@ -198,160 +193,4 @@ func renderToolResult(m llm.Message) string {
 		return "Tool result (" + m.ToolName + "):\n" + m.Content
 	}
 	return "Tool result:\n" + m.Content
-}
-
-// appendSchemaInstruction tacks a "respond with this JSON shape"
-// rider onto the system prompt. The CLI has no native structured-
-// output flag, so this — plus the JSON extractor on the response —
-// is how the four list shapes get enforced.
-func appendSchemaInstruction(system string, shape llm.JSONShape, tools []llm.ToolSpec) string {
-	schema := llm.JSONSchemaFor(shape, tools)
-	if schema == nil {
-		return system
-	}
-	raw, err := json.Marshal(schema)
-	if err != nil {
-		// llm.JSONSchemaFor returns hand-built maps that always
-		// marshal — if Marshal does fail, falling through with the
-		// unmodified system prompt is safer than crashing the call.
-		return system
-	}
-	rider := "Respond with a single JSON object that conforms exactly to this JSON Schema:\n" +
-		string(raw) +
-		"\nOutput ONLY the JSON object — no prose, no commentary, no markdown fences."
-	if system == "" {
-		return rider
-	}
-	return system + "\n\n" + rider
-}
-
-// extractJSON pulls the first balanced JSON object or array out of
-// text. The CLI sometimes wraps responses in markdown fences or
-// surrounds them with prose ("Sure, here you go:\n{...}"); this
-// helper finds and verifies the JSON payload so the assist passes
-// don't choke on chatty completions.
-func extractJSON(text string) (string, bool) {
-	if c, ok := tryUnmarshal(text); ok {
-		return c, true
-	}
-	if stripped, changed := stripFences(text); changed {
-		if c, ok := tryUnmarshal(stripped); ok {
-			return c, true
-		}
-		text = stripped
-	}
-	// Scan for the first balanced JSON object/array.
-	for i := 0; i < len(text); i++ {
-		c := text[i]
-		if c != '{' && c != '[' {
-			continue
-		}
-		end, ok := balancedEnd(text, i)
-		if !ok {
-			continue
-		}
-		candidate := text[i : end+1]
-		if c, ok := tryUnmarshal(candidate); ok {
-			return c, true
-		}
-	}
-	return "", false
-}
-
-// stripFences removes a single ``` or ```json wrapper.
-func stripFences(text string) (string, bool) {
-	t := strings.TrimSpace(text)
-	if !strings.HasPrefix(t, "```") {
-		return text, false
-	}
-	// Drop the opening fence line.
-	nl := strings.IndexByte(t, '\n')
-	if nl < 0 {
-		return text, false
-	}
-	body := t[nl+1:]
-	if i := strings.LastIndex(body, "```"); i >= 0 {
-		body = body[:i]
-	}
-	return strings.TrimSpace(body), true
-}
-
-// tryUnmarshal returns the trimmed candidate if it parses as JSON.
-func tryUnmarshal(s string) (string, bool) {
-	trimmed := strings.TrimSpace(s)
-	if trimmed == "" {
-		return "", false
-	}
-	var v any
-	if err := json.Unmarshal([]byte(trimmed), &v); err != nil {
-		return "", false
-	}
-	return trimmed, true
-}
-
-// balancedEnd returns the index of the closing brace/bracket that
-// balances the opener at start. Tracks string literals so quoted
-// braces don't throw the depth count off.
-func balancedEnd(text string, start int) (int, bool) {
-	open := text[start]
-	var close byte
-	switch open {
-	case '{':
-		close = '}'
-	case '[':
-		close = ']'
-	default:
-		return 0, false
-	}
-	depth := 0
-	inString := false
-	escape := false
-	for i := start; i < len(text); i++ {
-		c := text[i]
-		if inString {
-			if escape {
-				escape = false
-				continue
-			}
-			switch c {
-			case '\\':
-				escape = true
-			case '"':
-				inString = false
-			}
-			continue
-		}
-		switch c {
-		case '"':
-			inString = true
-		case open:
-			depth++
-		case close:
-			depth--
-			if depth == 0 {
-				return i, true
-			}
-		}
-	}
-	return 0, false
-}
-
-// snippet truncates a stderr blob for inclusion in an error message.
-// Operates on runes so multi-byte characters at the cut point stay
-// intact.
-func snippet(b []byte) string {
-	const max = 300
-	s := strings.TrimSpace(string(b))
-	if utf8.RuneCountInString(s) <= max {
-		return s
-	}
-	// Walk runes, count to max.
-	count := 0
-	for i := range s {
-		count++
-		if count > max {
-			return s[:i] + "…"
-		}
-	}
-	return s
 }

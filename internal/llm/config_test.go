@@ -37,6 +37,8 @@ func TestConfig_IsEnabled(t *testing.T) {
 		{"bedrock no model_id", Config{Provider: "bedrock"}, false},
 		{"deepseek with model", Config{Provider: "deepseek", DeepSeek: RemoteConfig{Model: "deepseek-chat"}}, true},
 		{"deepseek no model", Config{Provider: "deepseek"}, false},
+		{"codex no model", Config{Provider: "codex"}, true},
+		{"codex with model", Config{Provider: "codex", Codex: CodexConfig{Model: "gpt-5-codex"}}, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -69,6 +71,9 @@ func TestConfig_ApplyDefaults(t *testing.T) {
 	}
 	if c.ClaudeCLI.Binary != defaultClaudeCLIBinary {
 		t.Errorf("claudecli binary=%q want %q", c.ClaudeCLI.Binary, defaultClaudeCLIBinary)
+	}
+	if c.Codex.Binary != defaultCodexBinary {
+		t.Errorf("codex binary=%q want %q", c.Codex.Binary, defaultCodexBinary)
 	}
 	if c.Gemini.Model != defaultGeminiModel || c.Gemini.APIKeyEnv != defaultGeminiKeyEnv || c.Gemini.BaseURL != defaultGeminiBaseURL {
 		t.Errorf("gemini defaults wrong: %+v", c.Gemini)
@@ -145,6 +150,43 @@ func TestConfig_MergeEnv_ClaudeCLIModel(t *testing.T) {
 	}
 	if c.ClaudeCLI.Binary != "/opt/anthropic/claude" {
 		t.Errorf("claudecli binary=%q want /opt/anthropic/claude", c.ClaudeCLI.Binary)
+	}
+}
+
+func TestConfig_MergeEnv_CodexModel(t *testing.T) {
+	t.Setenv("GORTEX_LLM_PROVIDER", "codex")
+	t.Setenv("GORTEX_LLM_MODEL", "o4-mini")
+	t.Setenv("GORTEX_LLM_CODEX_BINARY", "/opt/openai/codex")
+	c := Config{}.MergeEnv()
+	if c.Codex.Model != "o4-mini" {
+		t.Errorf("codex model=%q want o4-mini", c.Codex.Model)
+	}
+	if c.Codex.Binary != "/opt/openai/codex" {
+		t.Errorf("codex binary=%q want /opt/openai/codex", c.Codex.Binary)
+	}
+}
+
+func TestConfig_MergedWith_Codex(t *testing.T) {
+	global := Config{
+		Provider: "codex",
+		Codex:    CodexConfig{Binary: "/usr/local/bin/codex", Args: []string{"--sandbox", "read-only"}, TimeoutSeconds: 90},
+	}
+	local := Config{Codex: CodexConfig{Model: "gpt-5-codex"}}
+	got := local.MergedWith(global)
+	if got.Provider != "codex" {
+		t.Errorf("provider=%q want codex", got.Provider)
+	}
+	if got.Codex.Binary != "/usr/local/bin/codex" {
+		t.Errorf("binary=%q — global should fill", got.Codex.Binary)
+	}
+	if got.Codex.Model != "gpt-5-codex" {
+		t.Errorf("model=%q want gpt-5-codex (local should win)", got.Codex.Model)
+	}
+	if len(got.Codex.Args) != 2 {
+		t.Errorf("args=%v — global should fill when local is empty", got.Codex.Args)
+	}
+	if got.Codex.TimeoutSeconds != 90 {
+		t.Errorf("timeout=%d — global should fill", got.Codex.TimeoutSeconds)
 	}
 }
 

@@ -27,12 +27,13 @@ const (
 
 // ProfileForProvider maps a provider's Name() to its prompt tier.
 // "local" and "ollama" run small models → ProfileSmall; the hosted
-// providers and "claudecli" (which shells out to Claude) run
-// frontier models → ProfileFrontier. Unknown names fall back to
-// ProfileSmall (the safe, more-explicit tier).
+// providers and the CLI providers ("claudecli", "codex" — which shell
+// out to Claude / Codex) run frontier models → ProfileFrontier.
+// Unknown names fall back to ProfileSmall (the safe, more-explicit
+// tier).
 func ProfileForProvider(name string) PromptProfile {
 	switch name {
-	case "anthropic", "openai", "claudecli", "gemini", "bedrock", "deepseek":
+	case "anthropic", "openai", "claudecli", "codex", "gemini", "bedrock", "deepseek":
 		return ProfileFrontier
 	default:
 		return ProfileSmall

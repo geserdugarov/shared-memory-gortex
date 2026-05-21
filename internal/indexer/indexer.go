@@ -518,6 +518,8 @@ func (idx *Indexer) RunGlobalGraphPasses() {
 			zap.Int("edges", cs.Edges),
 			zap.Int("skipped_buckets", cs.SkippedBuckets),
 			zap.Int("skipped_bucket_items", cs.SkippedBucketItems),
+			zap.Int("diffused_pairs", cs.DiffusedPairs),
+			zap.Int("diffused_edges", cs.DiffusedEdges),
 		)
 	}
 	// gRPC stub-call resolution. Runs after InferImplements (the
@@ -1747,6 +1749,8 @@ func (idx *Indexer) IndexCtx(ctx context.Context, root string) (*IndexResult, er
 					zap.Int("edges", cs.Edges),
 					zap.Int("skipped_buckets", cs.SkippedBuckets),
 					zap.Int("skipped_bucket_items", cs.SkippedBucketItems),
+					zap.Int("diffused_pairs", cs.DiffusedPairs),
+					zap.Int("diffused_edges", cs.DiffusedEdges),
 				)
 			}
 			// gRPC stub-call resolution — runs once the call graph and

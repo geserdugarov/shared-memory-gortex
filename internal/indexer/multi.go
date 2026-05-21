@@ -300,6 +300,8 @@ func (mi *MultiIndexer) RunGlobalGraphPasses() {
 			zap.Int("edges", cs.Edges),
 			zap.Int("skipped_buckets", cs.SkippedBuckets),
 			zap.Int("skipped_bucket_items", cs.SkippedBucketItems),
+			zap.Int("diffused_pairs", cs.DiffusedPairs),
+			zap.Int("diffused_edges", cs.DiffusedEdges),
 		)
 	}
 	// gRPC stub-call resolution. After InferImplements (the

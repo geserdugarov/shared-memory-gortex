@@ -1,6 +1,7 @@
 package indexer
 
 import (
+	"sort"
 	"strings"
 
 	"github.com/zzet/gortex/internal/clones"
@@ -158,11 +159,13 @@ func bodyText(lines []string, startLine, endLine int) string {
 // workspace has a lot of templated boilerplate that LSH would have
 // over-fanned-out on.
 type CloneDetectionStats struct {
-	Items                 int // function/method nodes with a signature
-	Pairs                 int // detected clone pairs (after Jaccard filter)
-	Edges                 int // EdgeSimilarTo emitted (≈ 2·Pairs, modulo dedup)
-	SkippedBuckets        int // LSH buckets dropped for exceeding maxBucketSize
-	SkippedBucketItems    int // total items inside the dropped buckets
+	Items              int // function/method nodes with a signature
+	Pairs              int // detected clone pairs (after Jaccard filter)
+	Edges              int // EdgeSimilarTo emitted (≈ 2·Pairs, modulo dedup)
+	SkippedBuckets     int // LSH buckets dropped for exceeding maxBucketSize
+	SkippedBucketItems int // total items inside the dropped buckets
+	DiffusedPairs      int // semantically-related pairs surviving threshold+cap
+	DiffusedEdges      int // EdgeSemanticallyRelated emitted (= 2·DiffusedPairs)
 }
 
 // detectClonesAndEmitEdges is the graph-wide half of clone detection.
@@ -221,6 +224,7 @@ func detectClonesAndEmitEdges(g *graph.Graph, threshold float64) CloneDetectionS
 	stats.SkippedBuckets = sb
 	stats.SkippedBucketItems = sbi
 	stats.Pairs = len(detected)
+	directPairs := make(map[[2]string]struct{}, len(detected))
 	for _, p := range detected {
 		from := g.GetNode(p.A)
 		to := g.GetNode(p.B)
@@ -230,8 +234,192 @@ func detectClonesAndEmitEdges(g *graph.Graph, threshold float64) CloneDetectionS
 		emitSimilarEdge(g, from, to, p.Similarity)
 		emitSimilarEdge(g, to, from, p.Similarity)
 		stats.Edges += 2
+		// Record the canonicalised (A<B) clone pair so the diffusion
+		// pass below never re-emits a direct clone as a merely
+		// semantically-related edge — the two edge kinds partition.
+		directPairs[canonicalPair(p.A, p.B)] = struct{}{}
 	}
+
+	// Graph-diffusion smoothing. Runs here, after the direct clone
+	// edges are materialised, while detectClonesAndEmitEdges still
+	// holds g.ResolveMutex — the diffusion pass mutates Node-adjacent
+	// edge state and must rendezvous on the same lock as the clone
+	// pass it extends.
+	dp, de := diffuseSimilarityEdges(g, detected, directPairs)
+	stats.DiffusedPairs = dp
+	stats.DiffusedEdges = de
 	return stats
+}
+
+// Diffusion-pass tuning constants. The graph-diffusion smoothing pass
+// blends direct clone similarities across one shared neighbour, then
+// threshold-gates and caps the result so the semantically-related edge
+// set stays bounded — it must never explode the graph's edge count.
+const (
+	// diffusionDamping discounts a two-hop blended score relative to
+	// the direct clone similarities it is derived from. The diffused
+	// score for a pair (A,C) bridged by B is
+	//   damping · similarity(A,B) · similarity(B,C)
+	// — a product (already ≤ each factor) further damped, so a
+	// transitive relation is always weaker evidence than either
+	// direct clone link it rests on. 0.9 keeps a strong A~B~C chain
+	// comfortably above the emit threshold while still ranking it
+	// below a genuine clone.
+	diffusionDamping = 0.9
+	// diffusionThreshold is the minimum diffused score for a pair to
+	// be materialised as an EdgeSemanticallyRelated edge. Set below
+	// the clone DefaultThreshold (0.82): the whole point of the pass
+	// is to surface relatedness the clone filter rejected, so the
+	// gate must admit sub-clone scores — but high enough that a chain
+	// through two weak (~0.5) clone links is dropped as noise.
+	diffusionThreshold = 0.55
+	// diffusionMaxNeighbors caps the clone-graph fan-out considered
+	// per node. A node in a large clone cluster (templated
+	// boilerplate) would otherwise contribute a quadratic burst of
+	// diffused pairs; bounding the per-node neighbour set keeps the
+	// pass near-linear. Neighbours are taken in descending direct
+	// similarity so the strongest links survive the cap.
+	diffusionMaxNeighbors = 16
+	// diffusionMaxPairs is the hard ceiling on emitted
+	// semantically-related pairs across the whole graph. Pairs are
+	// ranked by diffused score (descending) before the cut, so the
+	// strongest relations survive when the ceiling binds. Two
+	// directed edges are emitted per surviving pair.
+	diffusionMaxPairs = 50000
+)
+
+// canonicalPair returns the (smaller, larger) ordering of two IDs so a
+// pair has a single key regardless of argument order.
+func canonicalPair(a, b string) [2]string {
+	if a <= b {
+		return [2]string{a, b}
+	}
+	return [2]string{b, a}
+}
+
+// diffusionEdge is one weighted link in the in-memory similarity graph
+// the diffusion pass walks — a neighbour ID and the direct clone score.
+type diffusionEdge struct {
+	id    string
+	score float64
+}
+
+// diffuseSimilarityEdges is the graph-diffusion smoothing pass. It
+// takes the direct clone pairs produced by the LSH filter, builds the
+// undirected similarity graph they describe, and for every pair (A,C)
+// joined through a shared neighbour B derives a damped two-hop score.
+// Surviving pairs (above diffusionThreshold, not already a direct
+// clone, capped at diffusionMaxPairs) are materialised as a symmetric
+// pair of EdgeSemanticallyRelated edges.
+//
+// The blend is a bounded 1-to-2-hop transitive product — not a dense
+// O(n²) diffusion. It is deterministic: neighbour lists are sorted, the
+// score for a pair is the max over its bridging neighbours (an
+// associative reduction independent of visitation order), and the
+// final cap cuts a score-sorted slice with ID tie-breaks.
+//
+// directPairs carries the canonicalised clone pairs already emitted as
+// EdgeSimilarTo; any pair in that set is skipped so semantically_related
+// and similar_to partition cleanly.
+func diffuseSimilarityEdges(g *graph.Graph, pairs []clones.Pair, directPairs map[[2]string]struct{}) (diffusedPairs, diffusedEdges int) {
+	if g == nil || len(pairs) < 2 {
+		return 0, 0
+	}
+
+	// Adjacency: id → its similar neighbours with direct scores. Each
+	// undirected clone pair contributes an entry on both endpoints.
+	adj := make(map[string][]diffusionEdge)
+	for _, p := range pairs {
+		adj[p.A] = append(adj[p.A], diffusionEdge{id: p.B, score: p.Similarity})
+		adj[p.B] = append(adj[p.B], diffusionEdge{id: p.A, score: p.Similarity})
+	}
+
+	// Sort each neighbour list by descending score (ID tie-break) and
+	// apply the per-node fan-out cap. Sorting also makes the pair
+	// enumeration below deterministic.
+	for id, nbrs := range adj {
+		sort.Slice(nbrs, func(i, j int) bool {
+			if nbrs[i].score != nbrs[j].score {
+				return nbrs[i].score > nbrs[j].score
+			}
+			return nbrs[i].id < nbrs[j].id
+		})
+		if len(nbrs) > diffusionMaxNeighbors {
+			adj[id] = nbrs[:diffusionMaxNeighbors]
+		}
+	}
+
+	// For each bridge node B, every unordered pair of its neighbours
+	// (A,C) is a candidate two-hop relation. The diffused score is the
+	// damped product of the two clone links; when multiple bridges
+	// connect the same (A,C) the strongest (max) bridge wins.
+	best := make(map[[2]string]float64)
+	bridges := make([]string, 0, len(adj))
+	for id := range adj {
+		bridges = append(bridges, id)
+	}
+	sort.Strings(bridges)
+	for _, b := range bridges {
+		nbrs := adj[b]
+		for i := range nbrs {
+			for j := i + 1; j < len(nbrs); j++ {
+				a, c := nbrs[i].id, nbrs[j].id
+				if a == c {
+					continue
+				}
+				key := canonicalPair(a, c)
+				if _, isClone := directPairs[key]; isClone {
+					continue // a direct clone — stays similar_to only
+				}
+				score := diffusionDamping * nbrs[i].score * nbrs[j].score
+				if score < diffusionThreshold {
+					continue
+				}
+				if score > best[key] {
+					best[key] = score
+				}
+			}
+		}
+	}
+	if len(best) == 0 {
+		return 0, 0
+	}
+
+	// Rank surviving pairs by diffused score so the global cap keeps
+	// the strongest relations; ID tie-breaks keep the cut deterministic.
+	type diffusedPair struct {
+		a, c  string
+		score float64
+	}
+	ranked := make([]diffusedPair, 0, len(best))
+	for key, score := range best {
+		ranked = append(ranked, diffusedPair{a: key[0], c: key[1], score: score})
+	}
+	sort.Slice(ranked, func(i, j int) bool {
+		if ranked[i].score != ranked[j].score {
+			return ranked[i].score > ranked[j].score
+		}
+		if ranked[i].a != ranked[j].a {
+			return ranked[i].a < ranked[j].a
+		}
+		return ranked[i].c < ranked[j].c
+	})
+	if len(ranked) > diffusionMaxPairs {
+		ranked = ranked[:diffusionMaxPairs]
+	}
+
+	for _, rp := range ranked {
+		from := g.GetNode(rp.a)
+		to := g.GetNode(rp.c)
+		if from == nil || to == nil {
+			continue
+		}
+		emitSemanticallyRelatedEdge(g, from, to, rp.score)
+		emitSemanticallyRelatedEdge(g, to, from, rp.score)
+		diffusedPairs++
+		diffusedEdges += 2
+	}
+	return diffusedPairs, diffusedEdges
 }
 
 // emitSimilarEdge adds one directed EdgeSimilarTo edge carrying the
@@ -244,6 +432,24 @@ func emitSimilarEdge(g *graph.Graph, from, to *graph.Node, similarity float64) {
 		From:       from.ID,
 		To:         to.ID,
 		Kind:       graph.EdgeSimilarTo,
+		FilePath:   from.FilePath,
+		Line:       from.StartLine,
+		Confidence: similarity,
+		Origin:     graph.OriginASTInferred,
+		Meta:       map[string]any{"similarity": similarity},
+	})
+}
+
+// emitSemanticallyRelatedEdge adds one directed EdgeSemanticallyRelated
+// edge carrying the diffused similarity score. Like emitSimilarEdge the
+// edge is anchored at the source node's file/line and origin is
+// ast_inferred — the score is a statistical estimate over normalised
+// tokens, here additionally smoothed across the similarity graph.
+func emitSemanticallyRelatedEdge(g *graph.Graph, from, to *graph.Node, similarity float64) {
+	g.AddEdge(&graph.Edge{
+		From:       from.ID,
+		To:         to.ID,
+		Kind:       graph.EdgeSemanticallyRelated,
 		FilePath:   from.FilePath,
 		Line:       from.StartLine,
 		Confidence: similarity,

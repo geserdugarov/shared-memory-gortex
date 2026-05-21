@@ -361,6 +361,25 @@ const (
 	// of live code" — a near-duplicate of a live function that itself
 	// has zero callers.
 	EdgeSimilarTo EdgeKind = "similar_to"
+	// EdgeSemanticallyRelated links two function/method nodes that are
+	// plausibly semantically related without being near-duplicate
+	// clones. Where EdgeSimilarTo captures only high direct token
+	// overlap, this edge is materialised by a graph-diffusion smoothing
+	// pass that runs after clone detection: it walks the EdgeSimilarTo
+	// graph and, for a pair (A,C) joined through a shared similar
+	// neighbour B, derives a diffused score from similarity(A,B) and
+	// similarity(B,C). Transitive relatedness — "A is similar to B and
+	// B is similar to C, so A and C are related" — surfaces pairs whose
+	// direct Jaccard is below the clone threshold. Emitted symmetrically
+	// — both fA→fB and fB→fA — so "what is X related to" is a single
+	// out-edge walk from either endpoint. Meta["similarity"] carries the
+	// diffused score (0..1); Confidence mirrors it. Origin: ast_inferred
+	// — like EdgeSimilarTo the relationship is a statistical estimate
+	// over normalised tokens, here additionally smoothed across the
+	// similarity graph, not a structural fact. A pair that already has a
+	// direct EdgeSimilarTo edge is never re-emitted as semantically
+	// related — the two edge kinds partition cleanly.
+	EdgeSemanticallyRelated EdgeKind = "semantically_related"
 	// EdgeCoChange links two KindFile nodes that git history shows are
 	// repeatedly committed together — "logical coupling". This is the
 	// relationship the import graph cannot see: a handler and its

@@ -20,6 +20,7 @@
 
 [![macOS](https://img.shields.io/badge/macOS-supported-blue.svg)](#)
 [![Linux](https://img.shields.io/badge/Linux-supported-blue.svg)](#)
+[![Windows](https://img.shields.io/badge/Windows-supported-blue.svg)](#)
 
 [![Claude Code](https://img.shields.io/badge/Claude_Code-supported-blueviolet.svg)](#)
 [![Cursor](https://img.shields.io/badge/Cursor-supported-blueviolet.svg)](#)

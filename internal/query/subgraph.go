@@ -14,6 +14,11 @@ type SubGraph struct {
 	TotalNodes int           `json:"total_nodes"`
 	TotalEdges int           `json:"total_edges"`
 	Truncated  bool          `json:"truncated"`
+	// Caveat is attached only when an edge-returning query (find_usages,
+	// get_callers) comes back with no edges, classifying whether the
+	// empty result reflects genuinely unused code or an extraction gap.
+	// Nil — and omitted from the response — for any non-empty result.
+	Caveat *graph.ZeroEdgeCaveat `json:"caveat,omitempty"`
 }
 
 // QueryOptions controls traversal depth, result limits, and detail level.

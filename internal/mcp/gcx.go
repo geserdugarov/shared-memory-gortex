@@ -324,14 +324,26 @@ func encodeBatchSymbols(rows []map[string]any, includeSource bool) ([]byte, erro
 	return buf.Bytes(), enc.Close()
 }
 
+// zeroEdgeCaveatMeta renders a zero-edge caveat as GCX header meta
+// key/value pairs (caveat + caveat_message). Returns nil when the
+// caveat is absent so a non-empty result carries no extra meta.
+func zeroEdgeCaveatMeta(c *graph.ZeroEdgeCaveat) []string {
+	if c == nil {
+		return nil
+	}
+	return []string{"caveat", string(c.Class), "caveat_message", c.Message}
+}
+
 // encodeFindUsages emits one row per usage edge. Each row names the
 // caller symbol, its location, the edge kind, and the origin tier so
 // agents can filter without a second call.
 func encodeFindUsages(sg *query.SubGraph) ([]byte, error) {
 	var buf bytes.Buffer
+	meta := []string{"edges", fmt.Sprintf("%d", len(sg.Edges))}
+	meta = append(meta, zeroEdgeCaveatMeta(sg.Caveat)...)
 	enc := newGCX(&buf, "find_usages",
 		[]string{"from", "to", "edge_kind", "origin", "tier", "confidence", "from_name", "from_path", "from_line", "from_is_test", "from_test_role", "from_test_runner"},
-		"edges", fmt.Sprintf("%d", len(sg.Edges)),
+		meta...,
 	)
 	nodeIdx := indexNodes(sg.Nodes)
 	for _, e := range sg.Edges {
@@ -382,9 +394,11 @@ func encodeSubGraph(tool string, sg *query.SubGraph) ([]byte, error) {
 	if err := nodeEnc.Close(); err != nil {
 		return nil, err
 	}
+	edgeMeta := []string{"count", fmt.Sprintf("%d", len(sg.Edges))}
+	edgeMeta = append(edgeMeta, zeroEdgeCaveatMeta(sg.Caveat)...)
 	edgeEnc := newGCX(&buf, tool+".edges",
 		[]string{"from", "to", "kind", "origin", "tier", "confidence", "label"},
-		"count", fmt.Sprintf("%d", len(sg.Edges)),
+		edgeMeta...,
 	)
 	for _, e := range sg.Edges {
 		label := e.ConfidenceLabel
@@ -1384,6 +1398,22 @@ func encodeChangeImpact(result map[string]any) ([]byte, error) {
 			return nil, err
 		}
 		if err := ciEnc.Close(); err != nil {
+			return nil, err
+		}
+	}
+
+	// zero_impact_caveat — one row per input symbol whose empty blast
+	// radius could not be told apart from an extraction gap.
+	if caveats, ok := result["zero_impact_caveat"].([]graph.ZeroImpactCaveat); ok && len(caveats) > 0 {
+		cavEnc := newGCX(&buf, "explain_change_impact.caveats",
+			[]string{"id", "class", "message"},
+		)
+		for _, c := range caveats {
+			if err := cavEnc.WriteRow(c.ID, string(c.Class), c.Message); err != nil {
+				return nil, err
+			}
+		}
+		if err := cavEnc.Close(); err != nil {
 			return nil, err
 		}
 	}

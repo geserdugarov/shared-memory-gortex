@@ -80,10 +80,11 @@ type toonEdgeRow struct {
 
 // toonSubGraphResult wraps nodes and edges for TOON tabular output.
 type toonSubGraphResult struct {
-	Nodes     []toonNodeRow `toon:"nodes"`
-	Edges     []toonEdgeRow `toon:"edges"`
-	Total     int           `toon:"total"`
-	Truncated bool          `toon:"truncated"`
+	Nodes     []toonNodeRow         `toon:"nodes"`
+	Edges     []toonEdgeRow         `toon:"edges"`
+	Total     int                   `toon:"total"`
+	Truncated bool                  `toon:"truncated"`
+	Caveat    *graph.ZeroEdgeCaveat `toon:"caveat,omitempty"`
 }
 
 // toonSearchResult wraps search results for TOON tabular output.
@@ -258,6 +259,7 @@ func subGraphToTOON(sg *query.SubGraph) (*mcp.CallToolResult, error) {
 		Edges:     edgeRows,
 		Total:     sg.TotalNodes,
 		Truncated: sg.Truncated,
+		Caveat:    sg.Caveat,
 	}
 	data, err := toon.Marshal(result)
 	if err != nil {
@@ -1278,6 +1280,9 @@ func (s *Server) handleGetCallers(ctx context.Context, req mcp.CallToolRequest) 
 	sg := s.engineFor(ctx).GetCallers(id, opts)
 	sg.FilterByMinTier(minTier)
 	enrichSubGraphEdges(sg)
+	if len(sg.Edges) == 0 {
+		sg.Caveat = graph.CaveatForZeroEdge(s.graph, id)
+	}
 	return s.returnSubGraph(ctx, req, sg)
 }
 
@@ -1420,6 +1425,9 @@ func (s *Server) handleFindUsages(ctx context.Context, req mcp.CallToolRequest) 
 	sg = filterSubGraph(sg, allowed)
 	sg.FilterByMinTier(minTier)
 	enrichSubGraphEdges(sg)
+	if len(sg.Edges) == 0 {
+		sg.Caveat = graph.CaveatForZeroEdge(s.graph, id)
+	}
 	if s.isGCX(ctx, req) {
 		return s.gcxResponseWithBudget(req)(encodeFindUsages(sg))
 	}

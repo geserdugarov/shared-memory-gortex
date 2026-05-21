@@ -8,6 +8,7 @@ import (
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/zzet/gortex/internal/analysis"
 	"github.com/zzet/gortex/internal/contracts"
+	"github.com/zzet/gortex/internal/graph"
 )
 
 func (s *Server) registerAnalysisTools() {
@@ -302,6 +303,29 @@ func (s *Server) handleEnhancedChangeImpact(ctx context.Context, req mcp.CallToo
 	// Include per-repo grouping when cross-repo impact is detected.
 	if impact.CrossRepoImpact {
 		result["by_repo"] = impact.ByRepo
+	}
+
+	// When the blast radius is empty, an agent cannot tell genuinely
+	// safe-to-change symbols apart from symbols the extractor never
+	// wired up. Classify each input so a safety gate is not disarmed
+	// by a false "0 affected".
+	if impact.TotalAffected == 0 {
+		var caveats []graph.ZeroImpactCaveat
+		for _, id := range ids {
+			if id == "" {
+				continue
+			}
+			if c := graph.CaveatForZeroEdge(s.graph, id); c != nil {
+				caveats = append(caveats, graph.ZeroImpactCaveat{
+					ID:      id,
+					Class:   c.Class,
+					Message: c.Message,
+				})
+			}
+		}
+		if len(caveats) > 0 {
+			result["zero_impact_caveat"] = caveats
+		}
 	}
 
 	// Cross-community warning

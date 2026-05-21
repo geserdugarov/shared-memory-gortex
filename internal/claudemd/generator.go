@@ -71,6 +71,9 @@ func Generate(engine *query.Engine, _ int) string {
 	b.WriteString("\n## MANDATORY: Use Gortex MCP tools instead of Read/Grep/Glob\n\n")
 	b.WriteString("Gortex is running as an MCP server. You **MUST** prefer graph queries over file reads on every task in this repo — `search_symbols`, `find_usages`, `get_symbol_source`, `get_editing_context`, `smart_context`, `edit_symbol` / `edit_file` / `rename_symbol` / `batch_edit`. PreToolUse hooks deny `Read` / `Grep` / `Glob` against indexed source; the deny message names the right tool. The full per-tool catalog loads via `tools/list` — not restated here.\n\n")
 
+	b.WriteString("### Calibration: the graph narrows scope, source confirms behavior\n\n")
+	b.WriteString("The mandate above stands — but graph queries *narrow scope*, they do not *replace reading the implementation*. The graph tells you **where** the logic lives and **what** connects to it; the source tells you **how** it behaves. For the symbol you are about to change or depend on, read its full body with `get_symbol_source` — do not act on a one-line summary alone.\n\n")
+	b.WriteString("Be especially deliberate with **behavior-critical code** — database migrations, retry / fallback / error-recovery paths, compatibility shims, concurrency-sensitive sections, and the tests that pin them. For these, call `get_symbol_source` and read the real implementation; never pass `compress_bodies:true`, which elides exactly the branches that carry the risk. Reserve compressed bodies and graph summaries for breadth (surveying many symbols); use full source for the few you are about to commit to.\n\n")
 	b.WriteString("## Required workflow (every task on this repo)\n\n")
 	b.WriteString("These are not suggestions — run each step at the trigger.\n\n")
 	b.WriteString("1. **Always call** `graph_stats` first to confirm the daemon is up and orient (check `per_repo` in multi-repo mode).\n")

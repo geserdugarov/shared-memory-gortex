@@ -157,8 +157,18 @@ func (r *lazyToolRegistry) Register(tool mcp.Tool, handler server.ToolHandlerFun
 //   - "+slack send"            → require "slack" in the name, rank by remainder
 //   - "memories invariants"    → keyword search, ranked
 func (r *lazyToolRegistry) Query(query string, max int) []*deferredTool {
+	hits, _ := r.QueryWithTotal(query, max)
+	return hits
+}
+
+// QueryWithTotal behaves like Query but also returns total — the number of
+// deferred tools that matched before the max cap was applied. total greater
+// than len(result) means the response was truncated, and the caller should
+// advise the agent to narrow the query or fetch a known tool by exact name
+// via "select:<name>".
+func (r *lazyToolRegistry) QueryWithTotal(query string, max int) ([]*deferredTool, int) {
 	if r == nil {
-		return nil
+		return nil, 0
 	}
 	if max <= 0 {
 		max = 10
@@ -185,7 +195,7 @@ func (r *lazyToolRegistry) Query(query string, max int) []*deferredTool {
 			}
 		}
 		r.mu.RUnlock()
-		return out
+		return out, len(out)
 	}
 
 	var required []string
@@ -253,6 +263,13 @@ func (r *lazyToolRegistry) Query(query string, max int) []*deferredTool {
 					score += 12
 				}
 			}
+			// Whole-query name match: a query that is verbatim (a substring
+			// of) the tool's name dominates, so a broad query that names the
+			// tool reliably surfaces it ahead of the max cap rather than
+			// relying on per-token scoring alone.
+			if ql := strings.ToLower(query); len(ql) >= 3 && strings.Contains(nameLower, ql) {
+				score += 25
+			}
 		}
 		if score == 0 {
 			continue
@@ -265,6 +282,7 @@ func (r *lazyToolRegistry) Query(query string, max int) []*deferredTool {
 		}
 		return hits[i].t.tool.Name < hits[j].t.tool.Name
 	})
+	total := len(hits)
 	if len(hits) > max {
 		hits = hits[:max]
 	}
@@ -272,7 +290,7 @@ func (r *lazyToolRegistry) Query(query string, max int) []*deferredTool {
 	for i, h := range hits {
 		out[i] = h.t
 	}
-	return out
+	return out, total
 }
 
 // Promote registers each named tool with the live MCP server and

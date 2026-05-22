@@ -63,11 +63,12 @@ func (s *Server) registerToolsSearch() {
 // response. Returned both inline (in the text content) and as the
 // canonical body so well-typed clients can parse it directly.
 type toolsSearchPayload struct {
-	Query       string             `json:"query"`
-	Deferred    int                `json:"deferred_remaining"`
-	Promoted    []string           `json:"promoted,omitempty"`
-	BrowseNames []string           `json:"browse_names,omitempty"`
-	Tools       []toolsSearchEntry `json:"tools,omitempty"`
+	Query        string             `json:"query"`
+	Deferred     int                `json:"deferred_remaining"`
+	OmittedCount int                `json:"omitted_count,omitempty"`
+	Promoted     []string           `json:"promoted,omitempty"`
+	BrowseNames  []string           `json:"browse_names,omitempty"`
+	Tools        []toolsSearchEntry `json:"tools,omitempty"`
 }
 
 type toolsSearchEntry struct {
@@ -96,7 +97,7 @@ func (s *Server) handleToolsSearch(ctx context.Context, req mcp.CallToolRequest)
 		return renderToolsSearchResult(payload)
 	}
 
-	hits := s.lazy.Query(query, max)
+	hits, total := s.lazy.QueryWithTotal(query, max)
 	entries := make([]toolsSearchEntry, 0, len(hits))
 	names := make([]string, 0, len(hits))
 	for _, dt := range hits {
@@ -122,6 +123,11 @@ func (s *Server) handleToolsSearch(ctx context.Context, req mcp.CallToolRequest)
 		Deferred: s.lazy.CountDeferred(),
 		Promoted: promotedNames,
 		Tools:    entries,
+	}
+	// total counts matches before the max cap; a positive remainder
+	// means the agent should narrow the query or use select:<name>.
+	if omitted := total - len(entries); omitted > 0 {
+		payload.OmittedCount = omitted
 	}
 	return renderToolsSearchResult(payload)
 }
@@ -157,6 +163,9 @@ func renderToolsSearchResult(payload toolsSearchPayload) (*mcp.CallToolResult, e
 			b.WriteString("</function>\n")
 		}
 		b.WriteString("</functions>\n")
+		if payload.OmittedCount > 0 {
+			fmt.Fprintf(&b, "\nnote: %d more tool(s) matched but were not returned. Raise max_results, or — if you know the exact tool name — fetch it directly with query \"select:<exact-name>\".\n", payload.OmittedCount)
+		}
 	} else if len(payload.BrowseNames) > 0 {
 		fmt.Fprintf(&b, "%d deferred tool(s) — call tools_search with a query to fetch schemas.\n\n", payload.Deferred)
 		for _, n := range payload.BrowseNames {
@@ -165,7 +174,7 @@ func renderToolsSearchResult(payload toolsSearchPayload) (*mcp.CallToolResult, e
 			b.WriteString("\n")
 		}
 	} else {
-		fmt.Fprintf(&b, "tools_search: no deferred tools match %q (deferred_remaining=%d)\n", payload.Query, payload.Deferred)
+		fmt.Fprintf(&b, "tools_search: no deferred tools match %q (deferred_remaining=%d).\nIf you know the exact tool name, retry with query \"select:<exact-name>\".\n", payload.Query, payload.Deferred)
 	}
 
 	body, err := json.Marshal(payload)

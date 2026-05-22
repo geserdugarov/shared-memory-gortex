@@ -145,3 +145,62 @@ func TestName(t *testing.T) {
 		t.Errorf("Name()=%q", p.Name())
 	}
 }
+
+// TestComplete_HollowResponseRetriesThenSucceeds proves an HTTP 200
+// with an empty choices array is treated as a transient truncation:
+// the first hollow answer is retried and the second, good answer wins.
+func TestComplete_HollowResponseRetriesThenSucceeds(t *testing.T) {
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if calls == 1 {
+			_, _ = io.WriteString(w, `{"choices":[]}`)
+			return
+		}
+		_, _ = io.WriteString(w, `{"choices":[{"message":{"content":"recovered"}}]}`)
+	}))
+	defer srv.Close()
+
+	t.Setenv("OPENAI_API_KEY", "k")
+	p, _ := New(llm.RemoteConfig{Model: "m", BaseURL: srv.URL})
+	defer func() { _ = p.Close() }()
+
+	resp, err := p.Complete(context.Background(), llm.CompletionRequest{
+		Messages: []llm.Message{{Role: llm.RoleUser, Content: "hi"}},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resp.Text != "recovered" {
+		t.Errorf("text=%q want %q", resp.Text, "recovered")
+	}
+	if calls != 2 {
+		t.Errorf("calls=%d want 2 (one hollow 200, then a retry)", calls)
+	}
+}
+
+// TestComplete_HollowResponseExhaustsRetries proves a persistently
+// hollow 200 (here: a choice whose content is blank) errors out with a
+// clear message rather than leaking an empty completion to the caller.
+func TestComplete_HollowResponseExhaustsRetries(t *testing.T) {
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		_, _ = io.WriteString(w, `{"choices":[{"message":{"content":"   "}}]}`)
+	}))
+	defer srv.Close()
+
+	t.Setenv("OPENAI_API_KEY", "k")
+	p, _ := New(llm.RemoteConfig{Model: "m", BaseURL: srv.URL})
+	defer func() { _ = p.Close() }()
+
+	_, err := p.Complete(context.Background(), llm.CompletionRequest{
+		Messages: []llm.Message{{Role: llm.RoleUser, Content: "hi"}},
+	})
+	if err == nil {
+		t.Fatal("expected an error when every 200 carries an empty completion")
+	}
+	if calls < 2 {
+		t.Errorf("calls=%d want > 1 (a hollow 200 must be retried)", calls)
+	}
+}

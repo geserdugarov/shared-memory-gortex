@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/zzet/gortex/internal/llm"
+	"github.com/zzet/gortex/internal/llm/provider/httpx"
 )
 
 // Provider implements llm.Provider against api.openai.com.
@@ -95,6 +96,10 @@ type apiResponse struct {
 }
 
 // Complete implements llm.Provider.
+//
+// The request body is marshalled once; the HTTP round-trip and parse
+// run inside httpx.Complete, which retries an HTTP-200-but-empty
+// response (a transient upstream truncation) with bounded backoff.
 func (p *Provider) Complete(ctx context.Context, req llm.CompletionRequest) (llm.CompletionResponse, error) {
 	body := apiRequest{
 		Model:     p.model,
@@ -109,37 +114,55 @@ func (p *Provider) Complete(ctx context.Context, req llm.CompletionRequest) (llm
 	if err != nil {
 		return llm.CompletionResponse{}, fmt.Errorf("openai: marshal request: %w", err)
 	}
+
+	text, err := httpx.Complete(ctx, "openai", func(ctx context.Context) httpx.Result {
+		return p.attempt(ctx, raw)
+	})
+	if err != nil {
+		return llm.CompletionResponse{}, err
+	}
+	return llm.CompletionResponse{Text: text}, nil
+}
+
+// attempt issues one Chat Completions request and extracts the reply.
+// A fresh body reader is built per call so httpx.Complete can retry.
+func (p *Provider) attempt(ctx context.Context, raw []byte) httpx.Result {
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, p.baseURL+"/v1/chat/completions", bytes.NewReader(raw))
 	if err != nil {
-		return llm.CompletionResponse{}, fmt.Errorf("openai: build request: %w", err)
+		return httpx.Result{Err: fmt.Errorf("openai: build request: %w", err)}
 	}
 	httpReq.Header.Set("content-type", "application/json")
 	httpReq.Header.Set("authorization", "Bearer "+p.apiKey)
 
 	resp, err := p.client.Do(httpReq)
 	if err != nil {
-		return llm.CompletionResponse{}, fmt.Errorf("openai: request failed: %w", err)
+		return httpx.Result{Err: fmt.Errorf("openai: request failed: %w", err)}
 	}
 	defer func() { _ = resp.Body.Close() }()
 	payload, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
 	if err != nil {
-		return llm.CompletionResponse{}, fmt.Errorf("openai: read response: %w", err)
+		return httpx.Result{Err: fmt.Errorf("openai: read response: %w", err)}
 	}
 
 	var parsed apiResponse
 	if err := json.Unmarshal(payload, &parsed); err != nil {
-		return llm.CompletionResponse{}, fmt.Errorf("openai: decode response (status %d): %w", resp.StatusCode, err)
+		return httpx.Result{Err: fmt.Errorf("openai: decode response (status %d): %w", resp.StatusCode, err)}
 	}
 	if resp.StatusCode != http.StatusOK {
 		if parsed.Error != nil {
-			return llm.CompletionResponse{}, fmt.Errorf("openai: API error (status %d): %s: %s", resp.StatusCode, parsed.Error.Type, parsed.Error.Message)
+			return httpx.Result{Err: fmt.Errorf("openai: API error (status %d): %s: %s", resp.StatusCode, parsed.Error.Type, parsed.Error.Message)}
 		}
-		return llm.CompletionResponse{}, fmt.Errorf("openai: API error (status %d): %s", resp.StatusCode, snippet(payload))
+		return httpx.Result{Err: fmt.Errorf("openai: API error (status %d): %s", resp.StatusCode, snippet(payload))}
 	}
 	if len(parsed.Choices) == 0 {
-		return llm.CompletionResponse{}, errors.New("openai: response carried no choices")
+		// A 200 with no choices is a hollow response — retry it.
+		return httpx.Result{Hollow: true}
 	}
-	return llm.CompletionResponse{Text: strings.TrimSpace(parsed.Choices[0].Message.Content)}, nil
+	text := strings.TrimSpace(parsed.Choices[0].Message.Content)
+	if text == "" {
+		return httpx.Result{Hollow: true}
+	}
+	return httpx.Result{Text: text}
 }
 
 // mapMessages flattens the provider-neutral conversation onto OpenAI

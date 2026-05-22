@@ -178,6 +178,39 @@ func TestName(t *testing.T) {
 	}
 }
 
+// TestComplete_HollowResponseRetriesThenSucceeds proves an HTTP 200
+// with an empty candidates array is treated as a transient truncation:
+// the first hollow answer is retried and the second, good answer wins.
+func TestComplete_HollowResponseRetriesThenSucceeds(t *testing.T) {
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if calls == 1 {
+			_, _ = io.WriteString(w, `{"candidates":[]}`)
+			return
+		}
+		_, _ = io.WriteString(w, `{"candidates":[{"content":{"parts":[{"text":"recovered"}]}}]}`)
+	}))
+	defer srv.Close()
+
+	t.Setenv("GEMINI_API_KEY", "k")
+	p, _ := New(llm.RemoteConfig{Model: "m", BaseURL: srv.URL})
+	defer func() { _ = p.Close() }()
+
+	resp, err := p.Complete(context.Background(), llm.CompletionRequest{
+		Messages: []llm.Message{{Role: llm.RoleUser, Content: "hi"}},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resp.Text != "recovered" {
+		t.Errorf("text=%q want %q", resp.Text, "recovered")
+	}
+	if calls != 2 {
+		t.Errorf("calls=%d want 2 (one hollow 200, then a retry)", calls)
+	}
+}
+
 func TestSanitiseSchema_StripsAdditionalProperties(t *testing.T) {
 	in := map[string]any{
 		"type": "object",

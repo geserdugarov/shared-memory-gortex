@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/zzet/gortex/internal/llm"
+	"github.com/zzet/gortex/internal/llm/provider/httpx"
 )
 
 // Provider implements llm.Provider against generativelanguage.googleapis.com.
@@ -118,42 +119,65 @@ func (p *Provider) Complete(ctx context.Context, req llm.CompletionRequest) (llm
 	if err != nil {
 		return llm.CompletionResponse{}, fmt.Errorf("gemini: marshal request: %w", err)
 	}
+
+	// The HTTP round-trip and parse run inside httpx.Complete, which
+	// retries an HTTP-200-but-empty response (a transient upstream
+	// truncation) with bounded backoff.
+	text, err := httpx.Complete(ctx, "gemini", func(ctx context.Context) httpx.Result {
+		return p.attempt(ctx, raw)
+	})
+	if err != nil {
+		return llm.CompletionResponse{}, err
+	}
+	return llm.CompletionResponse{Text: text}, nil
+}
+
+// attempt issues one generateContent request and extracts the reply. A
+// fresh body reader is built per call so httpx.Complete can retry. A
+// 200 with no candidates, or candidate parts that concatenate to an
+// empty string, is reported as hollow.
+func (p *Provider) attempt(ctx context.Context, raw []byte) httpx.Result {
 	url := fmt.Sprintf("%s/v1beta/models/%s:generateContent", p.baseURL, p.model)
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(raw))
 	if err != nil {
-		return llm.CompletionResponse{}, fmt.Errorf("gemini: build request: %w", err)
+		return httpx.Result{Err: fmt.Errorf("gemini: build request: %w", err)}
 	}
 	httpReq.Header.Set("content-type", "application/json")
 	httpReq.Header.Set("x-goog-api-key", p.apiKey)
 
 	resp, err := p.client.Do(httpReq)
 	if err != nil {
-		return llm.CompletionResponse{}, fmt.Errorf("gemini: request failed: %w", err)
+		return httpx.Result{Err: fmt.Errorf("gemini: request failed: %w", err)}
 	}
 	defer func() { _ = resp.Body.Close() }()
 	payload, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
 	if err != nil {
-		return llm.CompletionResponse{}, fmt.Errorf("gemini: read response: %w", err)
+		return httpx.Result{Err: fmt.Errorf("gemini: read response: %w", err)}
 	}
 
 	var parsed apiResponse
 	if err := json.Unmarshal(payload, &parsed); err != nil {
-		return llm.CompletionResponse{}, fmt.Errorf("gemini: decode response (status %d): %w", resp.StatusCode, err)
+		return httpx.Result{Err: fmt.Errorf("gemini: decode response (status %d): %w", resp.StatusCode, err)}
 	}
 	if resp.StatusCode != http.StatusOK {
 		if parsed.Error != nil {
-			return llm.CompletionResponse{}, fmt.Errorf("gemini: API error (status %d): %s: %s", resp.StatusCode, parsed.Error.Status, parsed.Error.Message)
+			return httpx.Result{Err: fmt.Errorf("gemini: API error (status %d): %s: %s", resp.StatusCode, parsed.Error.Status, parsed.Error.Message)}
 		}
-		return llm.CompletionResponse{}, fmt.Errorf("gemini: API error (status %d): %s", resp.StatusCode, snippet(payload))
+		return httpx.Result{Err: fmt.Errorf("gemini: API error (status %d): %s", resp.StatusCode, snippet(payload))}
 	}
 	if len(parsed.Candidates) == 0 {
-		return llm.CompletionResponse{}, errors.New("gemini: response carried no candidates")
+		// A 200 with no candidates is a hollow response — retry it.
+		return httpx.Result{Hollow: true}
 	}
 	var b strings.Builder
 	for _, part := range parsed.Candidates[0].Content.Parts {
 		b.WriteString(part.Text)
 	}
-	return llm.CompletionResponse{Text: strings.TrimSpace(b.String())}, nil
+	text := strings.TrimSpace(b.String())
+	if text == "" {
+		return httpx.Result{Hollow: true}
+	}
+	return httpx.Result{Text: text}
 }
 
 // splitMessages pulls every RoleSystem message into the top-level

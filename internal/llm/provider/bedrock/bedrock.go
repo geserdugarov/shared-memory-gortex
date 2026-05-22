@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/zzet/gortex/internal/llm"
+	"github.com/zzet/gortex/internal/llm/provider/httpx"
 )
 
 // respondToolName is the synthetic tool that forces structured
@@ -184,6 +185,25 @@ func (p *Provider) Complete(ctx context.Context, req llm.CompletionRequest) (llm
 	if err != nil {
 		return llm.CompletionResponse{}, fmt.Errorf("bedrock: marshal request: %w", err)
 	}
+
+	// The HTTP round-trip and parse run inside httpx.Complete, which
+	// retries an HTTP-200-but-empty response (a transient upstream
+	// truncation) with bounded backoff.
+	text, err := httpx.Complete(ctx, "bedrock", func(ctx context.Context) httpx.Result {
+		return p.attempt(ctx, raw, structured)
+	})
+	if err != nil {
+		return llm.CompletionResponse{}, err
+	}
+	return llm.CompletionResponse{Text: text}, nil
+}
+
+// attempt issues one Converse request and extracts the reply. The
+// request is rebuilt and re-signed per call (SigV4 covers a fresh
+// timestamp) so httpx.Complete can retry. A 200 whose content blocks
+// carry no usable text — a missing forced-tool block, or an empty
+// freeform body — is reported as hollow.
+func (p *Provider) attempt(ctx context.Context, raw []byte, structured bool) httpx.Result {
 	// `url.PathEscape` leaves `:` alone (it's a legal pchar per
 	// RFC 3986); AWS Bedrock model IDs contain `:` (e.g.
 	// "anthropic.claude-sonnet-4-20250514-v1:0") which must be
@@ -193,7 +213,7 @@ func (p *Provider) Complete(ctx context.Context, req llm.CompletionRequest) (llm
 	endpoint := p.baseURL + "/model/" + escaped + "/converse"
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(raw))
 	if err != nil {
-		return llm.CompletionResponse{}, fmt.Errorf("bedrock: build request: %w", err)
+		return httpx.Result{Err: fmt.Errorf("bedrock: build request: %w", err)}
 	}
 	httpReq.Header.Set("content-type", "application/json")
 	httpReq.Header.Set("accept", "application/json")
@@ -207,30 +227,32 @@ func (p *Provider) Complete(ctx context.Context, req llm.CompletionRequest) (llm
 
 	resp, err := p.client.Do(httpReq)
 	if err != nil {
-		return llm.CompletionResponse{}, fmt.Errorf("bedrock: request failed: %w", err)
+		return httpx.Result{Err: fmt.Errorf("bedrock: request failed: %w", err)}
 	}
 	defer func() { _ = resp.Body.Close() }()
 	payload, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
 	if err != nil {
-		return llm.CompletionResponse{}, fmt.Errorf("bedrock: read response: %w", err)
+		return httpx.Result{Err: fmt.Errorf("bedrock: read response: %w", err)}
 	}
 
 	var parsed apiResponse
 	if err := json.Unmarshal(payload, &parsed); err != nil {
-		return llm.CompletionResponse{}, fmt.Errorf("bedrock: decode response (status %d): %w", resp.StatusCode, err)
+		return httpx.Result{Err: fmt.Errorf("bedrock: decode response (status %d): %w", resp.StatusCode, err)}
 	}
 	if resp.StatusCode != http.StatusOK {
 		if parsed.Message != "" {
-			return llm.CompletionResponse{}, fmt.Errorf("bedrock: API error (status %d): %s", resp.StatusCode, parsed.Message)
+			return httpx.Result{Err: fmt.Errorf("bedrock: API error (status %d): %s", resp.StatusCode, parsed.Message)}
 		}
-		return llm.CompletionResponse{}, fmt.Errorf("bedrock: API error (status %d): %s", resp.StatusCode, snippet(payload))
+		return httpx.Result{Err: fmt.Errorf("bedrock: API error (status %d): %s", resp.StatusCode, snippet(payload))}
 	}
 
 	text, err := extractText(parsed.Output.Message.Content, structured)
-	if err != nil {
-		return llm.CompletionResponse{}, err
+	if err != nil || strings.TrimSpace(text) == "" {
+		// A 200 with no extractable text — a missing forced-tool
+		// block or an empty body — is a hollow response: retry it.
+		return httpx.Result{Hollow: true}
 	}
-	return llm.CompletionResponse{Text: text}, nil
+	return httpx.Result{Text: text}
 }
 
 // splitMessages pulls every RoleSystem message into the top-level

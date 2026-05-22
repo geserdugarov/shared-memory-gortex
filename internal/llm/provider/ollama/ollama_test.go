@@ -129,3 +129,35 @@ func TestComplete_InlineErrorField(t *testing.T) {
 		t.Fatal("expected an error when the response carries an inline error field")
 	}
 }
+
+// TestComplete_HollowResponseRetriesThenSucceeds proves an HTTP 200
+// whose message content is empty is treated as a transient truncation:
+// the first hollow answer is retried and the second, good answer wins.
+func TestComplete_HollowResponseRetriesThenSucceeds(t *testing.T) {
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if calls == 1 {
+			_, _ = io.WriteString(w, `{"message":{"role":"assistant","content":""}}`)
+			return
+		}
+		_, _ = io.WriteString(w, `{"message":{"role":"assistant","content":"recovered"}}`)
+	}))
+	defer srv.Close()
+
+	p, _ := New(llm.OllamaConfig{Model: "m", Host: srv.URL})
+	defer func() { _ = p.Close() }()
+
+	resp, err := p.Complete(context.Background(), llm.CompletionRequest{
+		Messages: []llm.Message{{Role: llm.RoleUser, Content: "hi"}},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resp.Text != "recovered" {
+		t.Errorf("text=%q want %q", resp.Text, "recovered")
+	}
+	if calls != 2 {
+		t.Errorf("calls=%d want 2 (one hollow 200, then a retry)", calls)
+	}
+}

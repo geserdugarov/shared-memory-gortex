@@ -332,9 +332,27 @@ func (s *Server) resolveRepoFilter(ctx context.Context, req mcp.CallToolRequest)
 	ref := req.GetString("ref", "")
 	workspaceArg := req.GetString("workspace", "")
 
+	// A named saved-scope supplies the repo allow-set when no explicit
+	// repo/project/ref narrows the call (see scopes.go).
+	scopeArg := req.GetString("scope", "")
+	var scopeRepos map[string]bool
+	if scopeArg != "" && repo == "" && project == "" && ref == "" {
+		sc, ok := s.lookupScope(scopeArg)
+		if !ok {
+			return nil, fmt.Errorf("unknown scope %q — run list_scopes to see saved scopes, or create one with save_scope", scopeArg)
+		}
+		scopeRepos = s.scopeRepoSet(sc)
+		if len(scopeRepos) == 0 {
+			return nil, fmt.Errorf("saved scope %q names no repositories", scopeArg)
+		}
+	}
+
 	sessWS, _, bound := s.sessionScope(ctx)
 	if !bound {
 		// Unbound — legacy behaviour, incl. the active-project default.
+		if scopeRepos != nil {
+			return scopeRepos, nil
+		}
 		return s.resolveRepoFilterArgs(repo, project, ref, true)
 	}
 
@@ -351,6 +369,23 @@ func (s *Server) resolveRepoFilter(ctx context.Context, req mcp.CallToolRequest)
 	wsRepos := map[string]bool{}
 	if s.multiIndexer != nil {
 		wsRepos = s.multiIndexer.ReposInWorkspace(sessWS)
+	}
+
+	// A named scope, intersected with the workspace so it can only ever
+	// narrow — a scope is a convenience, never a clamp escape.
+	if scopeRepos != nil {
+		intersected := make(map[string]bool)
+		for p := range scopeRepos {
+			if wsRepos[p] {
+				intersected[p] = true
+			}
+		}
+		if len(intersected) == 0 {
+			return nil, fmt.Errorf(
+				"saved scope %q resolves to nothing inside the active workspace %q",
+				scopeArg, sessWS)
+		}
+		return intersected, nil
 	}
 
 	// No explicit narrowing — the allow-set is the whole workspace.
@@ -659,6 +694,7 @@ func (s *Server) registerCoreTools() {
 			mcp.WithString("repo", mcp.Description("Filter results to a specific repository prefix")),
 			mcp.WithString("project", mcp.Description("Filter results to repositories in a specific project")),
 			mcp.WithString("ref", mcp.Description("Filter results to repositories with a specific reference tag")),
+			mcp.WithString("scope", mcp.Description("Name of a saved scope (see save_scope) — restricts results to that scope's repositories. Ignored when an explicit repo / project / ref is also given.")),
 			mcp.WithString("kind", mcp.Description("Filter to one or more node kinds (comma-separated). Standard kinds: function, method, type, interface, variable, constant, field, file, package, import, contract. Coverage kinds: param, closure, enum_member, generic_param, module, table, column, config_key, flag, event, migration, fixture, todo, team, license, release.")),
 			mcp.WithString("assist", mcp.Description("LLM assist mode: \"auto\" (default — engages on natural-language queries, skips identifier lookups), \"on\" (force engage), \"off\" (bypass), \"deep\" (on + a body-grounded verification pass that reads candidate code and HONESTLY drops irrelevant matches — slower, may return empty results when nothing genuinely matches). Requires an LLM provider configured via `llm.provider` (local / anthropic / openai / ollama / claudecli / gemini / bedrock / deepseek); behaves as \"off\" when none is available.")),
 			mcp.WithBoolean("debug", mcp.Description("When true, attach a `rerank` block to the response carrying per-candidate scores and per-signal contributions from the 11-signal rerank pipeline (bm25, semantic, fan_in, fan_out, churn, community, minhash, api_signature, type_signature, recency, feedback) plus the active per-signal weight map. Off by default; enable to inspect ranking decisions or tune `.gortex.yaml::search::weights`.")),

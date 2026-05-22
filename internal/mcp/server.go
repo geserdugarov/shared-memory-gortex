@@ -263,6 +263,11 @@ type Server struct {
 	// (see tool_budget.go). Computed once from the graph node count.
 	toolBudgetOnce   sync.Once
 	toolBudgetCached string
+
+	// scopesOnce / scopes is the lazily-initialised, JSON-file-backed
+	// saved-scope store (see scopes.go).
+	scopesOnce sync.Once
+	scopes     *scopeStore
 }
 
 // sessionFor returns the session-scoped state for the current request.
@@ -743,6 +748,7 @@ func NewServer(engine *query.Engine, g *graph.Graph, idx *indexer.Indexer, watch
 	s.registerCodingTools()
 	s.registerPlanningModeTool()
 	s.registerWorkflowTool()
+	s.registerScopeTools()
 	s.registerAnalysisTools()
 	s.registerEnhancementTools()
 	s.registerLSPTools()

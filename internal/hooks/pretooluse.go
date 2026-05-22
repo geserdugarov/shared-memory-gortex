@@ -86,6 +86,23 @@ func runPreToolUse(data []byte, gortexPort int, mode Mode) {
 
 	isGortexMCP := strings.HasPrefix(input.ToolName, gortexMCPToolPrefix)
 
+	// Auto-approve: under a permissive permission mode the host has
+	// already granted blanket approval, so Gortex's own MCP tools
+	// should ride along with it. This branch is independent of Mode —
+	// it fires in any posture — and runs before the per-tool enrich
+	// switch and the other modes' logic so a gortex tool is never
+	// processed further.
+	if isGortexMCP && isPermissivePermissionMode(input.PermissionMode) {
+		emitPreToolUse(HookOutput{
+			HookSpecificOutput: &HookSpecificOutput{
+				HookEventName:            "PreToolUse",
+				PermissionDecision:       "allow",
+				PermissionDecisionReason: "[Gortex] auto-approved: Gortex MCP graph tool under a permissive permission mode.",
+			},
+		})
+		return
+	}
+
 	// Consult-unlock handshake: any Gortex MCP tool call records that
 	// the agent has consulted the graph this session. The hook sees the
 	// MCP call in-process, so the marker is fully self-contained. The
@@ -177,6 +194,22 @@ func consultUnlockReason(reason string) string {
 		return strings.TrimPrefix(unlock, "\n")
 	}
 	return reason + unlock
+}
+
+// isPermissivePermissionMode reports whether the host's permission mode
+// is one under which Gortex's own MCP tools should be auto-approved.
+//
+// Implemented as an allowlist — only "acceptEdits" and "auto" return
+// true. Everything else (including "bypassPermissions", "default",
+// "plan", and the empty string) returns false, so an unknown future
+// permission mode is never auto-approved by default.
+func isPermissivePermissionMode(mode string) bool {
+	switch strings.TrimSpace(mode) {
+	case "acceptEdits", "auto":
+		return true
+	default:
+		return false
+	}
 }
 
 // nudgeThreshold is the number of consecutive non-symbolic fallback

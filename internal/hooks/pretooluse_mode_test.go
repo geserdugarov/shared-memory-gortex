@@ -376,3 +376,101 @@ func TestRunPreToolUse_AdaptiveNudge_LogsNudged(t *testing.T) {
 		t.Errorf("expected exactly one nudged telemetry record, got %d (all: %+v)", nudged, recs)
 	}
 }
+
+// TestRunPreToolUse_AutoApprove_GortexToolUnderPermissiveMode verifies
+// that a Gortex MCP tool call under a permissive permission mode
+// ("acceptEdits") is auto-approved with an explicit allow decision.
+func TestRunPreToolUse_AutoApprove_GortexToolUnderPermissiveMode(t *testing.T) {
+	payload := []byte(`{"hook_event_name":"PreToolUse","tool_name":"mcp__gortex__search_symbols","permission_mode":"acceptEdits","tool_input":{"query":"Foo"}}`)
+	out := captureStdout(t, func() { runPreToolUse(payload, 0, ModeDeny) })
+	if out == "" {
+		t.Fatal("expected an allow payload for a gortex tool under acceptEdits")
+	}
+	dec := decodeHookOutput(t, out)
+	if dec.HookSpecificOutput == nil {
+		t.Fatal("missing hookSpecificOutput")
+	}
+	if dec.HookSpecificOutput.PermissionDecision != "allow" {
+		t.Errorf("expected permissionDecision=allow, got %q", dec.HookSpecificOutput.PermissionDecision)
+	}
+	if dec.HookSpecificOutput.PermissionDecisionReason == "" {
+		t.Error("allow decision should carry a reason")
+	}
+}
+
+// TestRunPreToolUse_AutoApprove_BypassPermissionsNotApproved verifies
+// the allowlist excludes "bypassPermissions" — this branch must not
+// emit an allow for it.
+func TestRunPreToolUse_AutoApprove_BypassPermissionsNotApproved(t *testing.T) {
+	payload := []byte(`{"hook_event_name":"PreToolUse","tool_name":"mcp__gortex__search_symbols","permission_mode":"bypassPermissions","tool_input":{"query":"Foo"}}`)
+	out := captureStdout(t, func() { runPreToolUse(payload, 0, ModeDeny) })
+	// The auto-approve branch must not fire. A gortex tool is otherwise
+	// not handled by the enrich switch, so the call produces no output
+	// at all — and in particular never an "allow".
+	if out != "" {
+		dec := decodeHookOutput(t, out)
+		if dec.HookSpecificOutput != nil && dec.HookSpecificOutput.PermissionDecision == "allow" {
+			t.Errorf("bypassPermissions must NOT be auto-approved by this branch, got: %+v",
+				dec.HookSpecificOutput)
+		}
+	}
+}
+
+// TestRunPreToolUse_AutoApprove_NonGortexToolNotApproved verifies a
+// non-Gortex tool under a permissive mode is not auto-approved — the
+// branch is gated on the mcp__gortex__ prefix.
+func TestRunPreToolUse_AutoApprove_NonGortexToolNotApproved(t *testing.T) {
+	withSessionDir(t)
+	port := fakeIndexedBridge(t, map[string]bool{}) // unindexed → soft path
+
+	payload := []byte(`{"hook_event_name":"PreToolUse","tool_name":"Read","permission_mode":"acceptEdits","tool_input":{"file_path":"/repo/unindexed.go"}}`)
+	out := captureStdout(t, func() { runPreToolUse(payload, port, ModeDeny) })
+	if out != "" {
+		dec := decodeHookOutput(t, out)
+		if dec.HookSpecificOutput != nil && dec.HookSpecificOutput.PermissionDecision == "allow" {
+			t.Errorf("a non-gortex tool must never be auto-approved, got: %+v", dec.HookSpecificOutput)
+		}
+	}
+}
+
+// TestRunPreToolUse_AutoApprove_FiresInAnyMode confirms the branch is
+// independent of the Mode enum — it auto-approves a Gortex tool under
+// acceptEdits even when the posture is, e.g., ModeConsultUnlock.
+func TestRunPreToolUse_AutoApprove_FiresInAnyMode(t *testing.T) {
+	withSessionDir(t)
+	payload := []byte(`{"hook_event_name":"PreToolUse","tool_name":"mcp__gortex__get_symbol","permission_mode":"auto","session_id":"aa-1","tool_input":{}}`)
+	for _, mode := range []Mode{ModeDeny, ModeEnrich, ModeConsultUnlock, ModeAdaptiveNudge} {
+		out := captureStdout(t, func() { runPreToolUse(payload, 0, mode) })
+		if out == "" {
+			t.Fatalf("mode %s: expected an allow payload", mode)
+		}
+		dec := decodeHookOutput(t, out)
+		if dec.HookSpecificOutput == nil || dec.HookSpecificOutput.PermissionDecision != "allow" {
+			t.Errorf("mode %s: expected auto-approve allow, got: %+v", mode, dec.HookSpecificOutput)
+		}
+	}
+}
+
+// TestIsPermissivePermissionMode exercises the allowlist directly:
+// only "acceptEdits" and "auto" are permissive; everything else,
+// including unknown future modes, is not.
+func TestIsPermissivePermissionMode(t *testing.T) {
+	cases := map[string]bool{
+		"acceptEdits":       true,
+		"auto":              true,
+		"  acceptEdits  ":   true, // trimmed
+		"bypassPermissions": false,
+		"default":           false,
+		"plan":              false,
+		"":                  false,
+		"AcceptEdits":       false, // case-sensitive — exact match only
+		"someFutureMode":    false,
+	}
+	for input, want := range cases {
+		t.Run(input, func(t *testing.T) {
+			if got := isPermissivePermissionMode(input); got != want {
+				t.Errorf("isPermissivePermissionMode(%q) = %v, want %v", input, got, want)
+			}
+		})
+	}
+}

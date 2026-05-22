@@ -16,6 +16,8 @@ import (
 	"time"
 
 	toml "github.com/pelletier/go-toml/v2"
+
+	"github.com/zzet/gortex/internal/platform"
 )
 
 // ServerEntry describes one Gortex server reachable from the daemon.
@@ -62,18 +64,20 @@ type ServersConfig struct {
 //     Note this is NOT under `~/.config/gortex/` (where global.yaml
 //     lives) — `~/.gortex/` is the daemon-control directory and is
 //     the same place tracking scripts and `gortex daemon` already
-//     write to.
+//     write to. An absolute $XDG_CONFIG_HOME relocates this to
+//     <XDG_CONFIG_HOME>/gortex/servers.toml.
 //  3. $TEMPDIR/gortex-servers.toml — last-resort fallback so the
 //     daemon can still come up in an environment with no $HOME.
 func ServersConfigPath() string {
 	if override := os.Getenv("GORTEX_DAEMON_SERVERS"); override != "" {
 		return override
 	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return filepath.Join(os.TempDir(), "gortex-servers.toml")
+	if _, err := os.UserHomeDir(); err != nil {
+		if v := os.Getenv("XDG_CONFIG_HOME"); v == "" || !filepath.IsAbs(v) {
+			return filepath.Join(os.TempDir(), "gortex-servers.toml")
+		}
 	}
-	return filepath.Join(home, ".gortex", "servers.toml")
+	return filepath.Join(platform.LegacyConfigDir(), "servers.toml")
 }
 
 // LoadServersConfig reads and validates ~/.gortex/servers.toml. A

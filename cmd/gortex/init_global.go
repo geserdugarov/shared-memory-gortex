@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/zzet/gortex/internal/config"
 	"github.com/zzet/gortex/internal/daemon"
 )
 
@@ -19,15 +20,11 @@ import (
 // Track; creating it now surfaces any permission problems at install
 // time instead of on the first use.
 func ensureGlobalConfigExists() error {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return fmt.Errorf("resolve home: %w", err)
-	}
-	dir := filepath.Join(home, ".config", "gortex")
+	path := config.DefaultGlobalConfigPath()
+	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("ensure config dir: %w", err)
 	}
-	path := filepath.Join(dir, "config.yaml")
 	if _, err := os.Stat(path); err == nil {
 		return nil
 	}

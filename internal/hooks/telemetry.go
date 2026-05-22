@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/zzet/gortex/internal/platform"
 )
 
 // DecisionKind enumerates the outcomes the Grep-redirect probe can log.
@@ -30,16 +32,18 @@ type hookDecision struct {
 }
 
 // hookDecisionsPath returns the telemetry file path. Respects GORTEX_HOOK_LOG
-// so tests can redirect writes.
+// so tests can redirect writes. Defaults to ~/.cache/gortex (or the
+// $XDG_CACHE_HOME equivalent when that variable is set).
 func hookDecisionsPath() string {
 	if p := os.Getenv("GORTEX_HOOK_LOG"); p != "" {
 		return p
 	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return ""
+	if v := os.Getenv("XDG_CACHE_HOME"); v == "" || !filepath.IsAbs(v) {
+		if _, err := os.UserHomeDir(); err != nil {
+			return ""
+		}
 	}
-	return filepath.Join(home, ".cache", "gortex", "hook-decisions.jsonl")
+	return filepath.Join(platform.CacheDir(), "hook-decisions.jsonl")
 }
 
 // logHookDecision appends one JSONL record. Best-effort: errors are swallowed

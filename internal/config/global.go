@@ -11,6 +11,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/zzet/gortex/internal/llm"
+	"github.com/zzet/gortex/internal/platform"
 )
 
 var (
@@ -105,19 +106,16 @@ func expandHome(p string) string {
 	return p
 }
 
-// DefaultGlobalConfigPath returns the default path: ~/.config/gortex/config.yaml.
+// DefaultGlobalConfigPath returns the default path: ~/.config/gortex/config.yaml,
+// or the $XDG_CONFIG_HOME equivalent when that variable is set.
 //
-// Resolved fresh on every call so HOME changes (notably t.Setenv in tests)
-// take effect. A previous version cached this with sync.Once, which made
-// the first caller win for the lifetime of the process — any subsequent
-// test that flipped HOME silently ended up writing into the developer's
-// real config.
+// Resolved fresh on every call so HOME / XDG_CONFIG_HOME changes (notably
+// t.Setenv in tests) take effect. A previous version cached this with
+// sync.Once, which made the first caller win for the lifetime of the
+// process — any subsequent test that flipped HOME silently ended up
+// writing into the developer's real config.
 func DefaultGlobalConfigPath() string {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		home = "."
-	}
-	return filepath.Join(home, ".config", "gortex", "config.yaml")
+	return filepath.Join(platform.ConfigDir(), "config.yaml")
 }
 
 // LoadGlobal reads the global config from ~/.config/gortex/config.yaml.

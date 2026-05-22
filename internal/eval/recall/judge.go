@@ -13,6 +13,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/zzet/gortex/internal/platform"
 )
 
 // Judge rescues recall misses by asking a cheap LLM whether any symbol
@@ -37,8 +39,9 @@ func NewJudge(model string) *Judge {
 	if key == "" || model == "" {
 		return nil
 	}
-	cacheDir, _ := os.UserCacheDir()
-	cachePath := filepath.Join(cacheDir, "gortex", "eval_judge_cache.json")
+	// $XDG_CACHE_HOME is honoured; otherwise the cache stays under
+	// os.UserCacheDir() as before.
+	cachePath := filepath.Join(platform.OSCacheDir(), "eval_judge_cache.json")
 	return &Judge{
 		Model:      model,
 		APIKey:     key,

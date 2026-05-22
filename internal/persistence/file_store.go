@@ -9,6 +9,8 @@ import (
 	"strings"
 
 	"github.com/gofrs/flock"
+
+	"github.com/zzet/gortex/internal/platform"
 )
 
 func init() {
@@ -34,14 +36,11 @@ type FileStore struct {
 }
 
 // NewFileStore creates a file-based persistence store.
-// If dir is empty, defaults to ~/.cache/gortex/.
+// If dir is empty, defaults to the Gortex cache dir (~/.cache/gortex/,
+// or the $XDG_CACHE_HOME equivalent when that variable is set).
 func NewFileStore(dir, version string) (*FileStore, error) {
 	if dir == "" {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return nil, fmt.Errorf("persistence: resolve home dir: %w", err)
-		}
-		dir = filepath.Join(home, ".cache", "gortex")
+		dir = platform.CacheDir()
 	}
 	return &FileStore{dir: dir, version: version}, nil
 }

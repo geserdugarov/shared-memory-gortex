@@ -7,6 +7,8 @@ import (
 	"sort"
 	"strings"
 	"sync"
+
+	"github.com/zzet/gortex/internal/platform"
 )
 
 // SavedScope is a named, persisted set of repository prefixes — a reusable
@@ -29,15 +31,15 @@ type scopeStore struct {
 
 // scopesFilePath returns the on-disk location of the saved-scope store,
 // honouring GORTEX_SCOPES_PATH (used by tests) over the cache default.
+//
+// An absolute $XDG_CACHE_HOME wins; otherwise the store stays under
+// os.UserCacheDir() — the historical location, kept so an existing
+// scopes file is not orphaned.
 func scopesFilePath() string {
 	if p := strings.TrimSpace(os.Getenv("GORTEX_SCOPES_PATH")); p != "" {
 		return p
 	}
-	dir, err := os.UserCacheDir()
-	if err != nil || dir == "" {
-		dir = os.TempDir()
-	}
-	return filepath.Join(dir, "gortex", "scopes.json")
+	return filepath.Join(platform.OSCacheDir(), "scopes.json")
 }
 
 // newScopeStore builds a store at path and loads any persisted scopes.

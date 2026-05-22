@@ -7,18 +7,25 @@ import (
 	"strings"
 
 	"github.com/google/uuid"
+
+	"github.com/zzet/gortex/internal/platform"
 )
 
 // DefaultServerIDPath returns the default persistence path for the
 // per-machine server id. Callers that want a process-local id (e.g.
 // tests, custom cache dirs) should pass their own dir to
 // LoadOrCreateServerID instead of calling this.
+//
+// An absolute $XDG_CACHE_HOME is honoured; otherwise the id stays under
+// os.UserCacheDir() — the historical location, kept so an existing
+// server id is not orphaned.
 func DefaultServerIDPath() (string, error) {
-	home, err := os.UserCacheDir()
-	if err != nil {
-		return "", fmt.Errorf("resolve user cache dir: %w", err)
+	if v := os.Getenv("XDG_CACHE_HOME"); v == "" || !filepath.IsAbs(v) {
+		if _, err := os.UserCacheDir(); err != nil {
+			return "", fmt.Errorf("resolve user cache dir: %w", err)
+		}
 	}
-	return filepath.Join(home, "gortex", "server.id"), nil
+	return filepath.Join(platform.OSCacheDir(), "server.id"), nil
 }
 
 // LoadOrCreateServerID returns a stable UUID for this server

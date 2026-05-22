@@ -10,6 +10,7 @@ import (
 	"github.com/spf13/viper"
 
 	"github.com/zzet/gortex/internal/llm"
+	"github.com/zzet/gortex/internal/platform"
 )
 
 type GuardRule struct {
@@ -828,7 +829,7 @@ func Load(configPath string) (*Config, error) {
 		v.SetConfigFile(configPath)
 	} else {
 		v.AddConfigPath(".")
-		v.AddConfigPath("$HOME/.config/gortex")
+		v.AddConfigPath(platform.ConfigDir())
 	}
 
 	v.SetEnvPrefix("GORTEX")

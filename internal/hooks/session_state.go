@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/zzet/gortex/internal/platform"
 )
 
 // sessionState is the small per-session record the PreToolUse hook
@@ -32,17 +34,20 @@ const hookSessionDirEnvVar = "GORTEX_HOOK_SESSION_DIR"
 
 // sessionStateDir returns the directory holding per-session state
 // files. Honors GORTEX_HOOK_SESSION_DIR so tests can point it at a
-// t.TempDir(). Returns "" when no base directory can be resolved — all
-// callers treat "" as "state disabled" and degrade gracefully.
+// t.TempDir(). An absolute $XDG_CACHE_HOME is honoured; otherwise the
+// directory stays under os.UserCacheDir() as before. Returns "" when no
+// base directory can be resolved — all callers treat "" as "state
+// disabled" and degrade gracefully.
 func sessionStateDir() string {
 	if p := strings.TrimSpace(os.Getenv(hookSessionDirEnvVar)); p != "" {
 		return p
 	}
-	cacheDir, err := os.UserCacheDir()
-	if err != nil || cacheDir == "" {
-		return ""
+	if v := os.Getenv("XDG_CACHE_HOME"); v == "" || !filepath.IsAbs(v) {
+		if cacheDir, err := os.UserCacheDir(); err != nil || cacheDir == "" {
+			return ""
+		}
 	}
-	return filepath.Join(cacheDir, "gortex", "sessions")
+	return filepath.Join(platform.OSCacheDir(), "sessions")
 }
 
 // sanitizeSessionID reduces an arbitrary session_id to a safe single

@@ -18,6 +18,8 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+
+	"github.com/zzet/gortex/internal/platform"
 )
 
 // tokenCacheFormat is the on-disk cache format version. Bump it to
@@ -41,14 +43,7 @@ type DiskCache struct {
 // DefaultTokenCacheDir returns the default cache location:
 // ~/.cache/gortex/token-counts (or the $XDG_CACHE_HOME equivalent).
 func DefaultTokenCacheDir() string {
-	if v := strings.TrimSpace(os.Getenv("XDG_CACHE_HOME")); v != "" {
-		return filepath.Join(v, "gortex", "token-counts")
-	}
-	home, err := os.UserHomeDir()
-	if err != nil || home == "" {
-		return filepath.Join(os.TempDir(), "gortex-token-counts")
-	}
-	return filepath.Join(home, ".cache", "gortex", "token-counts")
+	return filepath.Join(platform.CacheDir(), "token-counts")
 }
 
 // NewDiskCache builds a token-count cache rooted at dir. An empty dir

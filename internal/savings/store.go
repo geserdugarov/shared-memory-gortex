@@ -3,7 +3,7 @@
 // server's tokenStats, so over time the numbers become a credible narrative:
 // "Gortex saved N tokens / $X at model rate this month".
 //
-// Storage format: a single JSON file at ~/.cache/gortex/savings.json (or the
+// Storage format: a single JSON file under the user cache dir (or the
 // configured cache dir). Atomic writes via temp-file + rename, with an
 // advisory file lock on a sidecar `.lock` file so multiple gortex processes
 // (e.g. a daemon and a parallel `gortex mcp`) can write to the same
@@ -21,6 +21,8 @@ import (
 	"time"
 
 	"github.com/gofrs/flock"
+
+	"github.com/zzet/gortex/internal/platform"
 )
 
 const (
@@ -80,15 +82,20 @@ type Store struct {
 	stopCh   chan struct{}
 }
 
-// DefaultPath returns the canonical savings.json location under the user's
-// cache dir. Returns an empty string (i.e. "disable persistence") when the
-// cache dir is unavailable.
+// DefaultPath returns the canonical savings.json location under the
+// Gortex cache dir.
+//
+// An absolute $XDG_CACHE_HOME is honoured; otherwise the location stays
+// under os.UserCacheDir() — the historical default for this store, kept
+// so an existing savings file is not orphaned. Returns an empty string
+// (i.e. "disable persistence") when no cache dir can be resolved.
 func DefaultPath() string {
-	base, err := os.UserCacheDir()
-	if err != nil || base == "" {
-		return ""
+	if v := os.Getenv("XDG_CACHE_HOME"); v == "" || !filepath.IsAbs(v) {
+		if base, err := os.UserCacheDir(); err != nil || base == "" {
+			return ""
+		}
 	}
-	return filepath.Join(base, "gortex", "savings.json")
+	return filepath.Join(platform.OSCacheDir(), "savings.json")
 }
 
 // DefaultEventsPath returns the canonical savings.jsonl event-log path next

@@ -15,6 +15,8 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/zzet/gortex/internal/platform"
 )
 
 // EmbedderFingerprint captures the identity of the active embedder
@@ -44,14 +46,17 @@ type DriftWarning struct {
 func (w DriftWarning) HasDrift() bool { return len(w.Changes) > 0 }
 
 // DefaultFingerprintPath returns the canonical persistence location.
-// Returns empty when the cache dir is unavailable; callers should
-// treat empty as "don't persist, just compare in-memory".
+// An absolute $XDG_CACHE_HOME is honoured; otherwise the file stays
+// under os.UserCacheDir() as before. Returns empty when the cache dir
+// is unavailable; callers should treat empty as "don't persist, just
+// compare in-memory".
 func DefaultFingerprintPath() string {
-	base, err := os.UserCacheDir()
-	if err != nil || base == "" {
-		return ""
+	if v := os.Getenv("XDG_CACHE_HOME"); v == "" || !filepath.IsAbs(v) {
+		if base, err := os.UserCacheDir(); err != nil || base == "" {
+			return ""
+		}
 	}
-	return filepath.Join(base, "gortex", "embedding-fingerprint.json")
+	return filepath.Join(platform.OSCacheDir(), "embedding-fingerprint.json")
 }
 
 // DriftDetector wraps the fingerprint persistence and the

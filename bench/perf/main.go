@@ -14,6 +14,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/zzet/gortex/internal/platform"
 )
 
 // budgets carries the per-metric pass/fail thresholds. Zero values
@@ -138,7 +140,8 @@ func main() {
 
 // resolveCacheDir picks the cache directory, honouring --cache-dir,
 // then GORTEX_BENCH_CACHE, then a sensible default under the user
-// cache root.
+// cache root. An absolute $XDG_CACHE_HOME is honoured; otherwise the
+// default stays under os.UserCacheDir() as before.
 func resolveCacheDir(flagVal string) string {
 	if flagVal != "" {
 		return flagVal
@@ -146,10 +149,12 @@ func resolveCacheDir(flagVal string) string {
 	if v := os.Getenv("GORTEX_BENCH_CACHE"); v != "" {
 		return v
 	}
-	if base, err := os.UserCacheDir(); err == nil {
-		return filepath.Join(base, "gortex", "bench")
+	if v := os.Getenv("XDG_CACHE_HOME"); v == "" || !filepath.IsAbs(v) {
+		if _, err := os.UserCacheDir(); err != nil {
+			return filepath.Join(os.TempDir(), "gortex-bench")
+		}
 	}
-	return filepath.Join(os.TempDir(), "gortex-bench")
+	return filepath.Join(platform.OSCacheDir(), "bench")
 }
 
 // loadQueries reads the JSON query set. The file shape is

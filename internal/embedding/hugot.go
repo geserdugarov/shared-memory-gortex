@@ -10,6 +10,8 @@ import (
 
 	"github.com/knights-analytics/hugot"
 	"github.com/knights-analytics/hugot/pipelines"
+
+	"github.com/zzet/gortex/internal/platform"
 )
 
 // miniLMRepo is the sentence-transformers MiniLM-L6-v2 repo used by
@@ -169,8 +171,7 @@ func (p *HugotProvider) Close() error {
 // variants and the downloader refuses to guess. The cache layout
 // mirrors Hugot's own convention: `<cache>/<org>_<model-name>/…`.
 func ensureHugotModel(spec HugotVariant) (string, error) {
-	home, _ := os.UserHomeDir()
-	dest := filepath.Join(home, ".cache", "gortex", "models")
+	dest := filepath.Join(platform.CacheDir(), "models")
 	modelDir := filepath.Join(dest, hfCacheDirName(spec.RepoID))
 
 	tokenizerReady := false

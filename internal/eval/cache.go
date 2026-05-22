@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/zzet/gortex/internal/platform"
 )
 
 // Cache provides filesystem-based index caching keyed by (repo_name, commit_hash).
@@ -17,14 +19,22 @@ type Cache struct {
 }
 
 // NewCache creates a Cache rooted at dir with the given gortex version string.
-// If dir is empty, it defaults to ~/.gortex-eval-cache/.
+//
+// If dir is empty the location is resolved by env: when $XDG_CACHE_HOME is
+// set it is honoured ($XDG_CACHE_HOME/gortex/eval-cache); otherwise the
+// historical default ~/.gortex-eval-cache/ is kept so an existing eval
+// cache is not orphaned.
 func NewCache(dir, version string) (*Cache, error) {
 	if dir == "" {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return nil, fmt.Errorf("cache: resolve home dir: %w", err)
+		if v := os.Getenv("XDG_CACHE_HOME"); v != "" && filepath.IsAbs(v) {
+			dir = filepath.Join(platform.CacheDir(), "eval-cache")
+		} else {
+			home, err := os.UserHomeDir()
+			if err != nil {
+				return nil, fmt.Errorf("cache: resolve home dir: %w", err)
+			}
+			dir = filepath.Join(home, ".gortex-eval-cache")
 		}
-		dir = filepath.Join(home, ".gortex-eval-cache")
 	}
 	return &Cache{dir: dir, version: version}, nil
 }

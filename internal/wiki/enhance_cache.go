@@ -7,7 +7,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
+
+	"github.com/zzet/gortex/internal/platform"
 )
 
 // EnhanceCache is a tiny disk-backed cache. Keys are derived from the
@@ -30,14 +31,7 @@ func NewEnhanceCache(root string) *EnhanceCache {
 // DefaultEnhanceCacheDir returns the default cache location:
 // ~/.cache/gortex/wiki-enhance (or $XDG_CACHE_HOME equivalent).
 func DefaultEnhanceCacheDir() string {
-	if v := strings.TrimSpace(os.Getenv("XDG_CACHE_HOME")); v != "" {
-		return filepath.Join(v, "gortex", "wiki-enhance")
-	}
-	home, err := os.UserHomeDir()
-	if err != nil || home == "" {
-		return filepath.Join(os.TempDir(), "gortex-wiki-enhance")
-	}
-	return filepath.Join(home, ".cache", "gortex", "wiki-enhance")
+	return filepath.Join(platform.CacheDir(), "wiki-enhance")
 }
 
 // Key derives a stable cache key for one section. It includes the

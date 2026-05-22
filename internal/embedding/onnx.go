@@ -15,6 +15,8 @@ import (
 	"sync"
 
 	ort "github.com/yalue/onnxruntime_go"
+
+	"github.com/zzet/gortex/internal/platform"
 )
 
 const (
@@ -282,7 +284,7 @@ func (p *ONNXProvider) wordPieceTokenize(word string) []int64 {
 func findONNXModelDir() string {
 	home, _ := os.UserHomeDir()
 	candidates := []string{
-		filepath.Join(home, ".cache", "gortex", "models", "gte-small"),
+		filepath.Join(platform.CacheDir(), "models", "gte-small"),
 		filepath.Join(home, ".gortex", "models", "gte-small"),
 		"/tmp/gte-small",
 	}

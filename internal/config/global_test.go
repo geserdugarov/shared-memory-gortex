@@ -37,6 +37,37 @@ func TestDefaultGlobalConfigPath_HonorsHomeChange(t *testing.T) {
 	}
 }
 
+// TestDefaultGlobalConfigPath_HonorsXDGConfigHome verifies the global
+// config path is routed through the XDG resolver: an absolute
+// $XDG_CONFIG_HOME relocates it, while an unset variable keeps the
+// historical $HOME/.config/gortex location so existing installs are
+// not orphaned.
+func TestDefaultGlobalConfigPath_HonorsXDGConfigHome(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	// Unset: historical default.
+	t.Setenv("XDG_CONFIG_HOME", "")
+	wantUnset := filepath.Join(home, ".config", "gortex", "config.yaml")
+	if got := DefaultGlobalConfigPath(); got != wantUnset {
+		t.Fatalf("XDG_CONFIG_HOME unset: got %s, want %s", got, wantUnset)
+	}
+
+	// Set to an absolute path: honored.
+	xdg := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", xdg)
+	wantSet := filepath.Join(xdg, "gortex", "config.yaml")
+	if got := DefaultGlobalConfigPath(); got != wantSet {
+		t.Fatalf("XDG_CONFIG_HOME set: got %s, want %s", got, wantSet)
+	}
+
+	// Relative value: ignored per the XDG spec, fall back to default.
+	t.Setenv("XDG_CONFIG_HOME", "relative/path")
+	if got := DefaultGlobalConfigPath(); got != wantUnset {
+		t.Fatalf("relative XDG_CONFIG_HOME: got %s, want %s (must be ignored)", got, wantUnset)
+	}
+}
+
 func TestLoadGlobal_FileNotExist(t *testing.T) {
 	gc, err := LoadGlobal("/tmp/nonexistent-gortex-test/config.yaml")
 	require.NoError(t, err)

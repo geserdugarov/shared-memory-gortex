@@ -367,3 +367,23 @@ func TestFile_Schema(t *testing.T) {
 		}
 	}
 }
+
+// TestDefaultPath_HonorsXDGCacheHome verifies the savings file path is
+// routed through the XDG resolver: an absolute $XDG_CACHE_HOME
+// relocates it to <XDG_CACHE_HOME>/gortex/savings.json, so the savings
+// store is consistent with the rest of Gortex's cache layout.
+func TestDefaultPath_HonorsXDGCacheHome(t *testing.T) {
+	xdg := t.TempDir()
+	t.Setenv("XDG_CACHE_HOME", xdg)
+
+	want := filepath.Join(xdg, "gortex", "savings.json")
+	if got := DefaultPath(); got != want {
+		t.Fatalf("DefaultPath() with XDG_CACHE_HOME = %s, want %s", got, want)
+	}
+
+	// The sibling event-log path follows the same root.
+	wantEvents := filepath.Join(xdg, "gortex", "savings.jsonl")
+	if got := DefaultEventsPath(); got != wantEvents {
+		t.Fatalf("DefaultEventsPath() with XDG_CACHE_HOME = %s, want %s", got, wantEvents)
+	}
+}

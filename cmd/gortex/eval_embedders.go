@@ -21,6 +21,7 @@ import (
 	"github.com/zzet/gortex/internal/indexer"
 	"github.com/zzet/gortex/internal/parser"
 	"github.com/zzet/gortex/internal/parser/languages"
+	"github.com/zzet/gortex/internal/platform"
 	"github.com/zzet/gortex/internal/search"
 )
 
@@ -278,7 +279,6 @@ func benchVariant(name string, probeTexts []string, fixture recall.Fixture, cfg 
 // candidate paths. Returns 0 if the file isn't cached yet (e.g. when
 // called before the first Load pulls the model).
 func onnxSizeMB(spec embedding.HugotVariant) float64 {
-	home, _ := os.UserHomeDir()
 	// Mirror Hugot's cache layout: "<org>/<name>" → "<org>_<name>".
 	cacheDir := spec.RepoID
 	for i, r := range cacheDir {
@@ -287,7 +287,7 @@ func onnxSizeMB(spec embedding.HugotVariant) float64 {
 			break
 		}
 	}
-	modelDir := filepath.Join(home, ".cache", "gortex", "models", cacheDir)
+	modelDir := filepath.Join(platform.CacheDir(), "models", cacheDir)
 	candidates := []string{
 		filepath.Join(modelDir, spec.OnnxFile),
 		filepath.Join(modelDir, filepath.Base(spec.OnnxFile)),

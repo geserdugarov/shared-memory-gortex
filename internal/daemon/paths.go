@@ -4,10 +4,16 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+
+	"github.com/zzet/gortex/internal/platform"
 )
 
 // stateDir returns the directory the daemon keeps its runtime state in
 // (socket, PID file, logs, snapshot) and whether it could be resolved.
+//
+// An absolute $XDG_CACHE_HOME is honoured on every platform. When it is
+// unset the location stays at the historical default so an existing
+// daemon state directory is not orphaned:
 //
 //   - Windows: %LocalAppData%\gortex (via os.UserCacheDir).
 //   - macOS / Linux: $HOME/.cache/gortex.
@@ -16,17 +22,19 @@ import (
 // resolved at all, in which case callers fall back to the temp dir.
 func stateDir() (string, bool) {
 	if runtime.GOOS == "windows" {
-		dir, err := os.UserCacheDir()
-		if err != nil {
+		if v := os.Getenv("XDG_CACHE_HOME"); v == "" || !filepath.IsAbs(v) {
+			if _, err := os.UserCacheDir(); err != nil {
+				return "", false
+			}
+		}
+		return platform.OSCacheDir(), true
+	}
+	if v := os.Getenv("XDG_CACHE_HOME"); v == "" || !filepath.IsAbs(v) {
+		if _, err := os.UserHomeDir(); err != nil {
 			return "", false
 		}
-		return filepath.Join(dir, "gortex"), true
 	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", false
-	}
-	return filepath.Join(home, ".cache", "gortex"), true
+	return platform.CacheDir(), true
 }
 
 // SocketPath returns the socket path the daemon listens on. The socket

@@ -11,6 +11,8 @@ import (
 
 	"github.com/knights-analytics/hugot"
 	"github.com/knights-analytics/hugot/pipelines"
+
+	"github.com/zzet/gortex/internal/platform"
 )
 
 const gomlxModelName = "sentence-transformers/all-MiniLM-L6-v2"
@@ -89,8 +91,7 @@ func (p *GoMLXProvider) Close() error {
 }
 
 func ensureGoMLXModel() (string, error) {
-	home, _ := os.UserHomeDir()
-	dest := filepath.Join(home, ".cache", "gortex", "models")
+	dest := filepath.Join(platform.CacheDir(), "models")
 	modelDir := filepath.Join(dest, "sentence-transformers_all-MiniLM-L6-v2")
 
 	if _, err := os.Stat(filepath.Join(modelDir, "tokenizer.json")); err == nil {

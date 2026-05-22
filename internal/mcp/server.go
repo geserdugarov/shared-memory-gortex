@@ -24,6 +24,7 @@ import (
 	"github.com/zzet/gortex/internal/indexer"
 	"github.com/zzet/gortex/internal/llm"
 	"github.com/zzet/gortex/internal/llm/svc"
+	"github.com/zzet/gortex/internal/platform"
 	"github.com/zzet/gortex/internal/query"
 	"github.com/zzet/gortex/internal/savings"
 	"github.com/zzet/gortex/internal/semantic"
@@ -885,12 +886,13 @@ func (s *Server) InitNotebook(repoPath string) {
 
 func (s *Server) InitMemories(cacheDir, repoPath string) {
 	s.memories = newMemoryManager(cacheDir, repoPath)
-	// Mount the user-level global store at ~/.gortex/memories/.
-	// Failures (no $HOME, unreadable home) leave globalMemories nil;
-	// tools detect that and surface a clear error rather than
-	// silently dropping global writes.
+	// Mount the user-level global store. Defaults to
+	// ~/.gortex/memories-cache; an absolute $XDG_DATA_HOME relocates it
+	// to <XDG_DATA_HOME>/gortex/memories-cache. Failures (no $HOME,
+	// unreadable home) leave globalMemories nil; tools detect that and
+	// surface a clear error rather than silently dropping global writes.
 	if home, err := os.UserHomeDir(); err == nil && home != "" {
-		s.globalMemories = newMemoryManager(filepath.Join(home, ".gortex", "memories-cache"), "global")
+		s.globalMemories = newMemoryManager(filepath.Join(platform.LegacyDataDir(), "memories-cache"), "global")
 	}
 }
 

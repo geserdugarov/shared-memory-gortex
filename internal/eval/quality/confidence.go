@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"sort"
 	"time"
+
+	"github.com/zzet/gortex/internal/platform"
 )
 
 // ConfidenceRecord captures the candidate-score distribution for
@@ -78,12 +80,16 @@ func NewConfidenceTracker(path string) *ConfidenceTracker {
 }
 
 // DefaultConfidenceLogPath is the canonical persistence location.
+// An absolute $XDG_CACHE_HOME is honoured; otherwise the log stays
+// under os.UserCacheDir() as before. Returns empty when no cache dir
+// can be resolved.
 func DefaultConfidenceLogPath() string {
-	base, err := os.UserCacheDir()
-	if err != nil || base == "" {
-		return ""
+	if v := os.Getenv("XDG_CACHE_HOME"); v == "" || !filepath.IsAbs(v) {
+		if base, err := os.UserCacheDir(); err != nil || base == "" {
+			return ""
+		}
 	}
-	return filepath.Join(base, "gortex", "confidence.jsonl")
+	return filepath.Join(platform.OSCacheDir(), "confidence.jsonl")
 }
 
 // Record appends one record to the log. No-op when Path is empty.

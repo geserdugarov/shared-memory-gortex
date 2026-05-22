@@ -154,6 +154,12 @@ type Server struct {
 
 	guardRules       []config.GuardRule
 	architecture     config.ArchitectureConfig
+	// searchCfg carries the `.gortex.yaml::search` block — rerank
+	// weights plus the search-behaviour knobs (keyword-soup rewrite,
+	// equivalence-class expansion, prose indexing). Installed via
+	// SetSearchConfig right after NewServer; the zero value keeps
+	// every knob at its documented default.
+	searchCfg        config.SearchConfig
 	contractRegistry *contracts.Registry
 	semanticMgr      *semantic.Manager
 	feedback         *feedbackManager
@@ -789,6 +795,7 @@ func NewServer(engine *query.Engine, g *graph.Graph, idx *indexer.Indexer, watch
 	s.registerWakeupTool()
 	s.registerGraphCompletionTool()
 	s.registerWikiTools()
+	s.registerWalkGraphTool()
 	s.registerResources()
 	s.registerPrompts()
 

@@ -26,6 +26,16 @@ type SubGraph struct {
 	// least one concurrency flag is set, so an absent entry means
 	// "neither sync_guarded nor cross_concurrent".
 	CallerNotes map[string]*graph.ConcurrencyAnnotation `json:"caller_notes,omitempty"`
+	// BudgetHit is set by token-budgeted traversals (WalkBudgeted) when
+	// the walk stopped because the estimated encoded size of the result
+	// reached the caller's token budget. False — and omitted — for a
+	// traversal that completed within budget or never imposed one.
+	BudgetHit bool `json:"budget_hit,omitempty"`
+	// StoppedAtDepth records the BFS depth the budgeted traversal had
+	// reached when it stopped — either the deepest depth fully expanded,
+	// or the depth at which the budget / depth cap halted expansion.
+	// Zero — and omitted — for traversals that don't track depth.
+	StoppedAtDepth int `json:"stopped_at_depth,omitempty"`
 }
 
 // QueryOptions controls traversal depth, result limits, and detail level.
@@ -303,4 +313,40 @@ func DefaultOptions() QueryOptions {
 		Limit:  50,
 		Detail: "brief",
 	}
+}
+
+// WalkOptions controls a token-budgeted free-form graph traversal
+// (Engine.WalkBudgeted). It is deliberately a separate struct from
+// QueryOptions: a budgeted walk stops on an encoded-size estimate
+// rather than a node count, and lets the caller pick an arbitrary set
+// of edge kinds and a traversal direction — neither of which the
+// fixed-purpose QueryOptions traversals expose.
+type WalkOptions struct {
+	// EdgeKinds is the set of edge kinds the walk follows. An empty
+	// slice means "every edge kind" and, combined with Direction
+	// "both", reproduces an undirected neighbourhood walk.
+	EdgeKinds []graph.EdgeKind
+	// Direction is "out" (follow outgoing edges — the default when
+	// empty), "in" (follow incoming edges), or "both" (undirected).
+	Direction string
+	// TokenBudget is the approximate token ceiling for the encoded
+	// result. The walk stops appending nodes once the running estimate
+	// would exceed it. A non-positive value disables the budget.
+	TokenBudget int
+	// MaxDepth is a hard safety cap on BFS depth, applied even when the
+	// token budget would allow deeper expansion. A non-positive value
+	// falls back to a built-in default.
+	MaxDepth int
+	// WorkspaceID / ProjectID scope the traversal exactly as the
+	// matching QueryOptions fields do — neighbours outside the scope
+	// are dropped along with the edge that reached them.
+	WorkspaceID string
+	ProjectID   string
+}
+
+// scopeAllows reports whether n passes this walk's workspace/project
+// scope. Mirrors QueryOptions.ScopeAllows so budgeted walks enforce the
+// same boundary without duplicating the fallback rules.
+func (o WalkOptions) scopeAllows(n *graph.Node) bool {
+	return QueryOptions{WorkspaceID: o.WorkspaceID, ProjectID: o.ProjectID}.ScopeAllows(n)
 }

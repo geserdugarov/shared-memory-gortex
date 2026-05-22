@@ -103,6 +103,7 @@ func findAndCallHandler(srv *Server, name string, ctx context.Context, req mcpli
 		"read_file":             srv.handleReadFile,
 		"flow_between":          srv.handleFlowBetween,
 		"taint_paths":           srv.handleTaintPaths,
+		"walk_graph":            srv.handleWalkGraph,
 	}
 	h, ok := handlers[name]
 	if !ok {

@@ -389,10 +389,22 @@ func encodeSubGraph(tool string, sg *query.SubGraph) ([]byte, error) {
 		}
 		nodes = append(nodes, n)
 	}
-	nodeEnc := newGCX(&buf, tool+".nodes",
-		[]string{"id", "kind", "name", "path", "path_abs", "line", "is_test", "test_role", "test_runner"},
+	nodeMeta := []string{
 		"total", fmt.Sprintf("%d", sg.TotalNodes),
 		"truncated", boolString(sg.Truncated),
+	}
+	// Budgeted traversals (walk_graph) ride two extra meta fields. They
+	// are emitted only when meaningful so non-budgeted subgraphs keep
+	// their existing wire shape byte-for-byte.
+	if sg.BudgetHit {
+		nodeMeta = append(nodeMeta, "budget_hit", boolString(sg.BudgetHit))
+	}
+	if sg.StoppedAtDepth > 0 {
+		nodeMeta = append(nodeMeta, "stopped_at_depth", fmt.Sprintf("%d", sg.StoppedAtDepth))
+	}
+	nodeEnc := newGCX(&buf, tool+".nodes",
+		[]string{"id", "kind", "name", "path", "path_abs", "line", "is_test", "test_role", "test_runner"},
+		nodeMeta...,
 	)
 	for _, n := range nodes {
 		if err := nodeEnc.WriteRow(n.ID, string(n.Kind), nodeShort(n), n.FilePath, n.AbsoluteFilePath, n.StartLine, nodeIsTest(n), nodeTestRole(n), nodeTestRunner(n)); err != nil {

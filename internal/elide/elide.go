@@ -43,8 +43,8 @@ import (
 	rubylang "github.com/zzet/gortex/internal/parser/tsitter/ruby"
 	rustlang "github.com/zzet/gortex/internal/parser/tsitter/rust"
 	scalalang "github.com/zzet/gortex/internal/parser/tsitter/scala"
-	tslang "github.com/zzet/gortex/internal/parser/tsitter/typescript"
 	tsxlang "github.com/zzet/gortex/internal/parser/tsitter/tsx"
+	tslang "github.com/zzet/gortex/internal/parser/tsitter/typescript"
 )
 
 const parseTimeout = 5 * time.Second
@@ -58,6 +58,103 @@ var (
 	// The original source is returned alongside the error.
 	ErrParse = errors.New("elide: parse failed")
 )
+
+// Decl describes one function or method declaration the elider is
+// about to compress. A Keep predicate (see Options) inspects it to
+// decide whether that body is left verbatim or replaced by a stub.
+type Decl struct {
+	// Name is the best-effort declaration name. It is "" when the
+	// grammar gives no easy name handle (anonymous functions, some
+	// Kotlin/Elixir shapes) — such decls are matchable only by line
+	// range, never by name.
+	Name string
+	// Kind is the tree-sitter node type of the declaration.
+	Kind string
+	// StartRow and EndRow are the 0-based row span of the whole
+	// declaration node (signature through closing brace).
+	StartRow int
+	EndRow   int
+}
+
+// Options tunes CompressWith. The zero value elides every body, which
+// is exactly what the bare Compress entry point does.
+type Options struct {
+	// Keep, when non-nil, is consulted once per elidable declaration.
+	// Returning true leaves that declaration's body verbatim; every
+	// other body is still stubbed. A nil Keep elides everything.
+	Keep func(Decl) bool
+}
+
+// KeepLineRanges builds a Keep predicate that retains any declaration
+// whose row span intersects one of the given 1-based inclusive line
+// ranges. It is the precise matching path: callers resolve symbol IDs
+// to graph line ranges and pass them here. Returns nil (elide all)
+// when no ranges are supplied.
+func KeepLineRanges(ranges [][2]int) func(Decl) bool {
+	if len(ranges) == 0 {
+		return nil
+	}
+	cp := make([][2]int, len(ranges))
+	copy(cp, ranges)
+	return func(d Decl) bool {
+		ds, de := d.StartRow+1, d.EndRow+1
+		for _, r := range cp {
+			lo, hi := r[0], r[1]
+			if hi < lo {
+				lo, hi = hi, lo
+			}
+			if ds <= hi && lo <= de {
+				return true
+			}
+		}
+		return false
+	}
+}
+
+// KeepNames builds a Keep predicate that retains any declaration whose
+// extracted name is in the set. Matching is case-sensitive. Returns
+// nil (elide all) when the set is effectively empty.
+func KeepNames(names []string) func(Decl) bool {
+	set := make(map[string]struct{}, len(names))
+	for _, n := range names {
+		if n != "" {
+			set[n] = struct{}{}
+		}
+	}
+	if len(set) == 0 {
+		return nil
+	}
+	return func(d Decl) bool {
+		if d.Name == "" {
+			return false
+		}
+		_, ok := set[d.Name]
+		return ok
+	}
+}
+
+// KeepAny combines predicates into one that keeps a declaration when
+// any constituent predicate keeps it. nil predicates are dropped;
+// KeepAny returns nil when nothing usable is left.
+func KeepAny(preds ...func(Decl) bool) func(Decl) bool {
+	var kept []func(Decl) bool
+	for _, p := range preds {
+		if p != nil {
+			kept = append(kept, p)
+		}
+	}
+	if len(kept) == 0 {
+		return nil
+	}
+	return func(d Decl) bool {
+		for _, p := range kept {
+			if p(d) {
+				return true
+			}
+		}
+		return false
+	}
+}
 
 type stubStyle int
 
@@ -428,6 +525,15 @@ func IsSupported(lang string) bool {
 // preserved verbatim because they have no body to elide; everything
 // outside the collected body ranges is copied through byte-for-byte.
 func Compress(src []byte, lang string) ([]byte, error) {
+	return CompressWith(src, lang, Options{})
+}
+
+// CompressWith is Compress with caller-supplied Options. When
+// opts.Keep is non-nil it is consulted for every elidable
+// declaration; returning true leaves that body verbatim while every
+// other body is still stubbed. CompressWith(src, lang, Options{}) is
+// identical to Compress.
+func CompressWith(src []byte, lang string, opts Options) ([]byte, error) {
 	if len(src) == 0 {
 		return src, nil
 	}
@@ -456,7 +562,7 @@ func Compress(src []byte, lang string) ([]byte, error) {
 	if root == nil {
 		return src, nil
 	}
-	ranges := collectRanges(root, spec, src)
+	ranges := collectRanges(root, spec, src, opts)
 	if len(ranges) == 0 {
 		return src, nil
 	}
@@ -469,13 +575,84 @@ func CompressString(src, lang string) (string, error) {
 	return string(out), err
 }
 
+// CompressStringWith is the string-flavoured wrapper around CompressWith.
+func CompressStringWith(src, lang string, opts Options) (string, error) {
+	out, err := CompressWith([]byte(src), lang, opts)
+	return string(out), err
+}
+
 type elideRange struct {
 	startByte uint32
 	endByte   uint32
 	stub      string
 }
 
-func collectRanges(root *sitter.Node, spec *languageSpec, src []byte) []elideRange {
+// identifierTypes are the tree-sitter node kinds that can carry a bare
+// declaration name across the supported grammars.
+var identifierTypes = map[string]struct{}{
+	"identifier":          {},
+	"field_identifier":    {},
+	"type_identifier":     {},
+	"simple_identifier":   {},
+	"property_identifier": {},
+	"word":                {},
+}
+
+// declName extracts a best-effort name for a function/method
+// declaration node. It returns "" when no name handle is available —
+// callers treat that as "match by line range only". Name extraction
+// is deliberately fail-soft: a miss never blocks elision.
+func declName(node *sitter.Node, src []byte) string {
+	if node == nil {
+		return ""
+	}
+	if n := node.ChildByFieldName("name"); n != nil {
+		return n.Content(src)
+	}
+	// C / C++: the name lives inside nested declarator wrappers.
+	if d := node.ChildByFieldName("declarator"); d != nil {
+		if name := firstIdentifier(d, src, 5); name != "" {
+			return name
+		}
+	}
+	// Fallback: the first identifier-kinded direct named child.
+	cnt := int(node.NamedChildCount())
+	for i := range cnt {
+		c := node.NamedChild(i)
+		if c == nil {
+			continue
+		}
+		if _, ok := identifierTypes[c.Type()]; ok {
+			return c.Content(src)
+		}
+	}
+	return ""
+}
+
+// firstIdentifier descends up to depth levels (preferring declarator
+// fields) for the first identifier-kinded node.
+func firstIdentifier(node *sitter.Node, src []byte, depth int) string {
+	if node == nil || depth < 0 {
+		return ""
+	}
+	if _, ok := identifierTypes[node.Type()]; ok {
+		return node.Content(src)
+	}
+	if d := node.ChildByFieldName("declarator"); d != nil {
+		if name := firstIdentifier(d, src, depth-1); name != "" {
+			return name
+		}
+	}
+	cnt := int(node.NamedChildCount())
+	for i := range cnt {
+		if name := firstIdentifier(node.NamedChild(i), src, depth-1); name != "" {
+			return name
+		}
+	}
+	return ""
+}
+
+func collectRanges(root *sitter.Node, spec *languageSpec, src []byte, opts Options) []elideRange {
 	var out []elideRange
 	var walk func(node *sitter.Node)
 	walk = func(node *sitter.Node) {
@@ -493,6 +670,17 @@ func collectRanges(root *sitter.Node, spec *languageSpec, src []byte) []elideRan
 			}
 			if eligible {
 				if body := spec.findBody(node); body != nil {
+					// A Keep predicate can pin this declaration's body
+					// to its verbatim source; the whole subtree is then
+					// left intact — no stub, no recursion.
+					if opts.Keep != nil && opts.Keep(Decl{
+						Name:     declName(node, src),
+						Kind:     kind,
+						StartRow: int(node.StartPoint().Row),
+						EndRow:   int(node.EndPoint().Row),
+					}) {
+						return
+					}
 					stub, lineCount := renderStub(spec.style, body, src)
 					_ = lineCount
 					out = append(out, elideRange{

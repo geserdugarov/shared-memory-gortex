@@ -599,11 +599,20 @@ func (s *Server) handleReadFile(ctx context.Context, req mcp.CallToolRequest) (*
 
 	originalBytes := len(content)
 	bodiesElided := false
+	var keptSymbols []string
 	language := s.detectLanguageForPath(ctx, absPath, relPath)
+	// File symbols power both the `keep` predicate and frecency credit.
+	sg := s.engineFor(ctx).GetFileSymbols(relPath)
 	if req.GetBool("compress_bodies", false) && language != "" && elide.IsSupported(language) {
-		if out, eerr := elide.Compress(content, language); eerr == nil && len(out) != len(content) {
+		var symbols []*graph.Node
+		if sg != nil {
+			symbols = sg.Nodes
+		}
+		keepPred, resolved := resolveKeepPredicate(req.GetString("keep", ""), symbols)
+		if out, eerr := elide.CompressWith(content, language, elide.Options{Keep: keepPred}); eerr == nil && len(out) != len(content) {
 			content = out
 			bodiesElided = true
+			keptSymbols = resolved
 		}
 	}
 
@@ -613,7 +622,7 @@ func (s *Server) handleReadFile(ctx context.Context, req mcp.CallToolRequest) (*
 	// this area" signal aligned with how the agent burned its
 	// budget.
 	s.sessionFor(ctx).recordFile(relPath)
-	if sg := s.engineFor(ctx).GetFileSymbols(relPath); sg != nil {
+	if sg != nil {
 		for _, n := range sg.Nodes {
 			if n == nil || n.Kind == graph.KindFile {
 				continue
@@ -631,6 +640,9 @@ func (s *Server) handleReadFile(ctx context.Context, req mcp.CallToolRequest) (*
 	}
 	if bodiesElided {
 		result["bodies_elided"] = true
+		if len(keptSymbols) > 0 {
+			result["kept_symbols"] = keptSymbols
+		}
 	}
 
 	etag := computeETag(result)

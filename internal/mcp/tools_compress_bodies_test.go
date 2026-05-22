@@ -293,6 +293,77 @@ func TestCompressBodies_Acceptance(t *testing.T) {
 		"acceptance: 200+ line file must compress to ≤ 60 lines, got %d", lines)
 }
 
+func TestGetEditingContext_CompressBodies_Keep(t *testing.T) {
+	srv, _ := setupCompressTestServer(t)
+
+	// keep=ValidateToken pins that function's body to verbatim source
+	// while the rest of service.go is still stubbed.
+	r := callTool(t, srv, "get_editing_context", map[string]any{
+		"path":            "service.go",
+		"compress_bodies": true,
+		"keep":            "ValidateToken",
+	})
+	m := extractTextResult(t, r)
+	src, _ := m["source_compressed"].(string)
+	require.NotEmpty(t, src, "source_compressed must be populated")
+
+	// ValidateToken body kept verbatim.
+	assert.Contains(t, src, `strings.Split(t, ".")`,
+		"kept symbol body must survive")
+	// String() body still elided.
+	assert.NotContains(t, src, `c.Subject + "@" + c.Issuer`,
+		"non-kept symbol body must still be stubbed")
+	assert.Contains(t, src, "lines elided",
+		"non-kept symbols must still produce a stub")
+	assert.Equal(t, true, m["bodies_elided"])
+
+	// The response reports which symbols stayed verbatim.
+	kept, _ := m["kept_symbols"].([]any)
+	require.Len(t, kept, 1)
+	assert.Equal(t, "ValidateToken", kept[0])
+}
+
+func TestGetEditingContext_CompressBodies_KeepByKind(t *testing.T) {
+	srv, _ := setupCompressTestServer(t)
+
+	// keep=method keeps every method's body; the plain function
+	// ValidateToken is still compressed.
+	r := callTool(t, srv, "get_editing_context", map[string]any{
+		"path":            "service.go",
+		"compress_bodies": true,
+		"keep":            "method",
+	})
+	m := extractTextResult(t, r)
+	src, _ := m["source_compressed"].(string)
+	require.NotEmpty(t, src)
+
+	assert.Contains(t, src, `c.Subject + "@" + c.Issuer`,
+		"method body must survive when keep=method")
+	assert.NotContains(t, src, `strings.Split(t, ".")`,
+		"plain function must still be compressed when keep=method")
+}
+
+func TestReadFile_CompressBodies_Keep(t *testing.T) {
+	srv, _ := setupCompressTestServer(t)
+
+	r := callTool(t, srv, "read_file", map[string]any{
+		"path":            "service.go",
+		"compress_bodies": true,
+		"keep":            "ValidateToken",
+	})
+	m := extractTextResult(t, r)
+	content, _ := m["content"].(string)
+
+	assert.Contains(t, content, `strings.Split(t, ".")`,
+		"kept symbol body must survive in read_file")
+	assert.NotContains(t, content, `c.Subject + "@" + c.Issuer`,
+		"non-kept body must still be stubbed in read_file")
+	assert.Equal(t, true, m["bodies_elided"])
+	kept, _ := m["kept_symbols"].([]any)
+	require.Len(t, kept, 1)
+	assert.Equal(t, "ValidateToken", kept[0])
+}
+
 // itoaInt is a tiny stdlib-free int-to-string for fixture builders.
 func itoaInt(n int) string {
 	if n == 0 {

@@ -28,6 +28,7 @@ func (s *Server) registerCodingTools() {
 			mcp.WithNumber("max_tokens", mcp.Description(tokenBudgetParamDescription)),
 			mcp.WithString("if_none_match", mcp.Description("ETag from a previous response — returns not_modified if content unchanged")),
 			mcp.WithBoolean("compress_bodies", mcp.Description("Also return a source_compressed view of the whole file with every function/method body replaced by a `{ /* N lines elided */ }` stub. Signatures, imports, types, and comments are preserved verbatim. Roughly 60-70% fewer tokens than raw source. Composable with format:\"gcx\". Default: false.")),
+			mcp.WithString("keep", mcp.Description("Comma-separated symbol names, IDs, or node kinds (function / method / type) whose bodies stay verbatim when compress_bodies is set — every other body in the file is still stubbed. Use to keep the symbols you are about to edit at full source while compressing the rest. Ignored unless compress_bodies is true.")),
 		),
 		s.handleGetEditingContext,
 	)
@@ -118,6 +119,7 @@ func (s *Server) registerCodingTools() {
 			mcp.WithDescription("Reads a whole file by path and returns its content. Use sparingly — prefer get_symbol_source / get_editing_context for code. Useful when you need a non-indexed file (config, fixture, raw markdown) or when you genuinely need the full body. With compress_bodies=true, every function/method body is replaced by a `{ /* N lines elided */ }` stub — signatures + structure preserved, ~30-40% of original tokens. Composable with format:\"gcx\"."),
 			mcp.WithString("path", mcp.Required(), mcp.Description("Absolute path, or repo-prefixed / repo-root-relative path")),
 			mcp.WithBoolean("compress_bodies", mcp.Description("Replace function/method bodies with elided stubs (default: false)")),
+			mcp.WithString("keep", mcp.Description("Comma-separated symbol names, IDs, or node kinds whose bodies stay verbatim when compress_bodies is set — every other body in the file is still stubbed. Ignored unless compress_bodies is true.")),
 			mcp.WithNumber("max_bytes", mcp.Description("Cap the marshaled response at this many bytes; truncation flag rides on the response. Omit for no cap.")),
 			mcp.WithString("if_none_match", mcp.Description("ETag from a previous response — returns not_modified if content unchanged")),
 		),
@@ -204,6 +206,50 @@ type editingContext struct {
 	Imports  []map[string]any `json:"imports"`
 	CalledBy []map[string]any `json:"called_by"`
 	Calls    []map[string]any `json:"calls"`
+}
+
+// resolveKeepPredicate turns the comma-separated `keep` parameter into
+// an elide.Keep predicate. Each token is matched against the supplied
+// indexed symbols by ID, by name, or as a node kind (function /
+// method / type / …); every matched symbol contributes its line range
+// — the precise path. Tokens are additionally offered as bare names
+// so `keep` still works on a file with no indexed symbols. The second
+// return value lists the distinct symbol names that resolved, for the
+// response envelope. Returns (nil, nil) when keep is empty.
+func resolveKeepPredicate(keep string, symbols []*graph.Node) (func(elide.Decl) bool, []string) {
+	tokens := splitCSV(keep)
+	if len(tokens) == 0 {
+		return nil, nil
+	}
+	want := make(map[string]struct{}, len(tokens))
+	for _, t := range tokens {
+		want[t] = struct{}{}
+	}
+	var ranges [][2]int
+	var resolved []string
+	seen := make(map[string]struct{})
+	for _, n := range symbols {
+		if n == nil || n.Kind == graph.KindFile {
+			continue
+		}
+		_, byID := want[n.ID]
+		_, byName := want[n.Name]
+		_, byKind := want[string(n.Kind)]
+		if !byID && !byName && !byKind {
+			continue
+		}
+		if n.StartLine > 0 && n.EndLine >= n.StartLine {
+			ranges = append(ranges, [2]int{n.StartLine, n.EndLine})
+		}
+		if n.Name != "" {
+			if _, dup := seen[n.Name]; !dup {
+				seen[n.Name] = struct{}{}
+				resolved = append(resolved, n.Name)
+			}
+		}
+	}
+	pred := elide.KeepAny(elide.KeepLineRanges(ranges), elide.KeepNames(tokens))
+	return pred, resolved
 }
 
 func (s *Server) handleGetEditingContext(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -321,6 +367,7 @@ func (s *Server) handleGetEditingContext(ctx context.Context, req mcp.CallToolRe
 	// Failures (no grammar, parse error) are swallowed — the caller
 	// still gets the structural sections that fired above.
 	var sourceCompressed string
+	var keptSymbols []string
 	if req.GetBool("compress_bodies", false) {
 		var language string
 		if out.File != nil {
@@ -344,7 +391,13 @@ func (s *Server) handleGetEditingContext(ctx context.Context, req mcp.CallToolRe
 				}
 			}
 			if len(fileBytes) > 0 {
-				if compressed, cerr := elide.Compress(fileBytes, language); cerr == nil {
+				// `keep` pins a chosen subset of symbols to their
+				// verbatim bodies while the rest of the file is still
+				// stubbed — keep the functions being edited at full
+				// source and compress everything else.
+				keepPred, resolved := resolveKeepPredicate(req.GetString("keep", ""), sg.Nodes)
+				keptSymbols = resolved
+				if compressed, cerr := elide.CompressWith(fileBytes, language, elide.Options{Keep: keepPred}); cerr == nil {
 					sourceCompressed = string(compressed)
 				}
 			}
@@ -378,6 +431,9 @@ func (s *Server) handleGetEditingContext(ctx context.Context, req mcp.CallToolRe
 	if sourceCompressed != "" {
 		result["source_compressed"] = sourceCompressed
 		result["bodies_elided"] = true
+		if len(keptSymbols) > 0 {
+			result["kept_symbols"] = keptSymbols
+		}
 	}
 	if s.isTOON(ctx, req) {
 		return returnTOON(result)

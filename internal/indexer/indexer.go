@@ -2198,6 +2198,27 @@ func (idx *Indexer) EvictFile(filePath string) (int, int) {
 	return idx.graph.EvictFile(graphPath)
 }
 
+// embeddingDimsOrDefault returns the embedder's reported vector width,
+// falling back to a neutral placeholder only when the provider cannot
+// state its width yet (Dimensions() == 0, the APIProvider-before-first-
+// call case). The fallback is never persisted: buildSearchIndex and
+// ImportVectorIndex both overwrite it with the true width taken from a
+// real vector / the cached header. Kept as a named helper so the
+// vector-dimension default has one definition instead of a scattered
+// magic number.
+func embeddingDimsOrDefault(p embedding.Provider) int {
+	if p == nil {
+		return 0
+	}
+	if d := p.Dimensions(); d > 0 {
+		return d
+	}
+	// Provider has not committed to a width. 384 matches the default
+	// transformer backend (MiniLM-L6-v2); a static GloVe provider
+	// always reports its real 50 and never reaches this branch.
+	return 384
+}
+
 // buildSearchIndex populates the search backend from the current graph.
 // When an embedder is set, also builds a vector index and wraps both
 // in a HybridBackend with RRF fusion.
@@ -2237,10 +2258,15 @@ func (idx *Indexer) buildSearchIndex() {
 		return
 	}
 
-	dims := idx.embedder.Dimensions()
-	if dims == 0 {
-		dims = 300 // default for static provider
-	}
+	// Provisional dimensionality: trust the embedder's own report.
+	// A provider that can't state its width yet (an APIProvider before
+	// its first call returns 0) gets a neutral placeholder — the value
+	// is overwritten below from the first real vector, so it never
+	// reaches the persisted index. The old hard-coded 300 was wrong for
+	// the default static GloVe provider (50d) and misrepresented the
+	// index width in the interim; deriving from Dimensions() keeps it
+	// honest for every provider.
+	dims := embeddingDimsOrDefault(idx.embedder)
 
 	// Collect texts and IDs for batch embedding. Nodes matching
 	// Semantic.SkipEmbed (e.g. CSS custom properties, terraform blocks,

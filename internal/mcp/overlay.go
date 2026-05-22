@@ -93,7 +93,20 @@ func (s *Server) wrapToolHandler(h mcpserver.ToolHandlerFunc) mcpserver.ToolHand
 		if view != nil {
 			ctx = WithOverlayView(ctx, view)
 		}
-		return h(ctx, req)
+		// Warmup fast path: when the daemon is still warming up and
+		// this is a graph-querying tool, the handler still runs (so
+		// the caller gets a best-effort partial answer from the part
+		// of the graph indexed so far) and the result is decorated
+		// with a structured `warming` block — flag + real progress
+		// percentage + phase + message. Graph-independent tools are
+		// untouched; a ready daemon is a transparent pass-through.
+		// See warmup_fastpath.go.
+		env, warming := s.checkWarmupFastPath(req.Params.Name)
+		res, hErr := h(ctx, req)
+		if warming && hErr == nil {
+			res = decorateResultWithWarming(res, env)
+		}
+		return res, hErr
 	}
 }
 

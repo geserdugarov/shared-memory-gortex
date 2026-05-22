@@ -713,7 +713,7 @@ func (s *Server) registerCoreTools() {
 			mcp.WithString("kind", mcp.Description("Filter to one or more node kinds (comma-separated). Standard kinds: function, method, type, interface, variable, constant, field, file, package, import, contract. Coverage kinds: param, closure, enum_member, generic_param, module, table, column, config_key, flag, event, migration, fixture, todo, team, license, release.")),
 			mcp.WithString("assist", mcp.Description("LLM assist mode: \"auto\" (default — engages on natural-language queries, skips identifier lookups), \"on\" (force engage), \"off\" (bypass), \"deep\" (on + a body-grounded verification pass that reads candidate code and HONESTLY drops irrelevant matches — slower, may return empty results when nothing genuinely matches). Requires an LLM provider configured via `llm.provider` (local / anthropic / openai / ollama / claudecli / gemini / bedrock / deepseek); behaves as \"off\" when none is available.")),
 			mcp.WithBoolean("debug", mcp.Description("When true, attach a `rerank` block to the response carrying per-candidate scores and per-signal contributions from the 11-signal rerank pipeline (bm25, semantic, fan_in, fan_out, churn, community, minhash, api_signature, type_signature, recency, feedback) plus the active per-signal weight map. Off by default; enable to inspect ranking decisions or tune `.gortex.yaml::search::weights`.")),
-			mcp.WithString("query_class", mcp.Description("Advisory hint that tunes the bm25-vs-semantic balance of the rerank: \"auto\" (default — detect from query shape), \"symbol\" (identifier / API lookup — BM25-heavy), \"concept\" (natural-language description — balanced), \"path\" (file-path query — most BM25-heavy), \"signature\" (type/function-signature fragment — BM25-leaning). The class actually used is echoed back as `query_class` in the response.")),
+			mcp.WithString("query_class", mcp.Description("Advisory hint that tunes the bm25-vs-semantic balance of the rerank: \"auto\" (default — detect from query shape), \"symbol\" (identifier / API lookup — BM25-heavy), \"concept\" (natural-language description — balanced), \"path\" (file-path query — most BM25-heavy), \"signature\" (type/function-signature fragment — BM25-leaning), \"keyword_soup\" (a degenerate boolean OR-list \u2014 suppresses LLM expansion and splits the soup into per-disjunct BM25 fetches; a `query_advice` nudge rides on the response). The class actually used is echoed back as `query_class` in the response.")),
 			mcp.WithNumber("max_per_file", mcp.Description("Cap how many results a single source file may contribute to the diverse head of the result set (default 3). Hits beyond the cap are demoted below not-yet-capped results — never dropped — so the top of the list spans more files. Set 0 to disable diversification.")),
 		),
 		s.handleSearchSymbols,
@@ -1090,11 +1090,31 @@ func (s *Server) handleSearchSymbols(ctx context.Context, req mcp.CallToolReques
 	scopeWS, scopeProj := s.resolveQueryScope(ctx, workspaceArg, projectArg)
 	scope := query.QueryOptions{WorkspaceID: scopeWS, ProjectID: scopeProj}
 
+	// Keyword-soup defense: a degenerate boolean / OR-list query
+	// ("A OR B OR 'no access'") defeats ordinary retrieval. Detect it
+	// up front -- explicit query_class:"keyword_soup" pins it, else the
+	// structural detector decides. On a soup query the LLM expansion +
+	// rerank passes are suppressed (wasted on garbage) and the soup is
+	// split into per-disjunct BM25 fetches; a `query_advice` nudge is
+	// attached so the agent learns to send a cleaner query.
+	soupMode := s.searchConfig().EffectiveKeywordSoupRewrite()
+	soupQueryClass := strings.EqualFold(strings.TrimSpace(req.GetString("query_class", "")), "keyword_soup")
+	soupDetected, soupReason := rerank.LooksLikeKeywordSoup(q)
+	isSoup := soupMode != config.KeywordSoupOff && (soupDetected || soupQueryClass)
+	if isSoup && soupReason == "" {
+		soupReason = "query reads as a boolean OR-list; search ranks best on a single concept or symbol name -- run one query per disjunct, or describe the intent in plain words"
+	}
+
 	// LLM assist gate: decides whether the expansion + rerank passes
 	// run for this query. The service-enabled check is layered inside
-	// the helpers so a stub build is a clean bypass.
+	// the helpers so a stub build is a clean bypass. A soup query
+	// forces assist off -- neither expansion nor rerank earns its cost
+	// on a disjunct list.
 	assist := parseAssistMode(req)
 	engage := shouldEngageAssist(assist, q) && s.llmService != nil && s.llmService.Enabled()
+	if isSoup {
+		engage = false
+	}
 
 	fetchLimit := offset + limit + 10
 	if engage {
@@ -1103,9 +1123,17 @@ func (s *Server) handleSearchSymbols(ctx context.Context, req mcp.CallToolReques
 		fetchLimit = offset + limit + rerankCap
 	}
 
+	// Expansion terms feeding the BM25 OR-merge: LLM-derived synonyms
+	// when assist engaged, or the soup's split disjuncts when this is
+	// a soup query handled in "split" mode. The two are mutually
+	// exclusive -- soup forces assist off above.
 	var expandedTerms []string
+	var soupFragments []string
 	if engage {
 		expandedTerms = expandSearchTerms(ctx, s, q)
+	} else if isSoup && soupMode == config.KeywordSoupSplit {
+		soupFragments = rerank.SplitSoupFragments(q)
+		expandedTerms = soupFragments
 	}
 
 	var nodes []*graph.Node
@@ -1187,11 +1215,17 @@ func (s *Server) handleSearchSymbols(ctx context.Context, req mcp.CallToolReques
 	if qcArg := strings.TrimSpace(req.GetString("query_class", "")); qcArg != "" {
 		parsed, ok := rerank.ParseQueryClass(qcArg)
 		if !ok {
-			return mcp.NewToolResultError("invalid query_class: " + qcArg + " (want auto, symbol, concept, path, or signature)"), nil
+			return mcp.NewToolResultError("invalid query_class: " + qcArg + " (want auto, symbol, concept, path, signature, or keyword_soup)"), nil
 		}
 		if parsed != rerank.QueryClassUnknown {
 			queryClass = parsed
 		}
+	}
+	// A detected soup query reports the keyword_soup class even when
+	// the caller did not pin it, so the response surfaces the class
+	// the handler actually treated the query as.
+	if isSoup {
+		queryClass = rerank.QueryClassKeywordSoup
 	}
 	rctx.QueryClass = queryClass
 	var rerankBreakdown []*rerank.Candidate
@@ -1260,6 +1294,17 @@ func (s *Server) handleSearchSymbols(ctx context.Context, req mcp.CallToolReques
 	}
 	if filtersRelaxed {
 		resp["filters_relaxed"] = true
+	}
+	// query_advice nudges the agent toward a cleaner query when the
+	// input was detected as keyword-soup. In "split" mode the search
+	// still ran (over the split disjuncts); the advice is purely
+	// instructional and rides alongside the results.
+	if isSoup && soupReason != "" {
+		advice := map[string]any{"reason": soupReason}
+		if len(soupFragments) > 0 {
+			advice["split_into"] = soupFragments
+		}
+		resp["query_advice"] = advice
 	}
 	// When LLM assist engaged, expose a small debug surface so callers
 	// (and the agent itself) can see what the model contributed.

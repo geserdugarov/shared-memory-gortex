@@ -803,6 +803,40 @@ type SearchConfig struct {
 	// bm25, semantic, fan_in, fan_out, churn, community, minhash,
 	// api_signature, type_signature, recency, feedback.
 	Weights map[string]float64 `mapstructure:"weights" yaml:"weights,omitempty"`
+
+	// KeywordSoupRewrite controls how `search_symbols` handles a
+	// degenerate boolean / OR-soup query (`A OR B OR 'no access'`).
+	//   - "split" (default): split the soup on its boolean operators
+	//     and run a BM25 OR-merge over the disjuncts; LLM expansion is
+	//     suppressed and a `query_advice` nudge rides on the response.
+	//   - "nudge": leave retrieval unchanged but still attach the
+	//     `query_advice` nudge.
+	//   - "off": disable soup handling entirely.
+	// An empty value is treated as "split".
+	KeywordSoupRewrite string `mapstructure:"keyword_soup_rewrite" yaml:"keyword_soup_rewrite,omitempty"`
+}
+
+// Keyword-soup rewrite modes for SearchConfig.KeywordSoupRewrite.
+const (
+	KeywordSoupSplit = "split"
+	KeywordSoupNudge = "nudge"
+	KeywordSoupOff   = "off"
+)
+
+// EffectiveKeywordSoupRewrite folds the empty default into the
+// canonical "split" mode and lower-cases the value, so callers can
+// switch on it without re-normalising.
+func (c SearchConfig) EffectiveKeywordSoupRewrite() string {
+	switch v := strings.ToLower(strings.TrimSpace(c.KeywordSoupRewrite)); v {
+	case "", KeywordSoupSplit:
+		return KeywordSoupSplit
+	case KeywordSoupNudge:
+		return KeywordSoupNudge
+	case KeywordSoupOff:
+		return KeywordSoupOff
+	default:
+		return KeywordSoupSplit
+	}
 }
 
 // EmbeddingConfig controls the semantic-search vector channel: which

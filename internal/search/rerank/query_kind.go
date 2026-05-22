@@ -33,6 +33,14 @@ const (
 	// ("func(ctx) error", "(string) bool"). Structural keywords carry
 	// the signal: BM25-leaning but less extreme than a bare path.
 	QueryClassSignature
+	// QueryClassKeywordSoup is a degenerate boolean / OR-soup query
+	// ("A OR B OR 'no access'") -- a list of disjuncts rather than a
+	// description of intent. It defeats ordinary retrieval, so the
+	// search handler treats it specially: LLM expansion is suppressed
+	// and the soup is split into per-disjunct BM25 fetches. Detected
+	// by LooksLikeKeywordSoup; a caller may also pin it via the
+	// search_symbols query_class argument.
+	QueryClassKeywordSoup
 )
 
 // String returns the lowercase class name used by the search_symbols
@@ -47,6 +55,8 @@ func (q QueryClass) String() string {
 		return "path"
 	case QueryClassSignature:
 		return "signature"
+	case QueryClassKeywordSoup:
+		return "keyword_soup"
 	default:
 		return "unknown"
 	}
@@ -68,6 +78,8 @@ func ParseQueryClass(s string) (QueryClass, bool) {
 		return QueryClassPath, true
 	case "signature":
 		return QueryClassSignature, true
+	case "keyword_soup", "soup":
+		return QueryClassKeywordSoup, true
 	default:
 		return QueryClassUnknown, false
 	}
@@ -200,6 +212,11 @@ func ClassifyQuery(query string) QueryClass {
 	if q == "" {
 		return QueryClassConcept
 	}
+	// Keyword-soup detection runs first: a degenerate boolean OR-list
+	// is its own class regardless of what its disjuncts look like.
+	if soup, _ := LooksLikeKeywordSoup(q); soup {
+		return QueryClassKeywordSoup
+	}
 	if looksLikeSignature(q) {
 		return QueryClassSignature
 	}
@@ -254,6 +271,10 @@ func AlphaForClass(c QueryClass) float64 {
 		return AlphaPath
 	case QueryClassSignature:
 		return AlphaSignature
+	case QueryClassKeywordSoup:
+		// Soup is split into per-disjunct BM25 fetches and the LLM
+		// channel is suppressed -- lean hard on exact-token evidence.
+		return AlphaSymbol
 	default: // QueryClassConcept, QueryClassUnknown
 		return AlphaNL
 	}
@@ -275,10 +296,11 @@ type classWeights struct {
 // semantic channel down by amounts that grow with how literal the
 // query is.
 var classWeightTable = map[QueryClass]classWeights{
-	QueryClassConcept:   {bm25: 1.00, semantic: 1.00},
-	QueryClassSymbol:    {bm25: 1.20, semantic: 0.65},
-	QueryClassPath:      {bm25: 1.25, semantic: 0.45},
-	QueryClassSignature: {bm25: 1.10, semantic: 0.80},
+	QueryClassConcept:     {bm25: 1.00, semantic: 1.00},
+	QueryClassSymbol:      {bm25: 1.20, semantic: 0.65},
+	QueryClassPath:        {bm25: 1.25, semantic: 0.45},
+	QueryClassSignature:   {bm25: 1.10, semantic: 0.80},
+	QueryClassKeywordSoup: {bm25: 1.20, semantic: 0.50},
 }
 
 // ClassWeightMultiplier returns the factor applied to a signal's

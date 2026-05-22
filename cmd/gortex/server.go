@@ -385,6 +385,7 @@ func runServer(cmd *cobra.Command, _ []string) error {
 	srv.SetArchitecture(cfg.Architecture)
 	srv.SetArtifacts(cfg.Artifacts)
 	srv.SetNamedQueries(cfg.Queries)
+	srv.SetSearchConfig(cfg.Search)
 
 	if semMgr := idx.SemanticManager(); semMgr != nil {
 		srv.SetSemanticManager(semMgr)

@@ -378,6 +378,7 @@ func runMCP(cmd *cobra.Command, args []string) error {
 	srv.SetArchitecture(cfg.Architecture)
 	srv.SetArtifacts(cfg.Artifacts)
 	srv.SetNamedQueries(cfg.Queries)
+	srv.SetSearchConfig(cfg.Search)
 	srv.SetBind(bind)
 
 	// Wire semantic manager to MCP server for stats reporting.

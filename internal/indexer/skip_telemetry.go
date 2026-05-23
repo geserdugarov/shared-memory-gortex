@@ -23,12 +23,14 @@ type skippedFile struct {
 }
 
 // walkedFile records a file that survived the walk-time filters,
-// together with its walk-time ModTime so the worker and the
-// post-parse fileMtimes loop don't need to re-stat. The walk does
-// exactly one os.Stat per surviving file via d.Info(); everything
-// downstream reads from this struct.
+// together with its walk-time ModTime and detected language so the
+// worker and the post-parse fileMtimes loop don't need to re-stat /
+// re-detect. The walk does exactly one os.Stat (via d.Info()) and one
+// language detection per surviving file; everything downstream reads
+// from this struct.
 type walkedFile struct {
 	path      string
+	lang      string
 	mtimeNano int64
 }
 

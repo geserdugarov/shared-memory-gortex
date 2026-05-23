@@ -1565,6 +1565,7 @@ func (idx *Indexer) IndexCtx(ctx context.Context, root string) (*IndexResult, er
 		}
 		files = append(files, walkedFile{
 			path:      path,
+			lang:      lang,
 			mtimeNano: info.ModTime().UnixNano(),
 		})
 		return nil
@@ -1649,8 +1650,24 @@ func (idx *Indexer) IndexCtx(ctx context.Context, root string) (*IndexResult, er
 				}
 
 				relPath, _ := filepath.Rel(absRoot, path)
-				lang, _ := idx.effectiveLanguage(path, src)
+				// Reuse the walk-time language. The walk's
+				// effectiveLanguage call already consulted shebang
+				// bytes via readSniffPrefix (512-byte probe), so a
+				// re-detect against the full src would change the
+				// answer only on the vanishingly rare case where a
+				// language marker lives past byte 512 — and any such
+				// case is content-sniffing-by-luck rather than spec'd
+				// behaviour. The fallback below covers the truly
+				// pathological case where the walk-time language has
+				// no extractor registered (effectively dead code).
+				lang := wf.lang
 				ext, _ := idx.registry.GetByLanguage(lang)
+				if ext == nil {
+					if relang, ok := idx.effectiveLanguage(path, src); ok {
+						lang = relang
+						ext, _ = idx.registry.GetByLanguage(lang)
+					}
+				}
 				if ext == nil {
 					continue
 				}

@@ -882,7 +882,7 @@ func (s *Server) registerCoreTools() {
 	s.addTool(
 		mcp.NewTool("get_repo_outline",
 			mcp.WithDescription("Narrative single-call overview of the indexed codebase: primary languages, top communities, load-bearing hotspots, most-imported files, and entry points. Use at session start (or when onboarding to an unfamiliar repo) instead of assembling this from graph_stats + analyze + manual inspection. Output stays under ~1k tokens."),
-			mcp.WithString("format", mcp.Description("Output format: json (default), gcx (GCX1 compact wire format), or toon")),
+			mcp.WithString("format", mcp.Description("Output format: json (default) or toon. gcx is accepted but honoured as toon — get_repo_outline is a status-shape payload with no row-shape gain from a hand-tuned GCX encoder.")),
 			mcp.WithNumber("max_bytes", mcp.Description("Cap the marshaled response at this many bytes; truncation metadata rides on the response.")),
 		),
 		s.handleGetRepoOutline,
@@ -891,7 +891,7 @@ func (s *Server) registerCoreTools() {
 	s.addTool(
 		mcp.NewTool("graph_stats",
 			mcp.WithDescription("Returns a compact summary of the indexed codebase: node/edge counts by kind and language. Call at session start to orient Claude in an unfamiliar repo."),
-			mcp.WithString("format", mcp.Description("Output format: json (default), gcx (GCX1 compact wire format), or toon")),
+			mcp.WithString("format", mcp.Description("Output format: json (default) or toon. gcx is accepted but honoured as toon — graph_stats is a status-shape payload with no row-shape gain from a hand-tuned GCX encoder.")),
 			mcp.WithNumber("max_bytes", mcp.Description("Cap the marshaled response at this many bytes; truncation metadata rides on the response.")),
 		),
 		s.handleGraphStats,

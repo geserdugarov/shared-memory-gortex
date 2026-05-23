@@ -948,12 +948,70 @@ func (g *Graph) GetNodeByQualName(qualName string) *Node {
 }
 
 // FindNodesByName returns all nodes matching the short name.
+//
+// Implementation walks every shard's byName bucket. The two-pass shape
+// (sum then allocate) trades one extra read-lock round trip per shard
+// for a single right-sized allocation — the prior single-pass append
+// re-grew `out` on every hot shard (1 + log2(N) reallocations), which
+// the cold-index heap profile attributed 5.22 GB / 14% of total alloc
+// to. Names with a long candidate list (`Visit`, `init`, `create`)
+// see the biggest win.
 func (g *Graph) FindNodesByName(name string) []*Node {
-	var out []*Node
+	total := 0
+	for _, s := range g.shards {
+		s.mu.RLock()
+		total += len(s.byName[name])
+		s.mu.RUnlock()
+	}
+	if total == 0 {
+		return nil
+	}
+	out := make([]*Node, 0, total)
 	for _, s := range g.shards {
 		s.mu.RLock()
 		if src := s.byName[name]; len(src) > 0 {
 			out = append(out, src...)
+		}
+		s.mu.RUnlock()
+	}
+	return out
+}
+
+// FindNodesByNameInRepo returns nodes matching the short name that are
+// either in the given repoPrefix or carry an empty RepoPrefix (synthetic
+// / stdlib nodes — kept same-repo by convention). Equivalent to
+// filterSameRepo(repoPrefix, FindNodesByName(name)) but skips the
+// intermediate cross-repo candidate slice.
+//
+// In single-repo graphs (repoPrefix == ""), behaves identically to
+// FindNodesByName.
+func (g *Graph) FindNodesByNameInRepo(name, repoPrefix string) []*Node {
+	if repoPrefix == "" {
+		return g.FindNodesByName(name)
+	}
+	// First pass: count matches that pass the repo filter. Counting in
+	// a separate pass keeps `out` right-sized even when ~95% of the
+	// byName bucket lives in unrelated repos.
+	total := 0
+	for _, s := range g.shards {
+		s.mu.RLock()
+		for _, n := range s.byName[name] {
+			if n.RepoPrefix == "" || n.RepoPrefix == repoPrefix {
+				total++
+			}
+		}
+		s.mu.RUnlock()
+	}
+	if total == 0 {
+		return nil
+	}
+	out := make([]*Node, 0, total)
+	for _, s := range g.shards {
+		s.mu.RLock()
+		for _, n := range s.byName[name] {
+			if n.RepoPrefix == "" || n.RepoPrefix == repoPrefix {
+				out = append(out, n)
+			}
 		}
 		s.mu.RUnlock()
 	}

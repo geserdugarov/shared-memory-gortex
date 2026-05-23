@@ -838,7 +838,7 @@ func (r *Resolver) resolveImport(e *graph.Edge, importPath string, stats *Resolv
 
 func (r *Resolver) resolveFunctionCall(e *graph.Edge, funcName string, stats *ResolveStats) {
 	callerRepo := r.callerRepoPrefix(e)
-	candidates := filterSameRepo(callerRepo, r.graph.FindNodesByName(funcName))
+	candidates := r.graph.FindNodesByNameInRepo(funcName, callerRepo)
 	if len(candidates) == 0 {
 		// No same-repo candidate. A genuine cross-repo callee is left
 		// unresolved here for CrossRepoResolver — which alone carries the
@@ -898,7 +898,7 @@ func (r *Resolver) resolveFunctionCall(e *graph.Edge, funcName string, stats *Re
 // genuine cross-repo case with import-reachability evidence.
 func (r *Resolver) resolveTypeOrFunc(e *graph.Edge, name string, stats *ResolveStats) {
 	callerRepo := r.callerRepoPrefix(e)
-	candidates := filterSameRepo(callerRepo, r.graph.FindNodesByName(name))
+	candidates := r.graph.FindNodesByNameInRepo(name, callerRepo)
 	if len(candidates) == 0 {
 		stats.Unresolved++
 		return
@@ -959,7 +959,7 @@ func (r *Resolver) resolveTypeRef(e *graph.Edge, name string, stats *ResolveStat
 	// the `*.` and resolve on the bare type name.
 	name = strings.TrimPrefix(name, "*.")
 	callerRepo := r.callerRepoPrefix(e)
-	candidates := filterSameRepo(callerRepo, r.graph.FindNodesByName(name))
+	candidates := r.graph.FindNodesByNameInRepo(name, callerRepo)
 	if len(candidates) == 0 {
 		stats.Unresolved++
 		return
@@ -993,7 +993,7 @@ func (r *Resolver) resolveTypeRef(e *graph.Edge, name string, stats *ResolveStat
 // write but the runtime target is actually a method/property).
 func (r *Resolver) resolveFieldRef(e *graph.Edge, fieldName string, stats *ResolveStats) bool {
 	receiverType := edgeReceiverType(e)
-	candidates := filterSameRepo(r.callerRepoPrefix(e), r.graph.FindNodesByName(fieldName))
+	candidates := r.graph.FindNodesByNameInRepo(fieldName, r.callerRepoPrefix(e))
 	if len(candidates) == 0 {
 		return false
 	}
@@ -1055,7 +1055,7 @@ func (r *Resolver) resolveMethodCall(e *graph.Edge, methodName string, stats *Re
 	// method call across a repo boundary by name. A cross-repo method
 	// call is left unresolved for CrossRepoResolver, which carries the
 	// import-reachability + workspace-boundary evidence.
-	rawCandidates := filterSameRepo(r.callerRepoPrefix(e), r.graph.FindNodesByName(methodName))
+	rawCandidates := r.graph.FindNodesByNameInRepo(methodName, r.callerRepoPrefix(e))
 	if len(rawCandidates) == 0 {
 		if r.applyBuiltinIfKnown(e, methodName, stats) {
 			return
@@ -1304,7 +1304,7 @@ func (r *Resolver) resolveTokenRef(e *graph.Edge, name string, stats *ResolveSta
 	// repos ("TOKEN", "CONFIG", …); a cross-repo first-candidate pick
 	// is a name-only guess. CrossRepoResolver handles genuine cross-repo
 	// token references.
-	candidates := filterSameRepo(r.callerRepoPrefix(e), r.graph.FindNodesByName(name))
+	candidates := r.graph.FindNodesByNameInRepo(name, r.callerRepoPrefix(e))
 	if len(candidates) == 0 {
 		stats.Unresolved++
 		return
@@ -1818,28 +1818,6 @@ func dirMatchesImport(dir, importPath string) bool {
 		return false
 	}
 	return dir == importPath || strings.HasSuffix(importPath, "/"+dir)
-}
-
-// filterSameRepo drops every candidate proven to live in a different
-// repo than callerRepo. Empty callerRepo (single-repo graph) or empty
-// candidate RepoPrefix (synthetic / stdlib nodes) is treated as
-// same-repo — the per-repo Resolver only ever rejects a *provably*
-// cross-repo candidate. Genuine cross-repo resolution is left to
-// CrossRepoResolver, which alone carries the workspace-boundary and
-// import-reachability evidence needed to cross a repo line safely.
-//
-// Returns a fresh slice so the caller's input is never aliased.
-func filterSameRepo(callerRepo string, candidates []*graph.Node) []*graph.Node {
-	if callerRepo == "" {
-		return candidates
-	}
-	out := make([]*graph.Node, 0, len(candidates))
-	for _, c := range candidates {
-		if c.RepoPrefix == "" || c.RepoPrefix == callerRepo {
-			out = append(out, c)
-		}
-	}
-	return out
 }
 
 // callerRepoPrefix returns the RepoPrefix of the node that owns the edge's From field.

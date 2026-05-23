@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"os/exec"
 	"strconv"
@@ -15,15 +16,21 @@ import (
 	"go.uber.org/zap"
 )
 
-// Client manages a JSON-RPC 2.0 connection to an LSP server subprocess.
+// Client manages a JSON-RPC 2.0 connection to an LSP server.
+//
+// The transport behind the read/write pair is pluggable: it can be a
+// spawned subprocess (SpawnTransport — the original behaviour) or a
+// dialed network connection (DialTransport — passive attach to an IDE-
+// managed server). The Client never touches the transport directly
+// past construction; Shutdown delegates the close semantics.
 type Client struct {
-	cmd     *exec.Cmd
-	stdin   io.WriteCloser
-	stdout  *bufio.Reader
-	reqID   atomic.Int64
-	pending sync.Map // reqID → chan *jsonRPCResponse
-	logger  *zap.Logger
-	done    chan struct{}
+	transport Transport
+	stdin     io.WriteCloser
+	stdout    *bufio.Reader
+	reqID     atomic.Int64
+	pending   sync.Map // reqID → chan *jsonRPCResponse
+	logger    *zap.Logger
+	done      chan struct{}
 
 	mu     sync.Mutex
 	closed bool
@@ -43,6 +50,142 @@ type Client struct {
 	reqMu       sync.RWMutex
 	reqHandlers map[string]RequestHandler
 }
+
+// Transport abstracts the I/O carrier underneath a Client. The
+// subprocess transport pipes stdin/stdout of a spawned LSP server;
+// the dial transport returns the read/write halves of an established
+// net.Conn. Stop() runs the transport-appropriate teardown — wait on
+// the subprocess, or close the socket cleanly.
+type Transport interface {
+	// Start establishes the carrier and returns a write-end for
+	// sending and a read-end for receiving JSON-RPC frames.
+	Start() (io.WriteCloser, io.Reader, error)
+	// Stop tears the carrier down. For a subprocess, this waits for
+	// exit; for a network connection, it closes the socket. The
+	// caller has already issued any protocol-level shutdown.
+	Stop() error
+	// SendsShutdown reports whether Client.Shutdown should issue the
+	// LSP shutdown/exit handshake before closing. True for spawned
+	// servers (we own their lifetime); false for dialed servers (the
+	// IDE owns them — we just disconnect).
+	SendsShutdown() bool
+	// Description returns a human-readable identifier (used in error
+	// messages, e.g. "gopls" or "tcp 127.0.0.1:7677").
+	Description() string
+}
+
+// SpawnTransport launches an LSP server as a subprocess and uses its
+// stdin/stdout for JSON-RPC framing. This is the original behaviour
+// that long predates passive attach.
+type SpawnTransport struct {
+	Command       string
+	Args          []string
+	Env           []string
+	WorkspaceRoot string
+
+	cmd *exec.Cmd
+}
+
+// Start spawns the subprocess and returns its stdin / stdout. Errors
+// from pipe construction or exec.Start are returned verbatim.
+func (s *SpawnTransport) Start() (io.WriteCloser, io.Reader, error) {
+	cmd := exec.Command(s.Command, s.Args...)
+	cmd.Dir = s.WorkspaceRoot
+	cmd.Stderr = os.Stderr
+	if len(s.Env) > 0 {
+		cmd.Env = append(os.Environ(), s.Env...)
+	}
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		return nil, nil, fmt.Errorf("stdin pipe: %w", err)
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, nil, fmt.Errorf("stdout pipe: %w", err)
+	}
+	if err := cmd.Start(); err != nil {
+		return nil, nil, fmt.Errorf("start %s: %w", s.Command, err)
+	}
+	s.cmd = cmd
+	return stdin, stdout, nil
+}
+
+// Stop closes stdin and waits for the subprocess to exit.
+func (s *SpawnTransport) Stop() error {
+	if s.cmd == nil || s.cmd.Process == nil {
+		return nil
+	}
+	return s.cmd.Wait()
+}
+
+// SendsShutdown returns true: gortex owns the subprocess, so it must
+// issue the LSP shutdown/exit handshake before tearing down the pipe.
+func (s *SpawnTransport) SendsShutdown() bool { return true }
+
+// Description returns the executable name for error/log surfaces.
+func (s *SpawnTransport) Description() string { return s.Command }
+
+// DialTransport opens a TCP or Unix-domain-socket connection to an
+// already-running LSP server (e.g. one started by the user's IDE) and
+// uses the resulting net.Conn as the JSON-RPC carrier.
+type DialTransport struct {
+	Network string // "tcp" or "unix"
+	Address string // host:port (tcp) or socket path (unix)
+
+	conn net.Conn
+	// connWriter wraps conn so closing the write half does not also
+	// close the read half. We need this because Client.send closes
+	// stdin to signal end-of-stream when SendsShutdown is true, and
+	// for dial transports that pattern would tear down receive too.
+	// In practice we set SendsShutdown to false, but the writer split
+	// keeps the lifecycle clean either way.
+	connWriter *dialWriter
+}
+
+// Start dials the configured network/address and returns paired
+// read/write halves of the connection.
+func (d *DialTransport) Start() (io.WriteCloser, io.Reader, error) {
+	conn, err := net.Dial(d.Network, d.Address)
+	if err != nil {
+		return nil, nil, fmt.Errorf("dial %s %s: %w", d.Network, d.Address, err)
+	}
+	d.conn = conn
+	d.connWriter = &dialWriter{conn: conn}
+	return d.connWriter, conn, nil
+}
+
+// Stop closes the underlying connection. The IDE keeps its LSP server
+// alive — we just disconnect.
+func (d *DialTransport) Stop() error {
+	if d.conn == nil {
+		return nil
+	}
+	return d.conn.Close()
+}
+
+// SendsShutdown returns false: the LSP server is owned by the IDE, so
+// gortex must not send the shutdown/exit sequence — that would tear
+// down the IDE's session.
+func (d *DialTransport) SendsShutdown() bool { return false }
+
+// Description returns "<network> <address>" — useful in spawn/dial
+// failure messages.
+func (d *DialTransport) Description() string { return d.Network + " " + d.Address }
+
+// dialWriter is an io.WriteCloser that writes to the connection but
+// closes nothing — the connection's full lifecycle is owned by the
+// DialTransport itself. This prevents the framing layer's stdin.Close()
+// from prematurely tearing down receive on shutdown.
+type dialWriter struct {
+	conn net.Conn
+}
+
+// Write forwards bytes to the underlying connection.
+func (w *dialWriter) Write(p []byte) (int, error) { return w.conn.Write(p) }
+
+// Close is a no-op: the connection lifecycle is owned by the
+// DialTransport, not the framing layer.
+func (w *dialWriter) Close() error { return nil }
 
 // NotificationHandler processes a notification from the server.
 type NotificationHandler func(method string, params json.RawMessage)
@@ -86,30 +229,31 @@ func (e *jsonRPCError) Error() string {
 // NewClient spawns an LSP server subprocess and returns a connected
 // client. env carries extra KEY=VALUE entries appended to the daemon's
 // own environment — used to pin a JRE for jdtls and similar.
+//
+// Kept for source compatibility with existing call sites and tests.
+// Internally constructs a SpawnTransport and delegates to
+// NewClientWithTransport.
 func NewClient(command string, args, env []string, workspaceRoot string, logger *zap.Logger) (*Client, error) {
-	cmd := exec.Command(command, args...)
-	cmd.Dir = workspaceRoot
-	cmd.Stderr = os.Stderr
-	if len(env) > 0 {
-		cmd.Env = append(os.Environ(), env...)
-	}
+	return NewClientWithTransport(&SpawnTransport{
+		Command:       command,
+		Args:          args,
+		Env:           env,
+		WorkspaceRoot: workspaceRoot,
+	}, logger)
+}
 
-	stdin, err := cmd.StdinPipe()
+// NewClientWithTransport builds a Client on top of any Transport
+// implementation — spawned subprocess or dialed socket. The transport
+// is started before returning, so a non-nil error means the carrier
+// did not come up.
+func NewClientWithTransport(t Transport, logger *zap.Logger) (*Client, error) {
+	stdin, stdout, err := t.Start()
 	if err != nil {
-		return nil, fmt.Errorf("stdin pipe: %w", err)
-	}
-
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return nil, fmt.Errorf("stdout pipe: %w", err)
-	}
-
-	if err := cmd.Start(); err != nil {
-		return nil, fmt.Errorf("start %s: %w", command, err)
+		return nil, err
 	}
 
 	c := &Client{
-		cmd:           cmd,
+		transport:     t,
 		stdin:         stdin,
 		stdout:        bufio.NewReader(stdout),
 		logger:        logger,
@@ -189,30 +333,40 @@ func (c *Client) Notify(method string, params any) error {
 	return c.send(notif)
 }
 
-// Shutdown sends the LSP shutdown and exit sequence.
+// Shutdown closes the client. The transport decides whether the LSP
+// shutdown/exit handshake is sent first — spawned subprocesses get the
+// full sequence (we own their lifetime); dialed servers do not (the
+// IDE owns the server; we just disconnect).
 func (c *Client) Shutdown() error {
 	c.mu.Lock()
 	if c.closed {
 		c.mu.Unlock()
-		// The read loop already closed `done`; just wait for the
-		// subprocess to exit so we don't leak it.
-		if c.cmd != nil && c.cmd.Process != nil {
-			_ = c.cmd.Wait()
+		// The read loop already closed `done`; ensure the transport
+		// has finished tearing down (e.g. subprocess Wait) so we
+		// don't leak resources.
+		if c.transport != nil {
+			_ = c.transport.Stop()
 		}
 		return nil
 	}
 	c.closed = true
 	close(c.done)
+	sendsShutdown := c.transport != nil && c.transport.SendsShutdown()
 	c.mu.Unlock()
 
-	// Send shutdown request — best-effort, the server may already be gone.
-	_ = c.Call("shutdown", nil, nil)
-	_ = c.Notify("exit", nil)
-	_ = c.stdin.Close()
-	if c.cmd == nil || c.cmd.Process == nil {
+	if sendsShutdown {
+		// Best-effort handshake — the server may already be gone.
+		// The shutdown/exit pair tells a server we own ("we spawned
+		// it") to free per-workspace state and exit cleanly.
+		_ = c.Call("shutdown", nil, nil)
+		_ = c.Notify("exit", nil)
+		_ = c.stdin.Close()
+	}
+
+	if c.transport == nil {
 		return nil
 	}
-	return c.cmd.Wait()
+	return c.transport.Stop()
 }
 
 // send writes a JSON-RPC message using the LSP content-length framing.

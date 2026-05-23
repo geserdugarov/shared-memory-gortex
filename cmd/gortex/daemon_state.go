@@ -217,7 +217,7 @@ func buildDaemonState(logger *zap.Logger) (*daemonState, error) {
 			RefuteUnconfirmed: cfg.Semantic.RefuteUnconfirmed,
 		}
 		for _, pc := range cfg.Semantic.Providers {
-			semCfg.Providers = append(semCfg.Providers, semantic.ProviderConfig{
+			out := semantic.ProviderConfig{
 				Name:      pc.Name,
 				Languages: pc.Languages,
 				Command:   pc.Command,
@@ -227,7 +227,15 @@ func buildDaemonState(logger *zap.Logger) (*daemonState, error) {
 				Daemon:    pc.Daemon,
 				Priority:  pc.Priority,
 				Enabled:   pc.Enabled,
-			})
+			}
+			if pc.Connect != nil {
+				out.Connect = &semantic.ConnectConfig{
+					Network:       pc.Connect.Network,
+					Address:       pc.Connect.Address,
+					FallbackSpawn: pc.Connect.FallbackSpawn,
+				}
+			}
+			semCfg.Providers = append(semCfg.Providers, out)
 		}
 		semMgr := semantic.NewManager(semCfg, logger)
 
@@ -257,11 +265,21 @@ func buildDaemonState(logger *zap.Logger) (*daemonState, error) {
 				}
 				semMgr.RegisterProvider(scipProv)
 			case lsp.SpecByName(pc.Name) != nil:
-				// Apply any command / args / env overrides from
-				// .gortex.yaml — this is how a user pins a JRE or
-				// passes launcher args to a heavyweight server (jdtls).
-				lspRouter.RegisterSpec(lsp.SpecWithOverrides(
-					lsp.SpecByName(pc.Name), pc.Command, pc.Args, pc.Env))
+				// Apply any command / args / env / connect overrides
+				// from .gortex.yaml — this is how a user pins a JRE
+				// for jdtls or wires the IDE-coexistence path that
+				// dials the editor's already-running LSP instead of
+				// spawning a duplicate subprocess.
+				var connect *lsp.ConnectSpec
+				if pc.Connect != nil {
+					connect = &lsp.ConnectSpec{
+						Network:       pc.Connect.Network,
+						Address:       pc.Connect.Address,
+						FallbackSpawn: pc.Connect.FallbackSpawn,
+					}
+				}
+				lspRouter.RegisterSpec(lsp.SpecWithOverridesConnect(
+					lsp.SpecByName(pc.Name), pc.Command, pc.Args, pc.Env, connect))
 			case pc.Daemon:
 				semMgr.RegisterProvider(lsp.NewProvider(pc.Command, pc.Args, pc.Languages, pc.Daemon, pc.MaxParallel, logger))
 			}

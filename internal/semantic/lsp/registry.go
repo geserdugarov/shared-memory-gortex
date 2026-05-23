@@ -1,6 +1,7 @@
 package lsp
 
 import (
+	"fmt"
 	"path/filepath"
 	"strings"
 
@@ -55,6 +56,59 @@ type ServerSpec struct {
 	// every built-in spec; populated only when a user overrides a
 	// server via .gortex.yaml (e.g. pinning JAVA_HOME for jdtls).
 	Env []string
+	// Connect, when non-nil, switches this spec from spawn mode to
+	// passive-attach: instead of starting a subprocess via Command +
+	// Args, Gortex dials the configured network endpoint and uses
+	// the resulting net.Conn for JSON-RPC framing. The intended use
+	// is IDE-coexistence — share the LSP server the user's editor is
+	// already running, rather than spawning a duplicate 200-500 MB
+	// subprocess per language.
+	Connect *ConnectSpec
+}
+
+// ConnectSpec carries the transport coordinates for passive LSP attach
+// — Gortex dials an already-running LSP server (typically the one the
+// user's IDE has started) instead of spawning its own. When the dial
+// fails and FallbackSpawn is false (the default), Gortex refuses the
+// language for that workspace rather than silently spinning up a second
+// instance behind the user's back.
+type ConnectSpec struct {
+	// Network is the dial network — "tcp" or "unix".
+	Network string
+	// Address is the dial address — host:port for tcp, socket path
+	// for unix.
+	Address string
+	// FallbackSpawn, when true, lets ensureClient fall back to
+	// spawning a subprocess (using the spec's Command + Args) if the
+	// dial fails after backoff. Default false: if the IDE's server
+	// is unreachable, the language is unavailable rather than racing
+	// the IDE for a port.
+	FallbackSpawn bool
+}
+
+// Validate reports any obvious misconfiguration in a ConnectSpec.
+// Returns nil for a usable spec; otherwise an error describing the
+// missing field. A nil receiver is treated as "not configured" (no
+// error — the spec just stays in spawn mode).
+func (c *ConnectSpec) Validate() error {
+	if c == nil {
+		return nil
+	}
+	if strings.TrimSpace(c.Network) == "" && strings.TrimSpace(c.Address) == "" {
+		return fmt.Errorf("lsp.connect: network and address are required")
+	}
+	if strings.TrimSpace(c.Network) == "" {
+		return fmt.Errorf("lsp.connect: network is required (tcp or unix)")
+	}
+	if strings.TrimSpace(c.Address) == "" {
+		return fmt.Errorf("lsp.connect: address is required")
+	}
+	switch strings.ToLower(strings.TrimSpace(c.Network)) {
+	case "tcp", "tcp4", "tcp6", "unix":
+	default:
+		return fmt.Errorf("lsp.connect: unsupported network %q (want tcp or unix)", c.Network)
+	}
+	return nil
 }
 
 // ServerAlt is one fallback command form for a server.
@@ -499,6 +553,15 @@ func SpecByName(name string) *ServerSpec {
 // base is never mutated, so the package-global Servers slice stays
 // pristine across daemons and tests.
 func SpecWithOverrides(base *ServerSpec, command string, args, env []string) *ServerSpec {
+	return SpecWithOverridesConnect(base, command, args, env, nil)
+}
+
+// SpecWithOverridesConnect is SpecWithOverrides plus an optional
+// passive-attach block. When connect is non-nil and validates, the
+// returned spec switches from spawn to dial — the Router constructs
+// the LSP client by dialing the configured endpoint instead of running
+// the spec's Command. A nil connect leaves spawn behaviour untouched.
+func SpecWithOverridesConnect(base *ServerSpec, command string, args, env []string, connect *ConnectSpec) *ServerSpec {
 	if base == nil {
 		return nil
 	}
@@ -511,6 +574,12 @@ func SpecWithOverrides(base *ServerSpec, command string, args, env []string) *Se
 	}
 	if len(env) > 0 {
 		cp.Env = append([]string(nil), env...)
+	}
+	if connect != nil {
+		// Shallow-copy so callers can't mutate our cached spec by
+		// retaining a handle to their input struct.
+		c := *connect
+		cp.Connect = &c
 	}
 	return &cp
 }

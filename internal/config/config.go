@@ -304,6 +304,46 @@ type SemanticProviderConfig struct {
 	// but it works for any LSP server that needs a tuned environment.
 	// Command / Args / Env set here override the built-in spec.
 	Env []string `mapstructure:"env" yaml:"env,omitempty"`
+	// Connect, when non-nil, switches this provider from spawning its
+	// own LSP subprocess to dialing an already-running endpoint —
+	// typically the LSP server the user's IDE is already managing.
+	// When set, validation requires non-empty network + address; an
+	// empty block is rejected with a clear error.
+	Connect *SemanticConnectConfig `mapstructure:"connect" yaml:"connect,omitempty"`
+}
+
+// SemanticConnectConfig is the YAML-bound passive-attach block under
+// `semantic.providers[*].connect`. Carrier is tcp or unix; address is
+// host:port (tcp) or socket path (unix). When fallback_spawn is true,
+// a failed dial falls back to spawning the configured subprocess.
+type SemanticConnectConfig struct {
+	Network       string `mapstructure:"network" yaml:"network"`
+	Address       string `mapstructure:"address" yaml:"address"`
+	FallbackSpawn bool   `mapstructure:"fallback_spawn" yaml:"fallback_spawn,omitempty"`
+}
+
+// Validate reports a clear error for a malformed Connect block — both
+// fields empty, or an unsupported network. Returns nil for a nil
+// receiver (spawn-mode is fine), and nil for a well-formed block.
+func (c *SemanticConnectConfig) Validate() error {
+	if c == nil {
+		return nil
+	}
+	if strings.TrimSpace(c.Network) == "" && strings.TrimSpace(c.Address) == "" {
+		return fmt.Errorf("semantic.providers.connect: network and address are required")
+	}
+	if strings.TrimSpace(c.Network) == "" {
+		return fmt.Errorf("semantic.providers.connect: network is required (tcp or unix)")
+	}
+	if strings.TrimSpace(c.Address) == "" {
+		return fmt.Errorf("semantic.providers.connect: address is required")
+	}
+	switch strings.ToLower(strings.TrimSpace(c.Network)) {
+	case "tcp", "tcp4", "tcp6", "unix":
+	default:
+		return fmt.Errorf("semantic.providers.connect: unsupported network %q (want tcp or unix)", c.Network)
+	}
+	return nil
 }
 
 type Config struct {
@@ -1132,6 +1172,35 @@ func (c *Config) validateWorkspaceSchema() error {
 			errs = append(errs,
 				"config: cross_workspace_deps[\""+dep.Workspace+"\"].mode = "+
 					strconv.Quote(dep.Mode)+" is unsupported in iteration 1; only \"read-only\" is allowed")
+		}
+	}
+	// Validate passive-attach blocks on each semantic provider. An
+	// empty `connect: {}` (both fields blank) is rejected here so a
+	// misconfigured YAML produces a clear error at load time rather
+	// than silently spawning the subprocess and surprising the user
+	// when the IDE coexistence story fails.
+	for _, pc := range c.Semantic.Providers {
+		if err := pc.Connect.Validate(); err != nil {
+			errs = append(errs, fmt.Sprintf("config: semantic.providers[%q]: %v", pc.Name, err))
+		}
+	}
+	if len(errs) == 0 {
+		return nil
+	}
+	return fmt.Errorf("%s", strings.Join(errs, "; "))
+}
+
+// ValidateSemanticConnectForTest exposes the connect-block validation
+// loop for tests that build a Config in memory and want to assert the
+// loader would reject it. Production callers go through Load() which
+// runs the full validateWorkspaceSchema pass; this thin export keeps
+// the test surface small without forcing tests to also satisfy the
+// cross_workspace_deps preconditions.
+func (c *Config) ValidateSemanticConnectForTest() error {
+	var errs []string
+	for _, pc := range c.Semantic.Providers {
+		if err := pc.Connect.Validate(); err != nil {
+			errs = append(errs, fmt.Sprintf("config: semantic.providers[%q]: %v", pc.Name, err))
 		}
 	}
 	if len(errs) == 0 {

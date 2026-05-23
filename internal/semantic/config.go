@@ -26,6 +26,21 @@ type ProviderConfig struct {
 	// Env adds KEY=VALUE environment entries to the provider's LSP
 	// subprocess (e.g. JAVA_HOME for jdtls).
 	Env []string `mapstructure:"env" yaml:"env,omitempty"`
+	// Connect, when non-nil, switches this provider from spawning a
+	// subprocess to dialing an already-running LSP endpoint (e.g.
+	// the user's IDE-managed gopls). Carrier is tcp or unix.
+	Connect *ConnectConfig `mapstructure:"connect" yaml:"connect,omitempty"`
+}
+
+// ConnectConfig is the per-provider passive-attach block used by the
+// semantic-layer Config struct. The cmd/gortex/* boot code copies it
+// onto the matching lsp.ConnectSpec at router-registration time. Kept
+// here rather than in lsp/* to avoid a circular import (lsp depends
+// on semantic for EnrichResult).
+type ConnectConfig struct {
+	Network       string `mapstructure:"network" yaml:"network"`
+	Address       string `mapstructure:"address" yaml:"address"`
+	FallbackSpawn bool   `mapstructure:"fallback_spawn" yaml:"fallback_spawn,omitempty"`
 }
 
 // DefaultConfig returns a default semantic config with auto-detection enabled.

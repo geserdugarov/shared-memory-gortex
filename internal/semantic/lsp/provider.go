@@ -80,7 +80,27 @@ type Provider struct {
 	// every ensureClient — a fresh subprocess starts with an empty
 	// dynamic table and re-registers what it needs.
 	dynamicCaps map[string]Registration
+
+	// connect, when non-nil, switches ensureClient into passive-
+	// attach mode: the Provider dials the configured endpoint
+	// instead of spawning a subprocess. Reconnect on EOF retries
+	// the dial with exponential backoff; fallback to spawn happens
+	// only when connect.FallbackSpawn is true.
+	connect *ConnectSpec
+	// dialBackoff is the current backoff window between failed dial
+	// attempts. Doubles on each failure (capped at maxDialBackoff)
+	// and resets to dialBackoffStart on the first success.
+	dialBackoff time.Duration
 }
+
+// Dial-retry constants for passive-attach reconnect. The window
+// doubles on each failure and tops out at maxDialBackoff, then a
+// successful dial resets it. Test fixtures can pin these via the
+// helpers in the test file; production code uses the defaults.
+const (
+	dialBackoffStart = 100 * time.Millisecond
+	maxDialBackoff   = 30 * time.Second
+)
 
 // NewProvider creates an LSP provider.
 func NewProvider(command string, args []string, languages []string, daemon bool, maxParallel int, logger *zap.Logger) *Provider {
@@ -135,6 +155,9 @@ func NewProviderFromSpec(spec *ServerSpec, logger *zap.Logger) *Provider {
 		openDocs:    map[string]bool{},
 		lastDiag:    map[string][]Diagnostic{},
 		diagWaiters: map[string][]chan []Diagnostic{},
+		dynamicCaps: map[string]Registration{},
+		connect:     spec.Connect,
+		dialBackoff: dialBackoffStart,
 	}
 	return p
 }
@@ -389,21 +412,124 @@ func (p *Provider) EnrichFile(g *graph.Graph, repoRoot, filePath string) (*seman
 	return nil, nil
 }
 
-// ensureClient starts the LSP server if not already running.
-func (p *Provider) ensureClient(workspaceRoot string) error {
+// resetForReconnect clears the per-connection state that a dead client
+// invalidated: open-document tracking, doc versions, and the dynamic
+// capability table. The server (whether a freshly spawned subprocess
+// or a freshly dialed IDE) has no knowledge of the documents we
+// previously opened against the dead session — re-opening on first
+// touch lets the next call (textDocument/hover etc.) succeed.
+//
+// Caps are reset separately at the top of ensureClient so the reset
+// also covers the initial-connect path; here we only clear what the
+// reconnect-specific recovery needs.
+func (p *Provider) resetForReconnect() {
+	// Drop the dead client so the next ensureClient branch builds a
+	// fresh transport. Close it best-effort first to free any
+	// pending pending-map entries; the dead read loop already closed
+	// `done` so Shutdown() is a no-op past that point.
 	if p.client != nil {
-		return nil
+		_ = p.client.Shutdown()
+		p.client = nil
+	}
+	p.docMu.Lock()
+	p.docVersions = map[string]int{}
+	p.openDocs = map[string]bool{}
+	p.lastDiag = map[string][]Diagnostic{}
+	p.docMu.Unlock()
+}
+
+// dialOrSpawn builds the LSP client according to the provider's spec.
+// When p.connect is set, it dials the configured endpoint; on dial
+// failure with FallbackSpawn=true it falls back to spawning the
+// subprocess; with FallbackSpawn=false it returns the dial error so
+// the language stays unavailable rather than racing the IDE.
+//
+// The dial path retries with exponential backoff capped at
+// maxDialBackoff. Each successful dial resets the backoff window.
+func (p *Provider) dialOrSpawn(workspaceRoot string) (*Client, error) {
+	if p.connect != nil {
+		if err := p.connect.Validate(); err != nil {
+			return nil, fmt.Errorf("lsp passive attach: %w", err)
+		}
+		client, dialErr := NewClientWithTransport(&DialTransport{
+			Network: p.connect.Network,
+			Address: p.connect.Address,
+		}, p.logger)
+		if dialErr == nil {
+			// Reset the backoff so a flap doesn't punish the next
+			// reconnect with the last failure's window.
+			p.dialBackoff = dialBackoffStart
+			return client, nil
+		}
+		// Bump the backoff for the next attempt — callers that retry
+		// immediately on failure can pace themselves via
+		// SinceLastDialAttempt(), and the router's reaper / on-demand
+		// callers naturally space attempts apart.
+		nextBackoff := p.dialBackoff * 2
+		if nextBackoff > maxDialBackoff {
+			nextBackoff = maxDialBackoff
+		}
+		if nextBackoff <= 0 {
+			nextBackoff = dialBackoffStart
+		}
+		p.dialBackoff = nextBackoff
+
+		if !p.connect.FallbackSpawn {
+			return nil, fmt.Errorf("lsp passive attach %s %s: %w (no spawn fallback configured)",
+				p.connect.Network, p.connect.Address, dialErr)
+		}
+		// Fallback to spawn — log loudly so operators see the IDE
+		// went away. The next ensureClient will retry dial first
+		// (resetForReconnect clears p.client), so once the IDE
+		// comes back we drift back to the passive path on next
+		// reconnect.
+		if p.logger != nil {
+			p.logger.Warn("lsp: passive dial failed, falling back to spawn",
+				zap.String("network", p.connect.Network),
+				zap.String("address", p.connect.Address),
+				zap.Error(dialErr),
+			)
+		}
+	}
+	if p.command == "" {
+		return nil, fmt.Errorf("lsp: no command configured and no passive attach available")
+	}
+	return NewClient(p.command, p.args, p.env, workspaceRoot, p.logger)
+}
+
+// ensureClient starts the LSP server if not already running, OR
+// reconnects if the previous client's transport went away (e.g. the
+// IDE that owned a passive-attach LSP restarted, closing the socket).
+//
+// For spawn-mode providers this matches the original behaviour: first
+// call spawns, subsequent calls are no-ops while the subprocess lives.
+// For passive (connect) mode, a dead client triggers a re-dial with
+// exponential backoff, falling back to spawn only if the spec's
+// Connect.FallbackSpawn is true.
+func (p *Provider) ensureClient(workspaceRoot string) error {
+	// Liveness probe — if we have a client but its read loop has
+	// terminated, the server (or socket) is gone. Treat as
+	// disconnected: drop the dead handle and reset per-connection
+	// state so the next branch can build a fresh transport.
+	if p.client != nil {
+		select {
+		case <-p.client.Done():
+			p.resetForReconnect()
+		default:
+			return nil
+		}
 	}
 
-	// Reset the dynamic capability table — a fresh subprocess has no
-	// dynamic registrations until it re-announces them. Reset under
-	// the lock so any racing Supports() reader sees a coherent state.
+	// Reset the dynamic capability table — a fresh subprocess (or a
+	// fresh dialed connection) has no dynamic registrations until it
+	// re-announces them. Reset under the lock so any racing
+	// Supports() reader sees a coherent state.
 	p.capsMu.Lock()
 	p.caps = ServerCapabilities{}
 	p.dynamicCaps = map[string]Registration{}
 	p.capsMu.Unlock()
 
-	client, err := NewClient(p.command, p.args, p.env, workspaceRoot, p.logger)
+	client, err := p.dialOrSpawn(workspaceRoot)
 	if err != nil {
 		return err
 	}

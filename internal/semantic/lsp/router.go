@@ -470,7 +470,11 @@ func (r *Router) AvailableSpecs() []*ServerSpec {
 }
 
 // specAvailable returns true when one of spec.Command +
-// spec.AlternativeCommands resolves on PATH.
+// spec.AlternativeCommands resolves on PATH, or — for a passive spec
+// — when the connect block validates (Validate() == nil). A passive
+// spec has no binary to look up; its "availability" is whether the
+// configured endpoint is well-formed (the actual dial happens on
+// first ensureClient).
 func (r *Router) specAvailable(spec *ServerSpec) bool {
 	if spec == nil {
 		return false
@@ -482,13 +486,21 @@ func (r *Router) specAvailable(spec *ServerSpec) bool {
 		return v
 	}
 	avail := false
-	if _, err := exec.LookPath(spec.Command); err == nil {
-		avail = true
-	} else {
-		for _, alt := range spec.AlternativeCommands {
-			if _, err := exec.LookPath(alt.Command); err == nil {
-				avail = true
-				break
+	switch {
+	case spec.Connect != nil:
+		// Passive attach — no binary to find. Treat as available
+		// when the connect block validates; the dial is exercised
+		// lazily on first ensureClient.
+		avail = spec.Connect.Validate() == nil
+	default:
+		if _, err := exec.LookPath(spec.Command); err == nil {
+			avail = true
+		} else {
+			for _, alt := range spec.AlternativeCommands {
+				if _, err := exec.LookPath(alt.Command); err == nil {
+					avail = true
+					break
+				}
 			}
 		}
 	}

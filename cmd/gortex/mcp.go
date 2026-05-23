@@ -201,17 +201,26 @@ func runMCP(cmd *cobra.Command, args []string) error {
 			RefuteUnconfirmed: semCfg.RefuteUnconfirmed,
 		}
 		for _, pc := range semCfg.Providers {
-			semInternalCfg.Providers = append(semInternalCfg.Providers, semantic.ProviderConfig{
+			out := semantic.ProviderConfig{
 				Name:        pc.Name,
 				Command:     pc.Command,
 				Args:        pc.Args,
+				Env:         pc.Env,
 				Languages:   pc.Languages,
 				Priority:    pc.Priority,
 				Enabled:     pc.Enabled,
 				Mode:        pc.Mode,
 				Daemon:      pc.Daemon,
 				MaxParallel: pc.MaxParallel,
-			})
+			}
+			if pc.Connect != nil {
+				out.Connect = &semantic.ConnectConfig{
+					Network:       pc.Connect.Network,
+					Address:       pc.Connect.Address,
+					FallbackSpawn: pc.Connect.FallbackSpawn,
+				}
+			}
+			semInternalCfg.Providers = append(semInternalCfg.Providers, out)
 		}
 
 		semMgr := semantic.NewManager(semInternalCfg, logger)
@@ -256,8 +265,18 @@ func runMCP(cmd *cobra.Command, args []string) error {
 			case lsp.SpecByName(pc.Name) != nil:
 				// Router owns lifecycle — register the spec so it
 				// shows up in EnabledSpecNames; first ForSpec call
-				// triggers the lazy spawn.
-				lspRouter.RegisterSpec(lsp.SpecByName(pc.Name))
+				// triggers the lazy spawn (or dial, when the user
+				// configured passive attach via `connect:`).
+				var connect *lsp.ConnectSpec
+				if pc.Connect != nil {
+					connect = &lsp.ConnectSpec{
+						Network:       pc.Connect.Network,
+						Address:       pc.Connect.Address,
+						FallbackSpawn: pc.Connect.FallbackSpawn,
+					}
+				}
+				lspRouter.RegisterSpec(lsp.SpecWithOverridesConnect(
+					lsp.SpecByName(pc.Name), pc.Command, pc.Args, pc.Env, connect))
 			case pc.Daemon:
 				// Custom user-defined daemon (no registry spec) —
 				// keep the legacy eager-construction path so out-of-

@@ -137,6 +137,43 @@ func TestEncodeBatchSymbols_IncludeSource(t *testing.T) {
 	require.Equal(t, "symbol not found", got[1]["error"])
 }
 
+// TestEncodeSubGraph_DistinctCallSitesNotDeduped pins the regression
+// for the walk_graph / get_callers duplicate-row complaint: two
+// distinct call sites between the same caller and callee must appear
+// as two rows the agent can tell apart by line + file_path, not
+// collapse into identical wire rows.
+func TestEncodeSubGraph_DistinctCallSitesNotDeduped(t *testing.T) {
+	sg := &query.SubGraph{
+		Nodes: []*graph.Node{
+			newTestNode("a.go::Caller", "Caller", graph.KindFunction, "a.go", 10),
+			newTestNode("b.go::Target", "Target", graph.KindFunction, "b.go", 20),
+		},
+		Edges: []*graph.Edge{
+			{From: "a.go::Caller", To: "b.go::Target", Kind: "calls", Confidence: 0.9, Origin: "ast_resolved", FilePath: "a.go", Line: 27},
+			{From: "a.go::Caller", To: "b.go::Target", Kind: "calls", Confidence: 0.9, Origin: "ast_resolved", FilePath: "a.go", Line: 42},
+		},
+		TotalNodes: 2,
+	}
+	payload, err := encodeSubGraph("walk_graph", sg)
+	require.NoError(t, err)
+	dec := wire.NewDecoder(strings.NewReader(string(payload)))
+	_, err = dec.Header()
+	require.NoError(t, err)
+	_, err = dec.All()
+	require.NoError(t, err)
+
+	h2, err := dec.NextSection()
+	require.NoError(t, err)
+	require.Equal(t, "walk_graph.edges", h2.Tool)
+	require.Contains(t, h2.Fields, "line")
+	require.Contains(t, h2.Fields, "file_path")
+	edges, err := dec.All()
+	require.NoError(t, err)
+	require.Len(t, edges, 2)
+	require.Equal(t, "27", edges[0]["line"])
+	require.Equal(t, "42", edges[1]["line"])
+}
+
 func TestEncodeSubGraph_NodesAndEdgesSections(t *testing.T) {
 	sg := &query.SubGraph{
 		Nodes: []*graph.Node{

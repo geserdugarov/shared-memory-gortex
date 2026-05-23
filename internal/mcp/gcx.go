@@ -449,7 +449,12 @@ func encodeSubGraph(tool string, sg *query.SubGraph) ([]byte, error) {
 	edgeMeta := []string{"count", fmt.Sprintf("%d", len(sg.Edges))}
 	edgeMeta = append(edgeMeta, zeroEdgeCaveatMeta(sg.Caveat)...)
 	edgeEnc := newGCX(&buf, tool+".edges",
-		[]string{"from", "to", "kind", "origin", "tier", "confidence", "label"},
+		// line + file_path on the edge let the caller distinguish two
+		// call sites with the same (from, to, kind). Without them
+		// walk_graph / get_callers / get_call_chain etc. surfaced
+		// duplicate-looking rows that an agent couldn't tell apart and
+		// couldn't jump to.
+		[]string{"from", "to", "kind", "origin", "tier", "confidence", "label", "line", "file_path"},
 		edgeMeta...,
 	)
 	for _, e := range sg.Edges {
@@ -461,7 +466,7 @@ func encodeSubGraph(tool string, sg *query.SubGraph) ([]byte, error) {
 		if tier == "" {
 			tier = graph.ResolvedBy(e.Origin)
 		}
-		if err := edgeEnc.WriteRow(e.From, e.To, string(e.Kind), e.Origin, tier, e.Confidence, label); err != nil {
+		if err := edgeEnc.WriteRow(e.From, e.To, string(e.Kind), e.Origin, tier, e.Confidence, label, e.Line, e.FilePath); err != nil {
 			return nil, err
 		}
 	}

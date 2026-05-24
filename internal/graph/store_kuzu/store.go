@@ -268,23 +268,140 @@ ON CREATE SET n.kind = '',
 // contract. Indexing scale will favour a UNWIND-driven batched
 // MERGE once we wire the bench harness up; the per-loop variant
 // keeps the conformance suite passing today.
+// kuzuBatchChunkSize bounds the row count per UNWIND-driven
+// Cypher statement. The Go binding round-trip is ~ms; per-record
+// loops at indexer scale (124k+ nodes, 524k+ edges) take tens of
+// minutes. UNWIND lets one statement carry a list of rows, so a
+// 5000-row chunk amortises one Cypher parse + plan + Execute
+// across N MERGEs.
+const kuzuBatchChunkSize = 5000
+
+// AddBatch fans node and edge inserts into UNWIND-driven Cypher
+// statements — one Execute per ≤kuzuBatchChunkSize rows instead of
+// one per record. The MERGE semantics match upsertNodeLocked /
+// upsertEdgeLocked exactly so the conformance idempotency contract
+// is preserved.
 func (s *Store) AddBatch(nodes []*graph.Node, edges []*graph.Edge) {
 	if len(nodes) == 0 && len(edges) == 0 {
 		return
 	}
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
-	for _, n := range nodes {
-		if n == nil || n.ID == "" {
+	s.addNodesUnwindLocked(nodes)
+	s.addEdgesUnwindLocked(edges)
+}
+
+// addNodesUnwindLocked materialises nodes as a list of structs and
+// runs them through one UNWIND + MERGE per chunk.
+func (s *Store) addNodesUnwindLocked(nodes []*graph.Node) {
+	for i := 0; i < len(nodes); i += kuzuBatchChunkSize {
+		end := i + kuzuBatchChunkSize
+		if end > len(nodes) {
+			end = len(nodes)
+		}
+		chunk := nodes[i:end]
+		rows := make([]map[string]any, 0, len(chunk))
+		for _, n := range chunk {
+			if n == nil || n.ID == "" {
+				continue
+			}
+			metaStr, err := encodeMeta(n.Meta)
+			if err != nil {
+				panicOnFatal(fmt.Errorf("encode meta: %w", err))
+				return
+			}
+			rows = append(rows, map[string]any{
+				"id":           n.ID,
+				"kind":         string(n.Kind),
+				"name":         n.Name,
+				"qual_name":    n.QualName,
+				"file_path":    n.FilePath,
+				"start_line":   int64(n.StartLine),
+				"end_line":     int64(n.EndLine),
+				"language":     n.Language,
+				"repo_prefix":  n.RepoPrefix,
+				"workspace_id": n.WorkspaceID,
+				"project_id":   n.ProjectID,
+				"meta":         metaStr,
+			})
+		}
+		if len(rows) == 0 {
 			continue
 		}
-		s.upsertNodeLocked(n)
+		const q = `
+UNWIND $rows AS row
+MERGE (n:Node {id: row.id})
+SET n.kind = row.kind,
+    n.name = row.name,
+    n.qual_name = row.qual_name,
+    n.file_path = row.file_path,
+    n.start_line = row.start_line,
+    n.end_line = row.end_line,
+    n.language = row.language,
+    n.repo_prefix = row.repo_prefix,
+    n.workspace_id = row.workspace_id,
+    n.project_id = row.project_id,
+    n.meta = row.meta`
+		s.runWriteLocked(q, map[string]any{"rows": rows})
 	}
-	for _, e := range edges {
-		if e == nil {
+}
+
+// addEdgesUnwindLocked materialises edges as a list of structs and
+// inserts them with endpoint stubs in one UNWIND per chunk.
+// upsertEdgeLocked's per-edge stub-then-MERGE pattern is preserved:
+// each UNWIND row MERGE-stubs both endpoint nodes (no-ops if they
+// already exist), then MERGEs the edge with the full identity tuple,
+// then SETs every edge column.
+func (s *Store) addEdgesUnwindLocked(edges []*graph.Edge) {
+	for i := 0; i < len(edges); i += kuzuBatchChunkSize {
+		end := i + kuzuBatchChunkSize
+		if end > len(edges) {
+			end = len(edges)
+		}
+		chunk := edges[i:end]
+		rows := make([]map[string]any, 0, len(chunk))
+		for _, e := range chunk {
+			if e == nil {
+				continue
+			}
+			metaStr, err := encodeMeta(e.Meta)
+			if err != nil {
+				panicOnFatal(fmt.Errorf("encode edge meta: %w", err))
+				return
+			}
+			var crossRepo int64
+			if e.CrossRepo {
+				crossRepo = 1
+			}
+			rows = append(rows, map[string]any{
+				"from":             e.From,
+				"to":               e.To,
+				"kind":             string(e.Kind),
+				"file_path":        e.FilePath,
+				"line":             int64(e.Line),
+				"confidence":       e.Confidence,
+				"confidence_label": e.ConfidenceLabel,
+				"origin":           e.Origin,
+				"tier":             e.Tier,
+				"cross_repo":       crossRepo,
+				"meta":             metaStr,
+			})
+		}
+		if len(rows) == 0 {
 			continue
 		}
-		s.upsertEdgeLocked(e)
+		const q = `
+UNWIND $rows AS row
+MERGE (a:Node {id: row.from})
+MERGE (b:Node {id: row.to})
+MERGE (a)-[e:Edge {kind: row.kind, file_path: row.file_path, line: row.line}]->(b)
+SET e.confidence = row.confidence,
+    e.confidence_label = row.confidence_label,
+    e.origin = row.origin,
+    e.tier = row.tier,
+    e.cross_repo = row.cross_repo,
+    e.meta = row.meta`
+		s.runWriteLocked(q, map[string]any{"rows": rows})
 	}
 }
 
@@ -348,24 +465,103 @@ SET e.origin = $origin, e.tier = $tier`
 	return true
 }
 
-// SetEdgeProvenanceBatch loops the per-edge implementation under one
-// write lock. Returns the number of edges whose Origin changed.
+// SetEdgeProvenanceBatch UNWIND-batches origin promotions. Each
+// chunk does one Cypher MATCH-WHERE-SET with a list of (key, new
+// origin) rows; the WHERE clause filters down to edges whose
+// stored origin actually differs, and the RETURN count gives us
+// the changed-row total to bump the revision counter.
 func (s *Store) SetEdgeProvenanceBatch(batch []graph.EdgeProvenanceUpdate) int {
 	if len(batch) == 0 {
 		return 0
 	}
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
-	changed := 0
-	for _, u := range batch {
-		if u.Edge == nil {
+	totalChanged := 0
+	for i := 0; i < len(batch); i += kuzuBatchChunkSize {
+		end := i + kuzuBatchChunkSize
+		if end > len(batch) {
+			end = len(batch)
+		}
+		chunk := batch[i:end]
+		rows := make([]map[string]any, 0, len(chunk))
+		// Maintain a side-index from row position → caller's *Edge so
+		// we can mirror the in-memory contract (the caller's pointer's
+		// Origin/Tier field is updated when the row actually changed).
+		callerEdges := make([]*graph.Edge, 0, len(chunk))
+		for _, u := range chunk {
+			if u.Edge == nil {
+				continue
+			}
+			newTier := u.Edge.Tier
+			if newTier != "" {
+				newTier = graph.ResolvedBy(u.NewOrigin)
+			}
+			rows = append(rows, map[string]any{
+				"from":      u.Edge.From,
+				"to":        u.Edge.To,
+				"kind":      string(u.Edge.Kind),
+				"file_path": u.Edge.FilePath,
+				"line":      int64(u.Edge.Line),
+				"origin":    u.NewOrigin,
+				"tier":      newTier,
+			})
+			callerEdges = append(callerEdges, u.Edge)
+		}
+		if len(rows) == 0 {
 			continue
 		}
-		if s.setEdgeProvenanceLocked(u.Edge, u.NewOrigin) {
-			changed++
+		const q = `
+UNWIND $rows AS row
+MATCH (a:Node {id: row.from})-[e:Edge {kind: row.kind, file_path: row.file_path, line: row.line}]->(b:Node {id: row.to})
+WHERE e.origin <> row.origin
+SET e.origin = row.origin, e.tier = row.tier
+RETURN row.from, row.to, row.kind, row.file_path, row.line, row.origin, row.tier`
+		res := s.querySelectLocked(q, map[string]any{"rows": rows})
+		// The SELECT-style result lists every edge the SET actually
+		// touched (the WHERE filter dropped rows whose origin already
+		// matched). Mirror the per-call SetEdgeProvenance contract by
+		// updating the caller's Edge pointer in-place for those rows.
+		changed := len(res)
+		// Build a (from|to|kind|file|line) → *Edge map so we can map
+		// returned rows back to caller-supplied pointers without
+		// quadratic scanning.
+		idx := make(map[string]*graph.Edge, len(callerEdges))
+		for _, e := range callerEdges {
+			idx[provKey(e)] = e
+		}
+		for _, row := range res {
+			from, _ := row[0].(string)
+			to, _ := row[1].(string)
+			kind, _ := row[2].(string)
+			file, _ := row[3].(string)
+			line, _ := row[4].(int64)
+			origin, _ := row[5].(string)
+			tier, _ := row[6].(string)
+			key := from + "\x00" + to + "\x00" + kind + "\x00" + file + "\x00" + strconvI64(line)
+			if e := idx[key]; e != nil {
+				e.Origin = origin
+				if e.Tier != "" {
+					e.Tier = tier
+				}
+			}
+		}
+		totalChanged += changed
+		if changed > 0 {
+			s.edgeIdentityRevs.Add(int64(changed))
 		}
 	}
-	return changed
+	return totalChanged
+}
+
+// provKey builds the (from, to, kind, file, line) identity string
+// used to map Cypher RETURN rows back to caller Edge pointers
+// inside SetEdgeProvenanceBatch.
+func provKey(e *graph.Edge) string {
+	return e.From + "\x00" + e.To + "\x00" + string(e.Kind) + "\x00" + e.FilePath + "\x00" + strconvI64(int64(e.Line))
+}
+
+func strconvI64(v int64) string {
+	return fmt.Sprintf("%d", v)
 }
 
 // ReindexEdge updates the stored row after e.To has been mutated
@@ -394,23 +590,59 @@ DELETE e`
 	s.upsertEdgeLocked(e)
 }
 
-// ReindexEdges loops ReindexEdge under one write lock. The KuzuDB
-// engine does not expose an explicit transaction API through the Go
-// binding so we cannot collapse this further without changing the
-// public Open signature; per-call cost is still amortised against
-// the single writeMu acquisition.
+// ReindexEdges UNWIND-batches the delete-old + insert-new pattern:
+// one MATCH-DELETE for the old-To rows, then the standard
+// UNWIND-based edge insert for the new-To rows. Both use chunked
+// statements so a 10k-row resolver pass fires ~4 Cypher Execs
+// instead of ~10k.
 func (s *Store) ReindexEdges(batch []graph.EdgeReindex) {
 	if len(batch) == 0 {
 		return
 	}
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
+	// Collect the effective (non-noop) rows; ReindexEdge is a no-op
+	// when OldTo == e.To, so skip those rather than fire deletes
+	// that would clobber the freshly-rebuilt edge.
+	eligible := make([]graph.EdgeReindex, 0, len(batch))
 	for _, r := range batch {
 		if r.Edge == nil || r.OldTo == r.Edge.To {
 			continue
 		}
-		s.reindexEdgeLocked(r.Edge, r.OldTo)
+		eligible = append(eligible, r)
 	}
+	if len(eligible) == 0 {
+		return
+	}
+	// Phase 1 — UNWIND-delete the old edges in chunks.
+	for i := 0; i < len(eligible); i += kuzuBatchChunkSize {
+		end := i + kuzuBatchChunkSize
+		if end > len(eligible) {
+			end = len(eligible)
+		}
+		chunk := eligible[i:end]
+		rows := make([]map[string]any, 0, len(chunk))
+		for _, r := range chunk {
+			rows = append(rows, map[string]any{
+				"from":      r.Edge.From,
+				"oldTo":     r.OldTo,
+				"kind":      string(r.Edge.Kind),
+				"file_path": r.Edge.FilePath,
+				"line":      int64(r.Edge.Line),
+			})
+		}
+		const del = `
+UNWIND $rows AS row
+MATCH (a:Node {id: row.from})-[e:Edge {kind: row.kind, file_path: row.file_path, line: row.line}]->(b:Node {id: row.oldTo})
+DELETE e`
+		s.runWriteLocked(del, map[string]any{"rows": rows})
+	}
+	// Phase 2 — UNWIND-insert the new edges via the standard path.
+	edges := make([]*graph.Edge, 0, len(eligible))
+	for _, r := range eligible {
+		edges = append(edges, r.Edge)
+	}
+	s.addEdgesUnwindLocked(edges)
 }
 
 // RemoveEdge deletes every edge between (from, to) with the given

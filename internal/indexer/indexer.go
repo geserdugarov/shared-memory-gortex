@@ -1520,54 +1520,6 @@ func (idx *Indexer) IndexCtx(ctx context.Context, root string) (result *IndexRes
 	}
 	idx.rootPath = absRoot
 
-	// In-memory shadow for cold-start indexing on disk-backed stores.
-	// The disk backends (kuzu / duckdb / cayley) pay ms-level per-call
-	// cost on every read; running the resolver against the disk store
-	// turns its ~100k+ point lookups into many minutes of wall time.
-	// Instead, swap idx.graph to an in-memory *Graph for the whole
-	// IndexCtx pipeline — parse, resolve, all subpasses, every
-	// per-edge MERGE/MATCH stays in memory and pays nanoseconds. At
-	// the end, dump the final state to the disk backend via one
-	// BulkLoad cycle, so the disk has the post-resolve graph and the
-	// bench's query workload runs against the persisted state.
-	//
-	// Guards:
-	//   - Backend must implement graph.BulkLoader (kuzu / duckdb /
-	//     cayley today; bbolt and sqlite skip because their per-call
-	//     overhead is already amortised and the in-memory copy would
-	//     cost more RAM than it saves).
-	//   - Store must be empty (NodeCount == 0 && EdgeCount == 0). The
-	//     final dump is BulkLoad's INSERT-only fast path — running it
-	//     against a non-empty store would corrupt or duplicate.
-	//     Incremental / re-index flows fall through to the per-call
-	//     AddBatch path against the disk store directly.
-	//   - The swap happens before the parse worker pool starts and is
-	//     committed before IndexCtx returns. retErr from the named
-	//     return suppresses the commit when the pipeline errored —
-	//     the disk store stays empty rather than capturing partial
-	//     state.
-	var diskTarget graph.Store
-	var inMemShadow *graph.Graph
-	if bl, ok := idx.graph.(graph.BulkLoader); ok && idx.graph.NodeCount() == 0 && idx.graph.EdgeCount() == 0 {
-		diskTarget = idx.graph
-		inMemShadow = graph.New()
-		idx.graph = inMemShadow
-		defer func() {
-			if retErr != nil {
-				idx.graph = diskTarget
-				return
-			}
-			reporter.Report("persisting bulk graph", 0, 0)
-			bl.BeginBulkLoad()
-			diskTarget.AddBatch(inMemShadow.AllNodes(), inMemShadow.AllEdges())
-			if ferr := bl.FlushBulk(); ferr != nil {
-				retErr = fmt.Errorf("indexer: persist bulk graph: %w", ferr)
-			}
-			reporter.Report("persisting bulk graph", 1, 1)
-			idx.graph = diskTarget
-		}()
-	}
-
 	reporter.Report("walking files", 0, 0)
 
 	// Collect files. Files over IndexConfig.MaxFileSize are skipped
@@ -1635,6 +1587,65 @@ func (idx *Indexer) IndexCtx(ctx context.Context, root string) (result *IndexRes
 			zap.Int64("limit_bytes", maxSize))
 	}
 	reporter.Report("walking files", len(files), len(files))
+
+	// In-memory shadow for cold-start indexing on disk-backed stores.
+	// Disk backends pay ms-level per-call cost on every read; running
+	// the resolver against the disk store turns its ~100k+ point
+	// lookups into many minutes of wall time. Instead, swap idx.graph
+	// to an in-memory *Graph for the whole IndexCtx pipeline — parse,
+	// resolve, all subpasses, every per-edge MERGE/MATCH stays in
+	// memory at nanosecond latency. At the end, dump the final state
+	// to the disk backend via one BulkLoad cycle, so the disk has the
+	// post-resolve graph and the bench's query workload runs against
+	// the persisted state.
+	//
+	// Guards:
+	//   - Backend must implement graph.BulkLoader (kuzu / duckdb /
+	//     cayley / bbolt / sqlite all opt in).
+	//   - Store must be empty (NodeCount == 0 && EdgeCount == 0). The
+	//     final dump is BulkLoad's INSERT-only fast path — running it
+	//     against a non-empty store would corrupt or duplicate.
+	//     Incremental / re-index flows fall through to the per-call
+	//     AddBatch path against the disk store directly.
+	//   - File count is below the shadow-max threshold (see
+	//     shadowMaxFileCount). Above the threshold the shadow's RAM
+	//     footprint would exceed available memory — Linux / Firefox
+	//     at full scale (~10M+ edges) would push the shadow past
+	//     20GB. Override with GORTEX_SHADOW_MAX_FILES.
+	//   - The swap happens before the parse worker pool starts and is
+	//     committed before IndexCtx returns. retErr from the named
+	//     return suppresses the commit when the pipeline errored —
+	//     the disk store stays empty rather than capturing partial
+	//     state.
+	var diskTarget graph.Store
+	var inMemShadow *graph.Graph
+	if bl, ok := idx.graph.(graph.BulkLoader); ok &&
+		idx.graph.NodeCount() == 0 && idx.graph.EdgeCount() == 0 &&
+		len(files) <= shadowMaxFileCount() {
+		diskTarget = idx.graph
+		inMemShadow = graph.New()
+		idx.graph = inMemShadow
+		defer func() {
+			if retErr != nil {
+				idx.graph = diskTarget
+				return
+			}
+			reporter.Report("persisting bulk graph", 0, 0)
+			bl.BeginBulkLoad()
+			diskTarget.AddBatch(inMemShadow.AllNodes(), inMemShadow.AllEdges())
+			if ferr := bl.FlushBulk(); ferr != nil {
+				retErr = fmt.Errorf("indexer: persist bulk graph: %w", ferr)
+			}
+			reporter.Report("persisting bulk graph", 1, 1)
+			idx.graph = diskTarget
+		}()
+	} else if diskTarget == nil && idx.graph.NodeCount() == 0 && idx.graph.EdgeCount() == 0 {
+		if _, isBulk := idx.graph.(graph.BulkLoader); isBulk && len(files) > shadowMaxFileCount() {
+			idx.logger.Info("indexer: skipping in-memory shadow above threshold",
+				zap.Int("files", len(files)),
+				zap.Int("threshold", shadowMaxFileCount()))
+		}
+	}
 
 	// Worker pool.
 	workers := idx.config.Workers

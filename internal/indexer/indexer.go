@@ -1686,7 +1686,6 @@ func (idx *Indexer) IndexCtx(ctx context.Context, root string) (result *IndexRes
 	contractReg := contracts.NewRegistry()
 	var contractMu sync.Mutex
 
-	fileCh := make(chan walkedFile, workers*4)
 	var errMu sync.Mutex
 	var errors []IndexError
 	var processed int64
@@ -1694,156 +1693,201 @@ func (idx *Indexer) IndexCtx(ctx context.Context, root string) (result *IndexRes
 	var skippedByTimeout int64
 	var skippedByMinified int64
 
-	var wg sync.WaitGroup
-	for range workers {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			var localContracts []contracts.Contract
-			for wf := range fileCh {
-				path := wf.path
-				p := atomic.AddInt64(&processed, 1)
-				if p == 1 || p%parseReportEvery == 0 {
-					reporter.Report("parsing", int(p), totalFiles)
-				}
-
-				src, err := os.ReadFile(path)
-				if err != nil {
-					errMu.Lock()
-					errors = append(errors, IndexError{FilePath: path, Error: err.Error()})
-					errMu.Unlock()
-					continue
-				}
-
-				relPath, _ := filepath.Rel(absRoot, path)
-				// Reuse the walk-time language. The walk's
-				// effectiveLanguage call already consulted shebang
-				// bytes via readSniffPrefix (512-byte probe), so a
-				// re-detect against the full src would change the
-				// answer only on the vanishingly rare case where a
-				// language marker lives past byte 512 — and any such
-				// case is content-sniffing-by-luck rather than spec'd
-				// behaviour. The fallback below covers the truly
-				// pathological case where the walk-time language has
-				// no extractor registered (effectively dead code).
-				lang := wf.lang
-				ext, _ := idx.registry.GetByLanguage(lang)
-				if ext == nil {
-					if relang, ok := idx.effectiveLanguage(path, src); ok {
-						lang = relang
-						ext, _ = idx.registry.GetByLanguage(lang)
+	// parseChunk runs the per-file worker pool over the supplied
+	// slice. Closure over outer state (errors, counters, contract
+	// registry, parsePool, quarantine) so it can be called multiple
+	// times — once for the non-streaming path, repeatedly for the
+	// streaming-flush large-repo path where each call processes a
+	// bounded slice into a per-chunk in-memory shadow.
+	parseChunk := func(chunkFiles []walkedFile) {
+		fileCh := make(chan walkedFile, workers*4)
+		var wg sync.WaitGroup
+		for range workers {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				var localContracts []contracts.Contract
+				for wf := range fileCh {
+					path := wf.path
+					p := atomic.AddInt64(&processed, 1)
+					if p == 1 || p%parseReportEvery == 0 {
+						reporter.Report("parsing", int(p), totalFiles)
 					}
-				}
-				if ext == nil {
-					continue
-				}
 
-				// Pre-ingestion transforms: rewrite the bytes before
-				// extraction (BOM strip, minified-bundle expansion, a
-				// PDF→markdown command, …).
-				src = idx.transforms.run(relPath, src)
-
-				result, skipped, err := idx.extractFile(parsePool, quarantine, path, relPath, lang, ext, src)
-				if err != nil {
-					errMu.Lock()
-					errors = append(errors, IndexError{FilePath: path, Error: err.Error()})
-					errMu.Unlock()
-				}
-				if result == nil {
-					continue
-				}
-				if skipped && len(result.Nodes) > 0 {
-					if _, ok := result.Nodes[0].Meta["skipped_due_to_timeout"]; ok {
-						atomic.AddInt64(&skippedByTimeout, 1)
+					src, err := os.ReadFile(path)
+					if err != nil {
+						errMu.Lock()
+						errors = append(errors, IndexError{FilePath: path, Error: err.Error()})
+						errMu.Unlock()
+						continue
 					}
-					if _, ok := result.Nodes[0].Meta["skipped_due_to_minified"]; ok {
-						atomic.AddInt64(&skippedByMinified, 1)
-					}
-				}
 
-				// Append coverage artifacts (todos / licenses /
-				// ownership) before applyRepoPrefix so they get the
-				// same multi-repo namespacing treatment as
-				// language-extractor output. Skipped for quarantined /
-				// timed-out files — the coverage scanners would re-read
-				// a source the parser could not survive.
-				if !skipped {
-					idx.applyCoverageDomains(relPath, lang, src, result)
-				}
-
-				idx.applyRepoPrefix(result.Nodes, result.Edges)
-
-				// Find the file node (if the extractor produced one)
-				// and collect its outgoing edges — contract extractors
-				// take the file-scope edge set (imports, etc.), not
-				// every intra-file edge.
-				var fileNodeID, fileGraphPath string
-				for _, n := range result.Nodes {
-					if n.Kind == graph.KindFile {
-						fileNodeID = n.ID
-						fileGraphPath = n.FilePath
-						break
-					}
-				}
-				var fileScopeEdges []*graph.Edge
-				if fileNodeID != "" {
-					for _, e := range result.Edges {
-						if e.From == fileNodeID {
-							fileScopeEdges = append(fileScopeEdges, e)
+					relPath, _ := filepath.Rel(absRoot, path)
+					// Reuse the walk-time language. The walk's
+					// effectiveLanguage call already consulted shebang
+					// bytes via readSniffPrefix (512-byte probe), so a
+					// re-detect against the full src would change the
+					// answer only on the vanishingly rare case where a
+					// language marker lives past byte 512 — and any such
+					// case is content-sniffing-by-luck rather than spec'd
+					// behaviour. The fallback below covers the truly
+					// pathological case where the walk-time language has
+					// no extractor registered (effectively dead code).
+					lang := wf.lang
+					ext, _ := idx.registry.GetByLanguage(lang)
+					if ext == nil {
+						if relang, ok := idx.effectiveLanguage(path, src); ok {
+							lang = relang
+							ext, _ = idx.registry.GetByLanguage(lang)
 						}
 					}
-				}
+					if ext == nil {
+						continue
+					}
 
-				// Batch the per-file insert into one shard-grouped pass
-				// so each shard's lock is acquired at most once per
-				// file instead of N + 2·E times. Profiling showed 69
-				// of 102 workers blocked on lockTwoWrite under the
-				// per-edge path during cold-start warmup.
-				idx.graph.AddBatch(result.Nodes, result.Edges)
+					// Pre-ingestion transforms: rewrite the bytes before
+					// extraction (BOM strip, minified-bundle expansion, a
+					// PDF→markdown command, …).
+					src = idx.transforms.run(relPath, src)
 
-				if !skipped && fileGraphPath != "" {
-					exts := contractExtractorsByLang[lang]
-					if len(exts) > 0 {
-						c := idx.runContractExtractorsForFile(
-							fileGraphPath, src, result.Nodes, fileScopeEdges, exts, result.Tree)
-						localContracts = append(localContracts, c...)
+					result, skipped, err := idx.extractFile(parsePool, quarantine, path, relPath, lang, ext, src)
+					if err != nil {
+						errMu.Lock()
+						errors = append(errors, IndexError{FilePath: path, Error: err.Error()})
+						errMu.Unlock()
+					}
+					if result == nil {
+						continue
+					}
+					if skipped && len(result.Nodes) > 0 {
+						if _, ok := result.Nodes[0].Meta["skipped_due_to_timeout"]; ok {
+							atomic.AddInt64(&skippedByTimeout, 1)
+						}
+						if _, ok := result.Nodes[0].Meta["skipped_due_to_minified"]; ok {
+							atomic.AddInt64(&skippedByMinified, 1)
+						}
+					}
 
-						// Populate the per-file contract cache so a
-						// later IncrementalReindex can skip this file
-						// on a cache hit. Mtime comes from the walk-
-						// time d.Info() — no extra stat here.
-						if wf.mtimeNano > 0 {
-							idx.contractCacheMu.Lock()
-							idx.contractCache[fileGraphPath] = &contractCacheEntry{
-								mtimeNano: wf.mtimeNano,
-								contracts: c,
+					// Append coverage artifacts (todos / licenses /
+					// ownership) before applyRepoPrefix so they get the
+					// same multi-repo namespacing treatment as
+					// language-extractor output. Skipped for quarantined /
+					// timed-out files — the coverage scanners would re-read
+					// a source the parser could not survive.
+					if !skipped {
+						idx.applyCoverageDomains(relPath, lang, src, result)
+					}
+
+					idx.applyRepoPrefix(result.Nodes, result.Edges)
+
+					// Find the file node (if the extractor produced one)
+					// and collect its outgoing edges — contract extractors
+					// take the file-scope edge set (imports, etc.), not
+					// every intra-file edge.
+					var fileNodeID, fileGraphPath string
+					for _, n := range result.Nodes {
+						if n.Kind == graph.KindFile {
+							fileNodeID = n.ID
+							fileGraphPath = n.FilePath
+							break
+						}
+					}
+					var fileScopeEdges []*graph.Edge
+					if fileNodeID != "" {
+						for _, e := range result.Edges {
+							if e.From == fileNodeID {
+								fileScopeEdges = append(fileScopeEdges, e)
 							}
-							idx.contractCacheMu.Unlock()
 						}
 					}
+
+					// Batch the per-file insert into one shard-grouped pass
+					// so each shard's lock is acquired at most once per
+					// file instead of N + 2·E times. Profiling showed 69
+					// of 102 workers blocked on lockTwoWrite under the
+					// per-edge path during cold-start warmup.
+					idx.graph.AddBatch(result.Nodes, result.Edges)
+
+					if !skipped && fileGraphPath != "" {
+						exts := contractExtractorsByLang[lang]
+						if len(exts) > 0 {
+							c := idx.runContractExtractorsForFile(
+								fileGraphPath, src, result.Nodes, fileScopeEdges, exts, result.Tree)
+							localContracts = append(localContracts, c...)
+
+							// Populate the per-file contract cache so a
+							// later IncrementalReindex can skip this file
+							// on a cache hit. Mtime comes from the walk-
+							// time d.Info() — no extra stat here.
+							if wf.mtimeNano > 0 {
+								idx.contractCacheMu.Lock()
+								idx.contractCache[fileGraphPath] = &contractCacheEntry{
+									mtimeNano: wf.mtimeNano,
+									contracts: c,
+								}
+								idx.contractCacheMu.Unlock()
+							}
+						}
+					}
+					// Release the parse tree now that the per-file
+					// contract pass is done. Post-passes that need a
+					// tree for this file (cross-file handler resolution)
+					// re-parse on demand. Nil-safe.
+					result.Tree.Release()
+					atomic.AddInt64(&fileCount, 1)
 				}
-				// Release the parse tree now that the per-file
-				// contract pass is done. Post-passes that need a
-				// tree for this file (cross-file handler resolution)
-				// re-parse on demand. Nil-safe.
-				result.Tree.Release()
-				atomic.AddInt64(&fileCount, 1)
-			}
-			if len(localContracts) > 0 {
-				contractMu.Lock()
-				for _, c := range localContracts {
-					contractReg.Add(c)
+				if len(localContracts) > 0 {
+					contractMu.Lock()
+					for _, c := range localContracts {
+						contractReg.Add(c)
+					}
+					contractMu.Unlock()
 				}
-				contractMu.Unlock()
-			}
-		}()
+			}()
+		}
+
+		for _, f := range chunkFiles {
+			fileCh <- f
+		}
+		close(fileCh)
+		wg.Wait()
 	}
 
-	for _, f := range files {
-		fileCh <- f
+	// Streaming-flush path: above shadowMaxFileCount with a
+	// BulkLoader-capable backend, we can't fit the whole shadow in
+	// RAM but we can still amortise the per-file disk-write cost by
+	// chunking. Each chunk runs against its own throwaway shadow,
+	// then flushes via BulkLoad to disk. Resolve runs against the
+	// disk store afterwards (per-call, slower than the shadow path
+	// but bounded RAM). Activated by GORTEX_STREAMING_FLUSH=1; off
+	// by default since it requires the disk-only resolver path
+	// (~tens of minutes on huge repos) that we haven't yet
+	// optimised end-to-end.
+	if diskTarget == nil && streamingFlushActive(idx.graph, len(files)) {
+		bl, _ := idx.graph.(graph.BulkLoader)
+		streamingDisk := idx.graph
+		chunkSize := streamingChunkSize()
+		idx.logger.Info("indexer: streaming-flush parse",
+			zap.Int("files", len(files)),
+			zap.Int("chunk_size", chunkSize))
+		for chunkStart := 0; chunkStart < len(files); chunkStart += chunkSize {
+			chunkEnd := min(chunkStart+chunkSize, len(files))
+			chunkShadow := graph.New()
+			idx.graph = chunkShadow
+			parseChunk(files[chunkStart:chunkEnd])
+			// Flush chunk to disk.
+			bl.BeginBulkLoad()
+			streamingDisk.AddBatch(chunkShadow.AllNodes(), chunkShadow.AllEdges())
+			if err := bl.FlushBulk(); err != nil {
+				return nil, fmt.Errorf("indexer: streaming-flush chunk %d..%d: %w", chunkStart, chunkEnd, err)
+			}
+		}
+		// After all chunks, idx.graph points at the disk store so
+		// the resolver and subpasses read/mutate the merged state.
+		idx.graph = streamingDisk
+	} else {
+		parseChunk(files)
 	}
-	close(fileCh)
-	wg.Wait()
 
 	if processed > 0 {
 		reporter.Report("parsing", int(processed), totalFiles)

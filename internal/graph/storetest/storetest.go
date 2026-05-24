@@ -66,6 +66,8 @@ func RunConformance(t *testing.T, factory Factory) {
 	t.Run("EdgesByKind", func(t *testing.T) { testEdgesByKind(t, factory) })
 	t.Run("NodesByKind", func(t *testing.T) { testNodesByKind(t, factory) })
 	t.Run("EdgesWithUnresolvedTarget", func(t *testing.T) { testEdgesWithUnresolvedTarget(t, factory) })
+	t.Run("GetNodesByIDs", func(t *testing.T) { testGetNodesByIDs(t, factory) })
+	t.Run("FindNodesByNames", func(t *testing.T) { testFindNodesByNames(t, factory) })
 }
 
 // -- fixture helpers ---------------------------------------------------
@@ -830,5 +832,75 @@ func testEmptyStore(t *testing.T, factory Factory) {
 	}
 	if len(s.RepoPrefixes()) != 0 {
 		t.Fatalf("empty RepoPrefixes nonzero")
+	}
+}
+
+func testGetNodesByIDs(t *testing.T, factory Factory) {
+	t.Helper()
+	s := factory(t)
+	s.AddNode(mkNode("a.go::Foo", "Foo", "a.go", graph.KindFunction))
+	s.AddNode(mkNode("a.go::Bar", "Bar", "a.go", graph.KindFunction))
+	s.AddNode(mkNode("b.go::Baz", "Baz", "b.go", graph.KindType))
+
+	got := s.GetNodesByIDs([]string{"a.go::Foo", "b.go::Baz", "missing", "a.go::Bar", "a.go::Foo"})
+	if len(got) != 3 {
+		t.Fatalf("GetNodesByIDs len = %d, want 3 (3 present, 1 missing, 1 duplicate)", len(got))
+	}
+	if got["a.go::Foo"] == nil || got["a.go::Foo"].Name != "Foo" {
+		t.Fatalf("missing or wrong Foo: %v", got["a.go::Foo"])
+	}
+	if got["b.go::Baz"] == nil || got["b.go::Baz"].Kind != graph.KindType {
+		t.Fatalf("missing or wrong Baz: %v", got["b.go::Baz"])
+	}
+	if _, present := got["missing"]; present {
+		t.Fatalf("missing ID should not be in map, got %v", got["missing"])
+	}
+
+	// Empty / nil input is a no-op.
+	if got := s.GetNodesByIDs(nil); len(got) != 0 {
+		t.Fatalf("nil input returned %d entries", len(got))
+	}
+	if got := s.GetNodesByIDs([]string{}); len(got) != 0 {
+		t.Fatalf("empty input returned %d entries", len(got))
+	}
+	if got := s.GetNodesByIDs([]string{""}); len(got) != 0 {
+		t.Fatalf("empty-string ID returned %d entries", len(got))
+	}
+}
+
+func testFindNodesByNames(t *testing.T, factory Factory) {
+	t.Helper()
+	s := factory(t)
+	s.AddNode(mkNode("a.go::Foo", "Foo", "a.go", graph.KindFunction))
+	s.AddNode(mkNode("b.go::Foo", "Foo", "b.go", graph.KindFunction))
+	s.AddNode(mkNode("c.go::Bar", "Bar", "c.go", graph.KindFunction))
+
+	got := s.FindNodesByNames([]string{"Foo", "Missing", "Bar", "Foo"})
+	if len(got) != 2 {
+		t.Fatalf("FindNodesByNames len = %d, want 2 (2 present, 1 missing, 1 duplicate)", len(got))
+	}
+	foos := got["Foo"]
+	if len(foos) != 2 {
+		t.Fatalf("Foo matches = %d, want 2", len(foos))
+	}
+	for _, n := range foos {
+		if n.Name != "Foo" {
+			t.Fatalf("matched node has wrong Name: %s", n.Name)
+		}
+	}
+	bars := got["Bar"]
+	if len(bars) != 1 || bars[0].Name != "Bar" {
+		t.Fatalf("Bar matches wrong: %v", bars)
+	}
+	if _, present := got["Missing"]; present {
+		t.Fatalf("missing name should not be in map")
+	}
+
+	// Empty / nil input.
+	if got := s.FindNodesByNames(nil); len(got) != 0 {
+		t.Fatalf("nil input returned %d entries", len(got))
+	}
+	if got := s.FindNodesByNames([]string{}); len(got) != 0 {
+		t.Fatalf("empty input returned %d entries", len(got))
 	}
 }

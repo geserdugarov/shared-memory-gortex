@@ -1692,3 +1692,77 @@ func (s *Store) EdgesWithUnresolvedTarget() iter.Seq[*graph.Edge] {
 		})
 	}
 }
+
+// GetNodesByIDs: one bbolt View, multi-Get over the nodes bucket.
+// Each Get is a direct b-tree lookup (no decode round-trip cost) so
+// this is genuinely O(N · log_b(M)) where M is the node count — same
+// shape as the in-memory map lookup, just disk-resident.
+func (s *Store) GetNodesByIDs(ids []string) map[string]*graph.Node {
+	if len(ids) == 0 {
+		return nil
+	}
+	out := make(map[string]*graph.Node, len(ids))
+	_ = s.db.View(func(tx *bbolt.Tx) error {
+		nodes := tx.Bucket(bucketNodes)
+		for _, id := range ids {
+			if id == "" {
+				continue
+			}
+			if _, ok := out[id]; ok {
+				continue
+			}
+			raw := nodes.Get([]byte(id))
+			if raw == nil {
+				continue
+			}
+			n, derr := decodeNode(raw)
+			if derr != nil || n == nil {
+				continue
+			}
+			out[id] = n
+		}
+		return nil
+	})
+	return out
+}
+
+// FindNodesByNames: one bbolt View, prefix-scan idx_node_name once
+// per requested name. Each scan touches only the matching rows.
+func (s *Store) FindNodesByNames(names []string) map[string][]*graph.Node {
+	if len(names) == 0 {
+		return nil
+	}
+	out := make(map[string][]*graph.Node, len(names))
+	_ = s.db.View(func(tx *bbolt.Tx) error {
+		nameIdx := tx.Bucket(bucketIdxNodeName)
+		nodes := tx.Bucket(bucketNodes)
+		for _, name := range names {
+			if name == "" {
+				continue
+			}
+			if _, ok := out[name]; ok {
+				continue
+			}
+			pfx := append([]byte(name), 0x00)
+			c := nameIdx.Cursor()
+			var hits []*graph.Node
+			for k, _ := c.Seek(pfx); k != nil && bytes.HasPrefix(k, pfx); k, _ = c.Next() {
+				id := k[len(pfx):]
+				raw := nodes.Get(id)
+				if raw == nil {
+					continue
+				}
+				n, derr := decodeNode(raw)
+				if derr != nil || n == nil {
+					continue
+				}
+				hits = append(hits, n)
+			}
+			if len(hits) > 0 {
+				out[name] = hits
+			}
+		}
+		return nil
+	})
+	return out
+}

@@ -133,6 +133,30 @@ type Store interface {
 	// rather than materialise the whole edges table.
 	EdgesWithUnresolvedTarget() iter.Seq[*Edge]
 
+	// --- Batched point lookups -------------------------------------
+	//
+	// The resolver fires ~3-10 GetNode / FindNodesByName calls per
+	// unresolved edge across its workers. With 10-30k pending edges
+	// that's 100k-300k individual queries. On in-memory that's
+	// fine (map lookups, nanoseconds). On sqlite each prepared-stmt
+	// Exec through modernc.org/sqlite costs ~1-5 ms — at 100k+ calls
+	// the per-pass cost is hundreds of seconds, dominating the
+	// resolver. The batched variants collapse those into one (or
+	// chunked) bulk query.
+
+	// GetNodesByIDs returns a map id→*Node for every input ID present
+	// in the store. IDs not in the store are simply absent from the
+	// returned map (no nil values). Callers may pass duplicates; the
+	// returned map dedupes naturally.
+	GetNodesByIDs(ids []string) map[string]*Node
+
+	// FindNodesByNames returns a map name→[]*Node where each slot
+	// holds every node whose Name field matches. Names that match no
+	// node are absent. Used by the resolver to pre-warm its name-only
+	// fallback lookup across the whole pending-edge slice in one
+	// batched call instead of one query per edge.
+	FindNodesByNames(names []string) map[string][]*Node
+
 	// --- Counts and stats ------------------------------------------
 
 	NodeCount() int

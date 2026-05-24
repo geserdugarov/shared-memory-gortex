@@ -27,6 +27,7 @@ import (
 	"errors"
 	"fmt"
 	"iter"
+	"strings"
 	"sync"
 	"sync/atomic"
 
@@ -1089,22 +1090,28 @@ func panicOnFatal(err error) {
 // materialisation) but cuts the resolver's wasted full-table scans
 // down to "match-only" cardinality, which is the whole point.
 
-// EdgesByKind: indexed scan on edges_by_kind_index_to (or whatever
-// the existing per-kind index is). All rows for a single kind.
+// All three predicate iterators here MATERIALISE the query result
+// into a slice before yielding, then iterate the slice. This avoids
+// a deadlock peculiar to the SQLite backend's single-connection
+// pool: a streaming rows-cursor holds THE connection, and any
+// callback in the yield body that re-enters the store (e.g. GetNode
+// to resolve an edge's caller) blocks forever waiting on the same
+// connection. Materialise-then-yield releases the connection before
+// the body runs, so re-entrant store calls work.
+//
+// The "predicate-shaped" win still holds: the indexed SELECT only
+// fetches matching rows, not the whole table. We give up streaming
+// memory savings (we still build a Go slice of *Edge / *Node) but
+// keep the structural advantage that the row count flowing through
+// scanEdge is proportional to the result, not the table.
+
+// EdgesByKind: indexed SELECT on the (kind) column.
 func (s *Store) EdgesByKind(kind graph.EdgeKind) iter.Seq[*graph.Edge] {
 	return func(yield func(*graph.Edge) bool) {
-		rows, err := s.db.Query(`
+		out := s.queryEdgesSQL(`
 SELECT from_id, to_id, kind, file_path, line, confidence, confidence_label, origin, tier, cross_repo, meta
 FROM edges WHERE kind = ?`, string(kind))
-		if err != nil {
-			return
-		}
-		defer func() { _ = rows.Close() }()
-		for rows.Next() {
-			e, err := scanEdge(rows)
-			if err != nil || e == nil {
-				continue
-			}
+		for _, e := range out {
 			if !yield(e) {
 				return
 			}
@@ -1112,22 +1119,14 @@ FROM edges WHERE kind = ?`, string(kind))
 	}
 }
 
-// NodesByKind: indexed scan on nodes_by_kind.
+// NodesByKind: indexed SELECT on the (kind) column.
 func (s *Store) NodesByKind(kind graph.NodeKind) iter.Seq[*graph.Node] {
 	return func(yield func(*graph.Node) bool) {
-		rows, err := s.db.Query(`
+		out := s.queryNodesSQL(`
 SELECT id, kind, name, qual_name, file_path, start_line, end_line, language,
        repo_prefix, workspace_id, project_id, meta
 FROM nodes WHERE kind = ?`, string(kind))
-		if err != nil {
-			return
-		}
-		defer func() { _ = rows.Close() }()
-		for rows.Next() {
-			n, err := scanNode(rows)
-			if err != nil || n == nil {
-				continue
-			}
+		for _, n := range out {
 			if !yield(n) {
 				return
 			}
@@ -1135,28 +1134,149 @@ FROM nodes WHERE kind = ?`, string(kind))
 	}
 }
 
-// EdgesWithUnresolvedTarget: range scan on the to_id column using the
-// `LIKE 'unresolved::%'` predicate. SQLite turns LIKE-with-fixed-
-// prefix into a range lookup against the primary or secondary index
-// on to_id (the existing edges_by_to index covers it), so this scans
-// only the contiguous unresolved::* slice rather than the whole table.
+// EdgesWithUnresolvedTarget: range scan on the (to_id) column using
+// a half-open range. SQLite seeks directly to the contiguous
+// 'unresolved::*' slice via the to_id b-tree.
 func (s *Store) EdgesWithUnresolvedTarget() iter.Seq[*graph.Edge] {
 	return func(yield func(*graph.Edge) bool) {
-		rows, err := s.db.Query(`
+		out := s.queryEdgesSQL(`
 SELECT from_id, to_id, kind, file_path, line, confidence, confidence_label, origin, tier, cross_repo, meta
 FROM edges WHERE to_id >= 'unresolved::' AND to_id < 'unresolved:;'`)
-		if err != nil {
-			return
-		}
-		defer func() { _ = rows.Close() }()
-		for rows.Next() {
-			e, err := scanEdge(rows)
-			if err != nil || e == nil {
-				continue
-			}
+		for _, e := range out {
 			if !yield(e) {
 				return
 			}
 		}
 	}
+}
+
+// queryEdgesSQL runs an edge-shaped SELECT, materialises the rows
+// into a slice, and closes the rows-cursor before returning —
+// releasing the underlying sql.Conn so the predicate-iterator's
+// callback body is free to make re-entrant store calls without
+// deadlocking on the MaxOpenConns=1 pool. Companion to the existing
+// queryEdges helper that takes a *sql.Stmt; this one takes a raw
+// SQL string so the predicate iterators can pass inline queries.
+func (s *Store) queryEdgesSQL(q string, args ...any) []*graph.Edge {
+	rows, err := s.db.Query(q, args...)
+	if err != nil {
+		return nil
+	}
+	defer func() { _ = rows.Close() }()
+	var out []*graph.Edge
+	for rows.Next() {
+		e, err := scanEdge(rows)
+		if err != nil || e == nil {
+			continue
+		}
+		out = append(out, e)
+	}
+	return out
+}
+
+// queryNodesSQL is the node-shaped sibling of queryEdgesSQL.
+func (s *Store) queryNodesSQL(q string, args ...any) []*graph.Node {
+	rows, err := s.db.Query(q, args...)
+	if err != nil {
+		return nil
+	}
+	defer func() { _ = rows.Close() }()
+	var out []*graph.Node
+	for rows.Next() {
+		n, err := scanNode(rows)
+		if err != nil || n == nil {
+			continue
+		}
+		out = append(out, n)
+	}
+	return out
+}
+
+// lookupChunkSize bounds the IN-list parameter count per SQL query.
+// SQLite's default SQLITE_MAX_VARIABLE_NUMBER is 32766 in modern
+// builds, but staying well under that keeps query plans stable and
+// avoids surprising the parser on monster lists.
+const lookupChunkSize = 5000
+
+// GetNodesByIDs collapses N per-id SELECTs into ⌈N/chunk⌉ queries
+// of the form `SELECT … FROM nodes WHERE id IN (?, ?, …)`. The
+// resolver fires hundreds of thousands of these on a large pass;
+// chunking turns hundreds of seconds into single-digit seconds.
+func (s *Store) GetNodesByIDs(ids []string) map[string]*graph.Node {
+	if len(ids) == 0 {
+		return nil
+	}
+	// Dedupe + skip empty up front to keep the chunk loop honest.
+	seen := make(map[string]struct{}, len(ids))
+	uniq := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if id == "" {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		uniq = append(uniq, id)
+	}
+	out := make(map[string]*graph.Node, len(uniq))
+	const nodeCols = `id, kind, name, qual_name, file_path, start_line, end_line, language, repo_prefix, workspace_id, project_id, meta`
+	for i := 0; i < len(uniq); i += lookupChunkSize {
+		end := minInt(i+lookupChunkSize, len(uniq))
+		chunk := uniq[i:end]
+		placeholders := strings.Repeat(",?", len(chunk))[1:]
+		q := `SELECT ` + nodeCols + ` FROM nodes WHERE id IN (` + placeholders + `)`
+		args := make([]any, len(chunk))
+		for j, id := range chunk {
+			args[j] = id
+		}
+		for _, n := range s.queryNodesSQL(q, args...) {
+			if n != nil {
+				out[n.ID] = n
+			}
+		}
+	}
+	return out
+}
+
+// FindNodesByNames collapses N per-name FindNodesByName queries into
+// one `SELECT … FROM nodes WHERE name IN (…)` plus an in-Go bucket
+// by name. The (name) index makes the SELECT seek-driven, and the
+// caller sees the same map[name][]*Node it would have built by
+// calling FindNodesByName N times.
+func (s *Store) FindNodesByNames(names []string) map[string][]*graph.Node {
+	if len(names) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(names))
+	uniq := make([]string, 0, len(names))
+	for _, name := range names {
+		if name == "" {
+			continue
+		}
+		if _, ok := seen[name]; ok {
+			continue
+		}
+		seen[name] = struct{}{}
+		uniq = append(uniq, name)
+	}
+	out := make(map[string][]*graph.Node, len(uniq))
+	const nodeCols = `id, kind, name, qual_name, file_path, start_line, end_line, language, repo_prefix, workspace_id, project_id, meta`
+	for i := 0; i < len(uniq); i += lookupChunkSize {
+		end := minInt(i+lookupChunkSize, len(uniq))
+		chunk := uniq[i:end]
+		placeholders := strings.Repeat(",?", len(chunk))[1:]
+		q := `SELECT ` + nodeCols + ` FROM nodes WHERE name IN (` + placeholders + `)`
+		args := make([]any, len(chunk))
+		for j, name := range chunk {
+			args[j] = name
+		}
+		for _, n := range s.queryNodesSQL(q, args...) {
+			if n == nil {
+				continue
+			}
+			out[n.Name] = append(out[n.Name], n)
+		}
+	}
+	return out
 }

@@ -533,6 +533,52 @@ func (g *Graph) NodesByKind(kind NodeKind) iter.Seq[*Node] {
 	}
 }
 
+// GetNodesByIDs returns a map id→*Node for every input ID that
+// exists in the store. The in-memory implementation loops the
+// existing GetNode — algorithmic cost identical to a hand-written
+// loop in the caller, no concurrency win here. The value of the
+// batched API lives in the disk backends, where it collapses N
+// per-id SQL/bolt queries into one.
+func (g *Graph) GetNodesByIDs(ids []string) map[string]*Node {
+	if len(ids) == 0 {
+		return nil
+	}
+	out := make(map[string]*Node, len(ids))
+	for _, id := range ids {
+		if id == "" {
+			continue
+		}
+		if _, ok := out[id]; ok {
+			continue
+		}
+		if n := g.GetNode(id); n != nil {
+			out[id] = n
+		}
+	}
+	return out
+}
+
+// FindNodesByNames is the batched sibling of FindNodesByName.
+func (g *Graph) FindNodesByNames(names []string) map[string][]*Node {
+	if len(names) == 0 {
+		return nil
+	}
+	out := make(map[string][]*Node, len(names))
+	for _, name := range names {
+		if name == "" {
+			continue
+		}
+		if _, ok := out[name]; ok {
+			continue
+		}
+		matches := g.FindNodesByName(name)
+		if len(matches) > 0 {
+			out[name] = matches
+		}
+	}
+	return out
+}
+
 // EdgesWithUnresolvedTarget yields every edge whose To has the
 // "unresolved::" prefix — the resolver's main pending-edge filter.
 // In-memory iterates all edges and prefix-checks; disk backends back

@@ -70,6 +70,16 @@ type Store struct {
 	edgesByKind  map[gortex.EdgeKind]map[edgeKey]*gortex.Edge
 	allEdges     map[edgeKey]*gortex.Edge
 	unresolvedES map[edgeKey]*gortex.Edge
+
+	// Bulk-load fast path. When the indexer brackets its parse loop
+	// with BeginBulkLoad / FlushBulk, AddBatch routes rows into these
+	// slices instead of running per-record applyDeltas + mirror
+	// updates. FlushBulk dedupes, builds one giant delta list,
+	// applies it in big chunks, then rebuilds the mirror once.
+	bulkMu     sync.Mutex
+	bulkActive bool
+	bulkNodes  []*gortex.Node
+	bulkEdges  []*gortex.Edge
 }
 
 // edgeKey is the in-memory identity of an Edge, mirroring the composite
@@ -479,6 +489,19 @@ func (s *Store) AddBatch(nodes []*gortex.Node, edges []*gortex.Edge) {
 	if len(nodes) == 0 && len(edges) == 0 {
 		return
 	}
+	// Bulk-load fast path: buffer in memory, defer applyDeltas +
+	// mirror updates to FlushBulk. The buffer lock is held briefly
+	// only across the slice append — parse workers can hammer
+	// AddBatch in parallel with minimal contention.
+	s.bulkMu.Lock()
+	if s.bulkActive {
+		s.bulkNodes = append(s.bulkNodes, nodes...)
+		s.bulkEdges = append(s.bulkEdges, edges...)
+		s.bulkMu.Unlock()
+		return
+	}
+	s.bulkMu.Unlock()
+
 	const chunk = 5000
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -1354,6 +1377,132 @@ func rawBytes(v quad.Value) []byte {
 	switch t := v.(type) {
 	case quad.String:
 		return []byte(t)
+	}
+	return nil
+}
+
+// -- BulkLoader implementation -------------------------------------------
+
+// Compile-time assertion: *Store satisfies graph.BulkLoader.
+var _ gortex.BulkLoader = (*Store)(nil)
+
+// cayleyBulkApplyChunk is the per-ApplyDeltas chunk size at flush
+// time. Cayley's bolt-backed quad store packs each ApplyDeltas call
+// into a single bolt transaction; ~20k quads per txn keeps each
+// commit's allocation pressure bounded without paying the per-call
+// overhead 100k times. Empirical: smaller chunks dominated parsing
+// at >13 min on gortex scale.
+const cayleyBulkApplyChunk = 20000
+
+// BeginBulkLoad enters buffer-mode write. Subsequent AddBatch calls
+// append into in-memory slices instead of running per-record
+// applyDeltas + mirror updates. FlushBulk dedupes, builds one giant
+// delta list, applies it in big chunks, then rebuilds the mirror
+// once at the end.
+func (s *Store) BeginBulkLoad() {
+	s.bulkMu.Lock()
+	defer s.bulkMu.Unlock()
+	if s.bulkActive {
+		panic("store_cayley: BeginBulkLoad called twice without FlushBulk")
+	}
+	s.bulkActive = true
+}
+
+// FlushBulk commits the buffered nodes and edges as a single delta
+// stream against the cayley quad store, then rebuilds the in-memory
+// mirror from the persisted state. The per-quad mirror sync that
+// dominated the per-record path is amortised across a single
+// rebuildMirror call.
+func (s *Store) FlushBulk() error {
+	s.bulkMu.Lock()
+	if !s.bulkActive {
+		s.bulkMu.Unlock()
+		return fmt.Errorf("store_cayley: FlushBulk without BeginBulkLoad")
+	}
+	nodes := s.bulkNodes
+	edges := s.bulkEdges
+	s.bulkNodes = nil
+	s.bulkEdges = nil
+	s.bulkActive = false
+	s.bulkMu.Unlock()
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Dedup nodes by ID (last write wins). Mirrors the addNodeLocked
+	// `if _, dup := s.nodes[n.ID]; dup` check — at bulk-load time we
+	// don't have a populated mirror to consult, so we dedupe the
+	// buffer itself.
+	seenNodeIDs := make(map[string]int, len(nodes))
+	dedupedNodes := nodes[:0]
+	for _, n := range nodes {
+		if n == nil || n.ID == "" {
+			continue
+		}
+		if idx, ok := seenNodeIDs[n.ID]; ok {
+			dedupedNodes[idx] = n
+			continue
+		}
+		seenNodeIDs[n.ID] = len(dedupedNodes)
+		dedupedNodes = append(dedupedNodes, n)
+	}
+	nodes = dedupedNodes
+
+	// Dedup edges by identity tuple (last write wins). Same shape.
+	seenEdgeKeys := make(map[edgeKey]int, len(edges))
+	dedupedEdges := edges[:0]
+	for _, e := range edges {
+		if e == nil {
+			continue
+		}
+		k := keyOf(e)
+		if idx, ok := seenEdgeKeys[k]; ok {
+			dedupedEdges[idx] = e
+			continue
+		}
+		seenEdgeKeys[k] = len(dedupedEdges)
+		dedupedEdges = append(dedupedEdges, e)
+	}
+	edges = dedupedEdges
+
+	// Build all deltas. ~10 quads per node + ~10 per edge → 600k+
+	// deltas total at gortex scale. Grow with a generous cap to
+	// avoid repeated reallocation.
+	deltas := make([]graph.Delta, 0, len(nodes)*10+len(edges)*10)
+	for _, n := range nodes {
+		nd, err := buildNodeDeltas(n)
+		if err != nil {
+			return fmt.Errorf("build node deltas: %w", err)
+		}
+		deltas = append(deltas, nd...)
+	}
+	for _, e := range edges {
+		ed, err := buildEdgeDeltas(e)
+		if err != nil {
+			return fmt.Errorf("build edge deltas: %w", err)
+		}
+		deltas = append(deltas, ed...)
+	}
+
+	// Apply in big chunks. Each ApplyDeltas commits one bolt txn —
+	// big chunks amortise the per-txn overhead across millions of
+	// quad writes. IgnoreDup so an edge whose endpoints were also
+	// emitted as nodes doesn't trip on the duplicate quad.
+	for i := 0; i < len(deltas); i += cayleyBulkApplyChunk {
+		end := i + cayleyBulkApplyChunk
+		if end > len(deltas) {
+			end = len(deltas)
+		}
+		if err := s.qs.ApplyDeltas(deltas[i:end], graph.IgnoreOpts{IgnoreDup: true, IgnoreMissing: true}); err != nil {
+			return fmt.Errorf("bulk apply chunk %d..%d: %w", i, end, err)
+		}
+	}
+
+	// Rebuild the in-memory mirror from the persisted quad store —
+	// O(N) one-pass scan, instead of per-quad mirror sync during
+	// the bulk window.
+	if err := s.rebuildMirror(); err != nil {
+		return fmt.Errorf("rebuild mirror: %w", err)
 	}
 	return nil
 }

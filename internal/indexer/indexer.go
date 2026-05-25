@@ -3082,9 +3082,35 @@ func (idx *Indexer) buildSearchIndex() {
 	}
 
 	vecBackend := search.NewVector(dims)
+	// Backend FTS — VectorSearcher capability bridging: if the
+	// underlying store implements graph.VectorSearcher, mirror
+	// every embedding into its native HNSW too. The in-process
+	// HNSW above stays for the legacy read path; Vector Step 3
+	// will skip the in-process build entirely once the backend
+	// adapter is wired through search.ChannelSearcher.
+	vecSearcher, _ := idx.graph.(graph.VectorSearcher)
+	var backendItems []graph.VectorItem
+	if vecSearcher != nil {
+		backendItems = make([]graph.VectorItem, 0, len(vectors))
+	}
 	for i, vec := range vectors {
 		if vec != nil {
 			vecBackend.Add(ids[i], vec)
+			if vecSearcher != nil {
+				backendItems = append(backendItems, graph.VectorItem{
+					NodeID: ids[i],
+					Vec:    vec,
+				})
+			}
+		}
+	}
+	if vecSearcher != nil && len(backendItems) > 0 {
+		if err := vecSearcher.BulkUpsertEmbeddings(backendItems); err != nil {
+			idx.logger.Warn("indexer: backend vector bulk upsert failed",
+				zap.Error(err))
+		} else if err := vecSearcher.BuildVectorIndex(dims); err != nil {
+			idx.logger.Warn("indexer: backend vector index build failed",
+				zap.Error(err))
 		}
 	}
 	// Install the chunk → parent-symbol mapping so HybridBackend can

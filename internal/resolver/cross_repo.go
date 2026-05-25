@@ -219,15 +219,17 @@ func (cr *CrossRepoResolver) ResolveForRepo(repoPrefix string) *CrossRepoStats {
 	stats := &CrossRepoStats{ByRepo: make(map[string]int)}
 
 	var reindexBatch []graph.EdgeReindex
-	nodes := cr.graph.GetRepoNodes(repoPrefix)
-	for _, n := range nodes {
-		edges := cr.graph.GetOutEdges(n.ID)
-		for _, e := range edges {
-			if !strings.HasPrefix(e.To, unresolvedPrefix) {
-				continue
-			}
-			cr.resolveEdge(e, stats, &reindexBatch)
+	// One backend query for every out-edge from this repo's nodes,
+	// instead of GetRepoNodes followed by GetOutEdges per node. On
+	// disk backends (Ladybug, SQLite, DuckDB) the per-node loop
+	// was O(repo_nodes) round-trips per pass — single-digit minutes
+	// of warmup on a multi-repo workspace where this method runs
+	// once per tracked repo.
+	for _, e := range cr.graph.GetRepoEdges(repoPrefix) {
+		if !strings.HasPrefix(e.To, unresolvedPrefix) {
+			continue
 		}
+		cr.resolveEdge(e, stats, &reindexBatch)
 	}
 	if len(reindexBatch) > 0 {
 		cr.graph.ReindexEdges(reindexBatch)

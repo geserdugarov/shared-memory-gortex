@@ -5419,6 +5419,33 @@ func (idx *Indexer) extractContracts() {
 		nodes = idx.graph.AllNodes()
 	}
 
+	// Pre-bucket the already-fetched node slice by FilePath so the
+	// per-file body can look up its co-located nodes in O(1) instead
+	// of firing a fresh GetFileNodes query per file. Likewise pre-
+	// fetch every out-edge whose source is in this repo as ONE backend
+	// call and bucket by From so the per-file body can replace
+	// GetOutEdges(fileNode.ID) — on disk backends the per-file query
+	// path was the second-largest source of round-trips in
+	// deferred_passes (after the DI walk).
+	nodesByFile := make(map[string][]*graph.Node, len(nodes))
+	for _, n := range nodes {
+		if n == nil {
+			continue
+		}
+		nodesByFile[n.FilePath] = append(nodesByFile[n.FilePath], n)
+	}
+	var edgesByFrom map[string][]*graph.Edge
+	if idx.repoPrefix != "" {
+		repoEdges := idx.graph.GetRepoEdges(idx.repoPrefix)
+		edgesByFrom = make(map[string][]*graph.Edge, len(nodes))
+		for _, e := range repoEdges {
+			if e == nil {
+				continue
+			}
+			edgesByFrom[e.From] = append(edgesByFrom[e.From], e)
+		}
+	}
+
 	for _, fileNode := range nodes {
 		if fileNode.Kind != graph.KindFile {
 			continue
@@ -5462,8 +5489,15 @@ func (idx *Indexer) extractContracts() {
 			continue
 		}
 
-		fileNodes := idx.graph.GetFileNodes(fileNode.FilePath)
-		fileEdges := idx.graph.GetOutEdges(fileNode.ID)
+		var fileNodes []*graph.Node
+		var fileEdges []*graph.Edge
+		if idx.repoPrefix != "" {
+			fileNodes = nodesByFile[fileNode.FilePath]
+			fileEdges = edgesByFrom[fileNode.ID]
+		} else {
+			fileNodes = idx.graph.GetFileNodes(fileNode.FilePath)
+			fileEdges = idx.graph.GetOutEdges(fileNode.ID)
+		}
 
 		// Language-filtered dispatch: skip extractors that don't list
 		// this file's language in SupportedLanguages(). On big repos

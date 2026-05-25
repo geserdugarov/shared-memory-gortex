@@ -365,6 +365,17 @@ func (r *Resolver) ResolveAll() *ResolveStats {
 	// + class_hierarchy correctness all ride on this).
 	r.rebindGoMethodReceivers()
 
+	// Scope-aware bare-name binding. Walks `unresolved::<name>` edges
+	// whose source is inside a function and rewrites them onto the
+	// matching KindLocal / KindParam node when exactly one in-scope
+	// binding wins under the Go shadowing rules. Without this pass
+	// the worker-pool fallback would scan FindNodesByName(name)
+	// across the whole graph and fall through to `unresolved::*` for
+	// every common identifier (err / data / src / ...). The bind
+	// uses #77's KindLocal nodes — pre-#77 there was nothing to
+	// bind to.
+	r.bindBareNameScopeRefs()
+
 	// Relative-import resolution for Python and Dart files. Runs
 	// before module attribution so internal-target stems never get
 	// mis-mapped to a phantom pypi/pub package.

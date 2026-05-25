@@ -1,0 +1,190 @@
+// pagerank — graph-EXTRACTION-flavoured centrality analysis.
+//
+// analyze kind=pagerank ranks symbols by PageRank authority: a
+// symbol is "central" when central symbols depend on it, so a
+// rarely-called API that's invoked from every domain layer ranks
+// higher than a heavily-called test helper. This is qualitatively
+// different from the degree-based `hotspots` analyzer — random-walk
+// authority weights influence by reach, not by raw fan-in count.
+//
+// Routing:
+//
+//   - When the backing graph.Store implements graph.PageRanker
+//     (today only store_ladybug), the analyzer delegates to the
+//     engine-native parallel implementation (Ligra-based). Saves
+//     the per-call cost of a fresh Go-side power iteration.
+//
+//   - Otherwise (in-memory store, sqlite, duckdb), falls back to
+//     analysis.ComputePageRank — the same pure-Go implementation
+//     the search rerank pipeline consumes via the cached
+//     Server.pageRank field.
+
+package mcp
+
+import (
+	"context"
+	"fmt"
+	"sort"
+	"strings"
+
+	"github.com/mark3labs/mcp-go/mcp"
+
+	"github.com/zzet/gortex/internal/analysis"
+	"github.com/zzet/gortex/internal/graph"
+)
+
+// pageRankRow is the per-symbol shape the analyzer returns.
+type pageRankRow struct {
+	ID       string  `json:"id"`
+	Name     string  `json:"name,omitempty"`
+	Kind     string  `json:"kind,omitempty"`
+	FilePath string  `json:"file_path,omitempty"`
+	Line     int     `json:"line,omitempty"`
+	Rank     float64 `json:"rank"`
+}
+
+func (s *Server) handleAnalyzePageRank(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	args := req.GetArguments()
+
+	limit := 20
+	if v, ok := args["limit"].(float64); ok && v > 0 {
+		limit = int(v)
+	}
+	damping := 0.0
+	if v, ok := args["damping"].(float64); ok && v > 0 && v < 1 {
+		damping = v
+	}
+	maxIter := 0
+	if v, ok := args["max_iterations"].(float64); ok && v > 0 {
+		maxIter = int(v)
+	}
+	tolerance := 0.0
+	if v, ok := args["tolerance"].(float64); ok && v > 0 {
+		tolerance = v
+	}
+	nodeKinds := parseKindFilter(stringArg(args, "kind"))
+
+	hits := s.runPageRank(graph.PageRankOpts{
+		NodeKinds:     nodeKinds,
+		DampingFactor: damping,
+		MaxIterations: maxIter,
+		Tolerance:     tolerance,
+		Limit:         limit,
+	})
+
+	rows := make([]pageRankRow, 0, len(hits))
+	for _, h := range hits {
+		n := s.graph.GetNode(h.NodeID)
+		row := pageRankRow{ID: h.NodeID, Rank: h.Rank}
+		if n != nil {
+			row.Name = n.Name
+			row.Kind = string(n.Kind)
+			row.FilePath = n.FilePath
+			row.Line = n.StartLine
+		}
+		rows = append(rows, row)
+	}
+
+	if s.isGCX(ctx, req) {
+		return s.gcxResponseWithBudget(req)(encodeAnalyze("pagerank", rows))
+	}
+	if isCompact(req) {
+		var b strings.Builder
+		for _, r := range rows {
+			fmt.Fprintf(&b, "%s %s %s:%d rank=%.6f\n", r.Kind, r.ID, r.FilePath, r.Line, r.Rank)
+		}
+		return mcp.NewToolResultText(b.String()), nil
+	}
+	return s.respondJSONOrTOON(ctx, req, map[string]any{"pagerank": rows, "count": len(rows)})
+}
+
+// runPageRank picks the engine-native PageRanker when the
+// backing store implements it, otherwise falls back to the
+// in-process power iteration.
+func (s *Server) runPageRank(opts graph.PageRankOpts) []graph.PageRankHit {
+	if store := s.backendStore(); store != nil {
+		if pr, ok := store.(graph.PageRanker); ok {
+			hits, err := pr.PageRank(opts)
+			if err == nil {
+				return hits
+			}
+			// Fall through to the in-process path on backend
+			// error rather than surface a half-completed
+			// result; engine-native is a hot path optimisation,
+			// not the source of truth.
+		}
+	}
+	// Fallback: pure-Go power iteration on the in-memory mirror.
+	// analysis.ComputePageRank doesn't accept the same options
+	// as the engine-native call yet — it uses fixed damping /
+	// iteration constants — so opts.DampingFactor / MaxIterations
+	// / Tolerance are silently ignored on the fallback path. The
+	// NodeKinds filter is honoured by post-filtering the result.
+	res := analysis.ComputePageRank(s.graph)
+	if res == nil || len(res.Scores) == 0 {
+		return nil
+	}
+	allow := makeKindAllow(opts.NodeKinds)
+	hits := make([]graph.PageRankHit, 0, len(res.Scores))
+	for id, rank := range res.Scores {
+		if !allow(s.graph.GetNode(id)) {
+			continue
+		}
+		hits = append(hits, graph.PageRankHit{NodeID: id, Rank: rank})
+	}
+	sort.Slice(hits, func(i, j int) bool { return hits[i].Rank > hits[j].Rank })
+	if opts.Limit > 0 && opts.Limit < len(hits) {
+		hits = hits[:opts.Limit]
+	}
+	return hits
+}
+
+// backendStore returns the underlying graph.Store the indexer
+// writes to — which is what implements the capability interfaces
+// (PageRanker, CommunityDetector, …). Falls back to s.graph when
+// no indexer is wired so test fixtures keep working.
+func (s *Server) backendStore() graph.Store {
+	if s.indexer != nil {
+		return s.indexer.Graph()
+	}
+	return s.graph
+}
+
+// parseKindFilter parses a comma-separated list of graph node
+// kinds (e.g. "function,method,type") into a typed slice. Empty
+// input → empty slice (caller treats that as "no filter").
+func parseKindFilter(in string) []graph.NodeKind {
+	in = strings.TrimSpace(in)
+	if in == "" {
+		return nil
+	}
+	parts := strings.Split(in, ",")
+	out := make([]graph.NodeKind, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		out = append(out, graph.NodeKind(p))
+	}
+	return out
+}
+
+// makeKindAllow returns a predicate that reports whether a node's
+// kind passes the filter. nil node is always rejected (defensive).
+func makeKindAllow(kinds []graph.NodeKind) func(*graph.Node) bool {
+	if len(kinds) == 0 {
+		return func(n *graph.Node) bool { return n != nil }
+	}
+	set := make(map[graph.NodeKind]struct{}, len(kinds))
+	for _, k := range kinds {
+		set[k] = struct{}{}
+	}
+	return func(n *graph.Node) bool {
+		if n == nil {
+			return false
+		}
+		_, ok := set[n.Kind]
+		return ok
+	}
+}

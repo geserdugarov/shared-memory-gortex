@@ -62,6 +62,12 @@ type Store struct {
 	// SymbolVec schema declaration + index-build sentinel. See
 	// vector.go for the VectorSearcher implementation.
 	vec vectorState
+
+	// algo tracks the native ALGO extension load + the per-call
+	// projection-name serialisation mutex. See algo.go for the
+	// PageRanker / CommunityDetector / ComponentFinder / KCorer
+	// implementations.
+	algo algoState
 }
 
 // Compile-time assertion: *Store satisfies graph.Store.

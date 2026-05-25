@@ -429,3 +429,58 @@ type VectorSearcher interface {
 	BuildVectorIndex(dims int) error
 	SimilarTo(vec []float32, limit int) ([]VectorHit, error)
 }
+
+// PageRankOpts tunes the PageRank computation. Zero values request
+// the backend default — only set fields you genuinely want to
+// override so backends can pick their own parallel-tuned defaults
+// without the caller second-guessing the constants.
+//
+// NodeKinds / EdgeKinds restrict the projected subgraph the
+// algorithm runs over. Empty means "all kinds" — the algo sees the
+// full graph. A non-empty filter is rewritten into the projected-
+// graph predicate (Ladybug supports per-table predicates of the
+// form 'n.kind = "function"').
+type PageRankOpts struct {
+	NodeKinds      []NodeKind
+	EdgeKinds      []EdgeKind
+	DampingFactor  float64
+	MaxIterations  int
+	Tolerance      float64
+	Limit          int // 0 = return every ranked node
+}
+
+// PageRankHit is one row of the PageRank output: the node ID plus
+// its rank score. Hits come back sorted by rank descending.
+type PageRankHit struct {
+	NodeID string
+	Rank   float64
+}
+
+// PageRanker is an optional interface backends MAY implement to
+// expose engine-native PageRank centrality. When the store
+// implements it, the daemon's hotspot / authority-ranking path
+// routes through the backend's parallel implementation (Ligra-
+// based on Ladybug) instead of computing degree-centrality
+// in-process.
+//
+// Engine-native PageRank is qualitatively different from the
+// degree-based hotspot analyzer: random-walk authority weights
+// rare-but-influential nodes the degree count would miss
+// (a low-fan-in API that's called from every domain layer ranks
+// higher than a high-fan-in test helper).
+//
+// Contract:
+//
+//   - PageRank runs the algorithm against a projected subgraph and
+//     returns hits sorted by rank descending. The projection is
+//     declared and torn down per call — callers don't manage
+//     PROJECT_GRAPH lifecycle directly.
+//
+//   - The score is normalized so the full corpus sums to 1
+//     (Ladybug's default). Relative ordering — not the absolute
+//     value — is what callers should consume.
+//
+//   - Close is implied by graph.Store.Close.
+type PageRanker interface {
+	PageRank(opts PageRankOpts) ([]PageRankHit, error)
+}

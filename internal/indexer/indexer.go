@@ -102,6 +102,13 @@ type IndexError struct {
 // Indexer walks a repository and populates the graph.
 type Indexer struct {
 	graph         graph.Store
+	// indexCount tracks how many IndexCtx calls this Indexer has
+	// completed. Gates the cold-start shadow-swap: each per-repo
+	// Indexer in MultiIndexer is fresh (indexCount==0), so all of
+	// them take the shadow path regardless of what sibling repos
+	// have already drained into the shared disk store. Per-repo-
+	// prefixed stub IDs make the concurrent drains conflict-free.
+	indexCount    atomic.Int32
 	registry      *parser.Registry
 	resolver      *resolver.Resolver
 	search        search.Backend
@@ -1725,20 +1732,33 @@ func (idx *Indexer) IndexCtx(ctx context.Context, root string) (result *IndexRes
 	var diskTarget graph.Store
 	var inMemShadow *graph.Graph
 	bl, blOK := idx.graph.(graph.BulkLoader)
+	// Per-Indexer sentinel: each *Indexer is constructed fresh
+	// (per-repo in MultiIndexer, once in single-repo daemons), so
+	// "this Indexer has indexed before" is the right question to
+	// gate the shadow-swap on. The legacy gate looked at the
+	// disk store's NodeCount, but in MultiIndexer the disk store
+	// holds data from sibling repos that already drained — the
+	// gate would mis-fire and force the big repo onto the per-row
+	// path. With per-repo-prefixed stub IDs (internal/graph/stub.go)
+	// concurrent shadow drains no longer conflict on PRIMARY KEY,
+	// so disk-non-empty is safe.
+	firstIndex := idx.indexCount.Load() == 0
+	belowShadowMax := len(files) <= shadowMaxFileCount()
 	preNodes := idx.graph.NodeCount()
 	preEdges := idx.graph.EdgeCount()
-	belowShadowMax := len(files) <= shadowMaxFileCount()
 	idx.logger.Info("indexer: shadow-swap decision",
 		zap.String("repo", idx.RepoPrefix()),
 		zap.Bool("bulk_loader", blOK),
+		zap.Bool("first_index", firstIndex),
 		zap.Int("pre_nodes", preNodes),
 		zap.Int("pre_edges", preEdges),
 		zap.Int("files", len(files)),
 		zap.Int("shadow_max_files", shadowMaxFileCount()),
 		zap.Bool("below_shadow_max", belowShadowMax),
-		zap.Bool("shadow_taken", blOK && preNodes == 0 && preEdges == 0 && belowShadowMax),
+		zap.Bool("shadow_taken", blOK && firstIndex && belowShadowMax),
 	)
-	if blOK && preNodes == 0 && preEdges == 0 && belowShadowMax {
+	if blOK && firstIndex && belowShadowMax {
+		idx.indexCount.Add(1)
 		diskTarget = idx.graph
 		inMemShadow = graph.New()
 		idx.graph = inMemShadow

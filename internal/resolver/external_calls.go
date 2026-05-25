@@ -159,8 +159,11 @@ func parseExternalCallTarget(target string) (ecosystem, importPath string, ok bo
 			return "", "", false
 		}
 		return "dep", path, true
-	case strings.HasPrefix(target, "stdlib::"):
-		path := importPathOfExtern(strings.TrimPrefix(target, "stdlib::"))
+	case graph.IsStdlibStub(target):
+		// Handles both legacy `stdlib::<path>::<sym>` and the
+		// per-repo-prefixed `<repo>::stdlib::<path>::<sym>` shape
+		// (see internal/graph/stub.go).
+		path := importPathOfExtern(graph.StubRest(target))
 		if path == "" {
 			return "", "", false
 		}

@@ -958,12 +958,15 @@ func (r *Resolver) resolveExtern(e *graph.Edge, spec string, stats *ResolveStats
 	// Pass 2: classify the import path. "stdlib::" when the path looks
 	// like a Go stdlib package (no dot in the first segment and not a
 	// known module vendor prefix). "dep::" otherwise. Callers can treat
-	// both as external for edge-walk purposes.
-	prefix := "dep::"
+	// both as external for edge-walk purposes. The stdlib stub carries
+	// the caller's repo prefix (see internal/graph/stub.go) so two repos
+	// pinned to different Go SDK versions get distinct fmt::Errorf nodes
+	// instead of one shared, version-conflated terminal.
 	if isStdlibLike(importPath) {
-		prefix = "stdlib::"
+		e.To = graph.StubID(callerRepo, graph.StubKindStdlib, importPath, symbol)
+	} else {
+		e.To = "dep::" + importPath + "::" + symbol
 	}
-	e.To = prefix + importPath + "::" + symbol
 	stats.External++
 }
 
@@ -1578,7 +1581,7 @@ func (r *Resolver) applyBuiltinIfKnown(e *graph.Edge, methodName string, stats *
 	if !ok {
 		return false
 	}
-	e.To = "builtin::" + lang + "::" + category + "::" + methodName
+	e.To = graph.StubID(r.callerRepoPrefix(e), graph.StubKindBuiltin, lang, category, methodName)
 	stats.External++
 	return true
 }

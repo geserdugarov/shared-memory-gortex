@@ -108,7 +108,7 @@ func (r *Resolver) tryAttributeGoBuiltin(e *graph.Edge, materialised map[string]
 	if !r.fromIsGo(e.From) {
 		return ""
 	}
-	newID, kind, builtinKind := goBuiltinTarget(name)
+	newID, kind, builtinKind := goBuiltinTarget(r.callerRepoPrefix(e), name)
 	if newID == "" {
 		return ""
 	}
@@ -133,19 +133,23 @@ func (r *Resolver) tryAttributeGoBuiltin(e *graph.Edge, materialised map[string]
 }
 
 // goBuiltinTarget classifies a bare identifier as one of Go's
-// intrinsics. Returns the canonical builtin::go:: ID, the NodeKind
-// to materialise it under (always KindBuiltin), and a meta tag
+// intrinsics. Returns the canonical builtin::go:: ID (per-repo
+// prefixed via graph.StubID — see internal/graph/stub.go for why
+// two repos can disagree on what's a builtin), the NodeKind to
+// materialise it under (always KindBuiltin), and a meta tag
 // recording which subspace (func / type / const) it belongs to.
 // Returns ("", "", "") when the name is not a Go builtin.
-func goBuiltinTarget(name string) (id string, kind graph.NodeKind, builtinKind string) {
+// repoPrefix is the owning repo's RepoPrefix (empty in
+// single-repo / legacy callers).
+func goBuiltinTarget(repoPrefix, name string) (id string, kind graph.NodeKind, builtinKind string) {
 	if _, ok := goBuiltinFuncs[name]; ok {
-		return "builtin::go::" + name, graph.KindBuiltin, "func"
+		return graph.StubID(repoPrefix, graph.StubKindBuiltin, "go", name), graph.KindBuiltin, "func"
 	}
 	if _, ok := goBuiltinTypes[name]; ok {
-		return "builtin::go::type::" + name, graph.KindBuiltin, "type"
+		return graph.StubID(repoPrefix, graph.StubKindBuiltin, "go", "type", name), graph.KindBuiltin, "type"
 	}
 	if _, ok := goBuiltinConsts[name]; ok {
-		return "builtin::go::const::" + name, graph.KindBuiltin, "const"
+		return graph.StubID(repoPrefix, graph.StubKindBuiltin, "go", "const", name), graph.KindBuiltin, "const"
 	}
 	return "", "", ""
 }

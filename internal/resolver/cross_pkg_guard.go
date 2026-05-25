@@ -207,7 +207,7 @@ func (r *Resolver) buildImportClosure() map[string]map[string]struct{} {
 		// name-only call candidate could legitimately live in.
 		if strings.HasPrefix(e.To, unresolvedPrefix) ||
 			strings.HasPrefix(e.To, "external::") ||
-			strings.HasPrefix(e.To, "stdlib::") ||
+			graph.IsStdlibStub(e.To) ||
 			strings.HasPrefix(e.To, "dep::") {
 			continue
 		}

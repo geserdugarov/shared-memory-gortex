@@ -39,11 +39,16 @@ import (
 // of this pass (incremental ResolveFile re-invocation) is a no-op.
 func (r *Resolver) attributeGoExternalCalls() {
 	// Scan every edge whose target sits in one of the three external
-	// prefixes. Collect unique (prefix, importPath, symbol) triples
-	// so we materialise each one once even when many edges reference
-	// the same target.
+	// prefixes. Collect unique (repoPrefix, prefix, importPath, symbol)
+	// tuples so we materialise each one once even when many edges
+	// reference the same target. repoPrefix is included because
+	// stdlib stubs are per-repo (see internal/graph/stub.go) — two
+	// repos on different Go SDK versions emit semantically distinct
+	// `<repoA>::stdlib::fmt::Errorf` and `<repoB>::stdlib::fmt::Errorf`
+	// stubs that MUST round-trip through this attribution pass as
+	// distinct nodes, not collide into one.
 	type extKey struct {
-		prefix, importPath, symbol string
+		repoPrefix, prefix, importPath, symbol string
 	}
 	seen := map[extKey]struct{}{}
 	depEdgesScan := func(kind graph.EdgeKind) {
@@ -55,7 +60,7 @@ func (r *Resolver) attributeGoExternalCalls() {
 			if prefix == "" {
 				continue
 			}
-			seen[extKey{prefix, importPath, symbol}] = struct{}{}
+			seen[extKey{graph.StubRepoPrefix(e.To), prefix, importPath, symbol}] = struct{}{}
 		}
 	}
 	// Same edge-kind set as attributeGoBuiltins — anywhere an
@@ -83,12 +88,18 @@ func (r *Resolver) attributeGoExternalCalls() {
 	// then the per-symbol KindFunction. Module-side dedupe is via
 	// the `modules` map; the per-symbol nodes are unique by (prefix,
 	// path, symbol) by construction.
-	modules := map[string]string{} // importPath -> module node ID
+	// Module IDs are also per-repo now — a module node carries the
+	// same SDK-version sensitivity its symbols do. Key includes the
+	// repo prefix so two repos importing the same path get distinct
+	// module nodes.
+	type modKey struct{ repoPrefix, importPath string }
+	modules := map[modKey]string{}
 	for k := range seen {
-		moduleID, ok := modules[k.importPath]
+		modKey := modKey{repoPrefix: k.repoPrefix, importPath: k.importPath}
+		moduleID, ok := modules[modKey]
 		if !ok {
-			moduleID = "module::go:" + k.importPath
-			modules[k.importPath] = moduleID
+			moduleID = graph.StubID(k.repoPrefix, graph.StubKindModule, "go", k.importPath)
+			modules[modKey] = moduleID
 			role := "external"
 			if k.prefix == "stdlib::" {
 				role = "stdlib"
@@ -107,7 +118,18 @@ func (r *Resolver) attributeGoExternalCalls() {
 				},
 			})
 		}
-		symbolID := k.prefix + k.importPath + "::" + k.symbol
+		var symbolID string
+		switch k.prefix {
+		case "stdlib::":
+			symbolID = graph.StubID(k.repoPrefix, graph.StubKindStdlib, k.importPath, k.symbol)
+		default:
+			// dep:: / external:: keep their legacy unprefixed form for
+			// now — they aren't covered by the stub-prefix migration
+			// (different module paths already provide repo-level
+			// distinction; same version pinning is enforced by go.mod
+			// per-repo).
+			symbolID = k.prefix + k.importPath + "::" + k.symbol
+		}
 		r.graph.AddNode(&graph.Node{
 			ID:       symbolID,
 			Kind:     graph.KindFunction,
@@ -139,18 +161,27 @@ func (r *Resolver) attributeGoExternalCalls() {
 // (`stdlib::` / `dep::` / `external::`), the import path, and the
 // symbol name. Returns ("", "", "") for any other shape so the pass
 // can skip it cleanly.
+//
+// The stdlib case is matched via graph.IsStdlibStub so both the
+// legacy `stdlib::fmt::Errorf` shape and the per-repo-prefixed
+// `<repo>::stdlib::fmt::Errorf` shape (see internal/graph/stub.go)
+// route the same way. The returned bucket label stays `stdlib::` for
+// downstream `k.prefix == "stdlib::"` comparisons.
 func splitGoExternalTarget(target string) (prefix, importPath, symbol string) {
+	var body string
 	switch {
-	case strings.HasPrefix(target, "stdlib::"):
+	case graph.IsStdlibStub(target):
 		prefix = "stdlib::"
+		body = graph.StubRest(target)
 	case strings.HasPrefix(target, "dep::"):
 		prefix = "dep::"
+		body = strings.TrimPrefix(target, prefix)
 	case strings.HasPrefix(target, "external::"):
 		prefix = "external::"
+		body = strings.TrimPrefix(target, prefix)
 	default:
 		return "", "", ""
 	}
-	body := strings.TrimPrefix(target, prefix)
 	// The body shape produced by resolveExtern is
 	// `<importPath>::<symbol>`. Split on the LAST `::` because import
 	// paths can include slashes but not `::`, so the rightmost

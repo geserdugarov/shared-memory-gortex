@@ -142,6 +142,33 @@ func New(g graph.Store) *Resolver {
 	return &Resolver{graph: g, mu: g.ResolveMutex()}
 }
 
+// SetGraph retargets the Resolver at a different Store. The indexer's
+// in-memory shadow-swap path needs this: the Resolver is constructed
+// against the disk Store at indexer-New time, but during IndexCtx the
+// indexer reassigns its own graph pointer to an in-memory shadow.
+// Without SetGraph the Resolver kept reading the (empty) disk Store
+// and short-circuited on len(pending) == 0, silently disabling every
+// resolver pass for backends that opt into the shadow swap.
+//
+// Holds the resolve mutex so a concurrent ResolveAll / ResolveFile
+// can't observe a half-rotated graph reference, and switches mu to
+// the new store's resolve mutex so subsequent passes serialise
+// against any Resolver built directly on the new Store.
+func (r *Resolver) SetGraph(g graph.Store) {
+	if g == nil {
+		return
+	}
+	oldMu := r.mu
+	if oldMu != nil {
+		oldMu.Lock()
+	}
+	r.graph = g
+	r.mu = g.ResolveMutex()
+	if oldMu != nil {
+		oldMu.Unlock()
+	}
+}
+
 // ResolveAll resolves all unresolved edges in the graph.
 //
 // Edge resolution is partitioned across runtime.NumCPU() workers.

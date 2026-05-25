@@ -1625,9 +1625,21 @@ func (idx *Indexer) IndexCtx(ctx context.Context, root string) (result *IndexRes
 		diskTarget = idx.graph
 		inMemShadow = graph.New()
 		idx.graph = inMemShadow
+		// The resolver was constructed at indexer.New with the disk
+		// Store. Redirect it at the shadow too, otherwise ResolveAll
+		// reads from the empty disk Store, finds no pending edges,
+		// and short-circuits — silently disabling every resolver pass
+		// (module attribution, relative imports, edge in-place
+		// resolution, …) for any backend that takes the shadow path.
+		if idx.resolver != nil {
+			idx.resolver.SetGraph(inMemShadow)
+		}
 		defer func() {
 			if retErr != nil {
 				idx.graph = diskTarget
+				if idx.resolver != nil {
+					idx.resolver.SetGraph(diskTarget)
+				}
 				return
 			}
 			reporter.Report("persisting bulk graph", 0, 0)

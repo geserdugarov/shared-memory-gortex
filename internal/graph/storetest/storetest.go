@@ -69,6 +69,7 @@ func RunConformance(t *testing.T, factory Factory) {
 	t.Run("EdgesWithUnresolvedTarget", func(t *testing.T) { testEdgesWithUnresolvedTarget(t, factory) })
 	t.Run("GetNodesByIDs", func(t *testing.T) { testGetNodesByIDs(t, factory) })
 	t.Run("FindNodesByNames", func(t *testing.T) { testFindNodesByNames(t, factory) })
+	t.Run("GetEdgesByNodeIDs", func(t *testing.T) { testGetEdgesByNodeIDs(t, factory) })
 }
 
 // -- fixture helpers ---------------------------------------------------
@@ -964,5 +965,86 @@ func testFindNodesByNames(t *testing.T, factory Factory) {
 	}
 	if got := s.FindNodesByNames([]string{}); len(got) != 0 {
 		t.Fatalf("empty input returned %d entries", len(got))
+	}
+}
+
+// testGetEdgesByNodeIDs covers the batched fan-in / fan-out edge
+// lookups. Builds a small graph with mixed fan-in/out, calls both
+// methods with a mix of present and missing ids (plus an empty
+// string), and asserts the per-id slices match what GetInEdges /
+// GetOutEdges would return individually.
+func testGetEdgesByNodeIDs(t *testing.T, factory Factory) {
+	t.Helper()
+	s := factory(t)
+	// Nodes
+	s.AddNode(mkNode("a", "A", "x.go", graph.KindFunction))
+	s.AddNode(mkNode("b", "B", "x.go", graph.KindFunction))
+	s.AddNode(mkNode("c", "C", "y.go", graph.KindFunction))
+	s.AddNode(mkNode("d", "D", "y.go", graph.KindFunction))
+	// Edges: a→b, a→c, b→c, d→c (so c has 3 in-edges, a has 2 out-edges).
+	s.AddEdge(mkEdge("a", "b", graph.EdgeCalls))
+	s.AddEdge(mkEdge("a", "c", graph.EdgeCalls))
+	s.AddEdge(mkEdge("b", "c", graph.EdgeCalls))
+	s.AddEdge(mkEdge("d", "c", graph.EdgeReferences))
+
+	// --- GetOutEdgesByNodeIDs ---
+	outMap := s.GetOutEdgesByNodeIDs([]string{"a", "b", "d", "missing", "a"})
+	// a has 2 out-edges (a→b, a→c).
+	if got := sortEdgeKeys(outMap["a"]); len(got) != 2 {
+		t.Fatalf("GetOutEdgesByNodeIDs[a] = %v, want 2 edges", got)
+	}
+	// b has 1 out-edge (b→c).
+	if got := outMap["b"]; len(got) != 1 || got[0].To != "c" {
+		t.Fatalf("GetOutEdgesByNodeIDs[b] = %v, want one edge to c", got)
+	}
+	// d has 1 out-edge (d→c).
+	if got := outMap["d"]; len(got) != 1 || got[0].To != "c" {
+		t.Fatalf("GetOutEdgesByNodeIDs[d] = %v, want one edge to c", got)
+	}
+	// missing key — range over nil is a no-op, so callers can index
+	// without an ok-check.
+	if got := outMap["missing"]; len(got) != 0 {
+		t.Fatalf("GetOutEdgesByNodeIDs[missing] = %v, want empty", got)
+	}
+
+	// --- GetInEdgesByNodeIDs ---
+	inMap := s.GetInEdgesByNodeIDs([]string{"a", "b", "c", "missing"})
+	// a has 0 in-edges.
+	if got := inMap["a"]; len(got) != 0 {
+		t.Fatalf("GetInEdgesByNodeIDs[a] = %v, want empty", got)
+	}
+	// b has 1 in-edge (a→b).
+	if got := inMap["b"]; len(got) != 1 || got[0].From != "a" {
+		t.Fatalf("GetInEdgesByNodeIDs[b] = %v, want one edge from a", got)
+	}
+	// c has 3 in-edges (a→c, b→c, d→c).
+	if got := inMap["c"]; len(got) != 3 {
+		t.Fatalf("GetInEdgesByNodeIDs[c] = %v, want 3 edges", got)
+	}
+	froms := map[string]bool{}
+	for _, e := range inMap["c"] {
+		froms[e.From] = true
+	}
+	for _, want := range []string{"a", "b", "d"} {
+		if !froms[want] {
+			t.Fatalf("GetInEdgesByNodeIDs[c] missing edge from %q", want)
+		}
+	}
+	if got := inMap["missing"]; len(got) != 0 {
+		t.Fatalf("GetInEdgesByNodeIDs[missing] = %v, want empty", got)
+	}
+
+	// Empty / nil / empty-string inputs are no-ops.
+	if got := s.GetOutEdgesByNodeIDs(nil); len(got) != 0 {
+		t.Fatalf("GetOutEdgesByNodeIDs(nil) returned %d entries", len(got))
+	}
+	if got := s.GetInEdgesByNodeIDs(nil); len(got) != 0 {
+		t.Fatalf("GetInEdgesByNodeIDs(nil) returned %d entries", len(got))
+	}
+	if got := s.GetOutEdgesByNodeIDs([]string{}); len(got) != 0 {
+		t.Fatalf("GetOutEdgesByNodeIDs([]) returned %d entries", len(got))
+	}
+	if got := s.GetInEdgesByNodeIDs([]string{""}); len(got) != 0 {
+		t.Fatalf("GetInEdgesByNodeIDs([\"\"]) returned %d entries", len(got))
 	}
 }

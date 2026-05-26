@@ -895,6 +895,56 @@ func (s *Store) GetInEdges(nodeID string) []*graph.Edge {
 	return rowsToEdges(rows)
 }
 
+// GetOutEdgesByNodeIDs returns a map id→outgoing edges for every input
+// id. One Cypher round-trip drives a `WHERE a.id IN $ids` match — the
+// rerank hot path collapses ~30 per-candidate GetOutEdges calls into
+// this single batched query (15ms cgo round-trip × 30 = ~450ms saved
+// per search_symbols on ladybug). Missing nodes are absent from the
+// returned map; empty input returns nil.
+func (s *Store) GetOutEdgesByNodeIDs(ids []string) map[string][]*graph.Edge {
+	if len(ids) == 0 {
+		return nil
+	}
+	uniq := dedupeNonEmpty(ids)
+	if len(uniq) == 0 {
+		return nil
+	}
+	const q = `MATCH (a:Node)-[e:Edge]->(b:Node) WHERE a.id IN $ids RETURN ` + edgeReturnCols
+	rows := s.querySelect(q, map[string]any{"ids": stringSliceToAny(uniq)})
+	out := make(map[string][]*graph.Edge, len(uniq))
+	for _, r := range rows {
+		e := rowToEdge(r)
+		if e == nil {
+			continue
+		}
+		out[e.From] = append(out[e.From], e)
+	}
+	return out
+}
+
+// GetInEdgesByNodeIDs is the inbound sibling of GetOutEdgesByNodeIDs.
+// See that doc-comment for the contract.
+func (s *Store) GetInEdgesByNodeIDs(ids []string) map[string][]*graph.Edge {
+	if len(ids) == 0 {
+		return nil
+	}
+	uniq := dedupeNonEmpty(ids)
+	if len(uniq) == 0 {
+		return nil
+	}
+	const q = `MATCH (a:Node)-[e:Edge]->(b:Node) WHERE b.id IN $ids RETURN ` + edgeReturnCols
+	rows := s.querySelect(q, map[string]any{"ids": stringSliceToAny(uniq)})
+	out := make(map[string][]*graph.Edge, len(uniq))
+	for _, r := range rows {
+		e := rowToEdge(r)
+		if e == nil {
+			continue
+		}
+		out[e.To] = append(out[e.To], e)
+	}
+	return out
+}
+
 // AllNodes materialises every node into a slice.
 func (s *Store) AllNodes() []*graph.Node {
 	const q = `MATCH (n:Node) RETURN ` + nodeReturnCols

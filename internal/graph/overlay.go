@@ -525,6 +525,113 @@ func (v *OverlaidView) GetInEdges(nodeID string) []*Edge {
 	return out
 }
 
+// GetOutEdgesByNodeIDs returns the overlay-aware outgoing-edge map for
+// every input id. Overlay-owned ids short-circuit to the per-session
+// layer; the remainder fans out as a single batched lookup against
+// the base store. Output mirrors GetOutEdges's per-id semantics
+// (target-side overlay deletions filtered out), but in one cgo
+// round-trip per direction instead of N.
+func (v *OverlaidView) GetOutEdgesByNodeIDs(ids []string) map[string][]*Edge {
+	if len(ids) == 0 {
+		return nil
+	}
+	out := make(map[string][]*Edge, len(ids))
+	baseIDs := ids[:0:0]
+	seen := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		if id == "" {
+			continue
+		}
+		if _, dup := seen[id]; dup {
+			continue
+		}
+		seen[id] = struct{}{}
+		if v.layer != nil && v.nodeBelongsToOverlay(id) {
+			src := v.layer.outEdges[id]
+			cp := make([]*Edge, len(src))
+			copy(cp, src)
+			out[id] = cp
+			continue
+		}
+		baseIDs = append(baseIDs, id)
+	}
+	if len(baseIDs) > 0 && v.base != nil {
+		base := v.base.GetOutEdgesByNodeIDs(baseIDs)
+		for id, edges := range base {
+			if v.layer == nil {
+				out[id] = edges
+				continue
+			}
+			filtered := edges[:0:0]
+			for _, e := range edges {
+				if v.layer.HasFile(IDFile(e.To)) {
+					if v.layer.nodeByID[e.To] == nil {
+						continue // target deleted in overlay
+					}
+				}
+				filtered = append(filtered, e)
+			}
+			out[id] = filtered
+		}
+	}
+	return out
+}
+
+// GetInEdgesByNodeIDs is the inbound sibling of GetOutEdgesByNodeIDs.
+// Merges base in-edges (filtered to drop edges sourced in overlaid
+// files) with overlay-introduced in-edges for each input id, all in a
+// single batched base round-trip.
+func (v *OverlaidView) GetInEdgesByNodeIDs(ids []string) map[string][]*Edge {
+	if len(ids) == 0 {
+		return nil
+	}
+	out := make(map[string][]*Edge, len(ids))
+	seen := make(map[string]struct{}, len(ids))
+	uniq := ids[:0:0]
+	for _, id := range ids {
+		if id == "" {
+			continue
+		}
+		if _, dup := seen[id]; dup {
+			continue
+		}
+		seen[id] = struct{}{}
+		uniq = append(uniq, id)
+	}
+	if len(uniq) == 0 {
+		return out
+	}
+	if v.base != nil {
+		base := v.base.GetInEdgesByNodeIDs(uniq)
+		for _, id := range uniq {
+			edges := base[id]
+			if v.layer == nil {
+				out[id] = edges
+				continue
+			}
+			filtered := edges[:0:0]
+			for _, e := range edges {
+				if v.layer.HasFile(IDFile(e.From)) {
+					continue // source is overlaid — overlay's version wins
+				}
+				if v.layer.HasFile(IDFile(e.To)) && v.layer.nodeByID[e.To] == nil {
+					continue // target was deleted by overlay
+				}
+				filtered = append(filtered, e)
+			}
+			out[id] = filtered
+		}
+	}
+	if v.layer != nil {
+		for _, id := range uniq {
+			if extras := v.layer.inEdges[id]; len(extras) > 0 {
+				out[id] = append(out[id], extras...)
+			}
+		}
+	}
+	return out
+}
+
 // AllNodes returns base's nodes minus nodes in overlaid files, plus
 // every node the overlay introduced. Bulk-read consumers (analyzers,
 // search reindex, snapshot export) get an overlay-consistent view

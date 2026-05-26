@@ -39,6 +39,19 @@ type Reader interface {
 	GetOutEdges(nodeID string) []*Edge
 	GetInEdges(nodeID string) []*Edge
 
+	// GetInEdgesByNodeIDs / GetOutEdgesByNodeIDs are the batched
+	// siblings of GetInEdges / GetOutEdges. Disk-backed stores collapse
+	// N per-id Cypher queries into one bulk MATCH over `WHERE id IN
+	// $ids`; the in-memory backend forwards to per-id walks (no
+	// concurrency win — same algorithmic cost as an inline loop). On
+	// the rerank hot path this drops ~150 cgo round-trips per
+	// search_symbols call down to ~4 (prepare collects every
+	// candidate's ids and fans them out in one inbound + one outbound
+	// batch). Missing nodes get nil slices in the returned map so
+	// callers can `for _, e := range m[id]` without an ok-check.
+	GetInEdgesByNodeIDs(ids []string) map[string][]*Edge
+	GetOutEdgesByNodeIDs(ids []string) map[string][]*Edge
+
 	// Bulk reads — used by analyzers (hotspots, cycles, dead code,
 	// communities, …) and by the embedded query engine's whole-graph
 	// passes.

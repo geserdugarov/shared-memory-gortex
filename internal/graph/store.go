@@ -95,6 +95,16 @@ type Store interface {
 	GetOutEdges(nodeID string) []*Edge
 	GetInEdges(nodeID string) []*Edge
 
+	// GetInEdgesByNodeIDs / GetOutEdgesByNodeIDs batch the per-node
+	// edge fan-out into a single backend round-trip. The rerank
+	// pipeline calls these once per Rerank() to materialise every
+	// candidate's incoming + outgoing edges in two cgo round-trips
+	// instead of 6N per-candidate calls. Missing IDs are absent from
+	// the returned map (callers can index without an ok-check via the
+	// nil-slice semantics of map[k][]*Edge — range over nil is a no-op).
+	GetInEdgesByNodeIDs(ids []string) map[string][]*Edge
+	GetOutEdgesByNodeIDs(ids []string) map[string][]*Edge
+
 	// GetRepoEdges returns every edge whose source node has the given
 	// RepoPrefix. Equivalent to GetRepoNodes(r) followed by
 	// GetOutEdges(n.ID) for every n, but executes as a single backend

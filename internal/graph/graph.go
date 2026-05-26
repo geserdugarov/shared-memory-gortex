@@ -1204,6 +1204,48 @@ func (g *Graph) GetInEdges(nodeID string) []*Edge {
 	return out
 }
 
+// GetOutEdgesByNodeIDs returns a map id→outgoing edges for every input
+// id. The in-memory backend loops the existing GetOutEdges — cost
+// matches a hand-written loop in the caller. The value of the batched
+// API lives in disk backends, where it collapses N point lookups into
+// one bulk Cypher query. Empty input returns nil; duplicate ids are
+// deduped naturally. Missing ids are absent from the returned map.
+func (g *Graph) GetOutEdgesByNodeIDs(ids []string) map[string][]*Edge {
+	if len(ids) == 0 {
+		return nil
+	}
+	out := make(map[string][]*Edge, len(ids))
+	for _, id := range ids {
+		if id == "" {
+			continue
+		}
+		if _, ok := out[id]; ok {
+			continue
+		}
+		out[id] = g.GetOutEdges(id)
+	}
+	return out
+}
+
+// GetInEdgesByNodeIDs is the inbound sibling of GetOutEdgesByNodeIDs.
+// See that doc-comment for the contract.
+func (g *Graph) GetInEdgesByNodeIDs(ids []string) map[string][]*Edge {
+	if len(ids) == 0 {
+		return nil
+	}
+	out := make(map[string][]*Edge, len(ids))
+	for _, id := range ids {
+		if id == "" {
+			continue
+		}
+		if _, ok := out[id]; ok {
+			continue
+		}
+		out[id] = g.GetInEdges(id)
+	}
+	return out
+}
+
 // EvictFile removes all nodes and edges belonging to the given file
 // path. Nodes for one file can span many shards (different IDs hash
 // differently), so we lock all shards for this multi-shard operation.

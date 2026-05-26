@@ -97,25 +97,45 @@ func (s *Server) handleGetCouplingMetrics(ctx context.Context, req mcp.CallToolR
 		stats[u] = &units{ca: map[string]bool{}, ce: map[string]bool{}}
 	}
 
-	for _, e := range s.graph.AllEdges() {
-		if !isCouplingEdge(e.Kind) {
-			continue
-		}
-		fromUnit, fromOK := nodeToUnit[e.From]
-		toUnit, toOK := nodeToUnit[e.To]
-		if !fromOK || !toOK {
-			continue
-		}
-		if fromUnit == toUnit {
-			stats[fromUnit].internal++
+	// Iterate the coupling-edge buckets directly via EdgesByKind
+	// instead of AllEdges() + a Go-side filter — Ladybug's
+	// EdgesByKind runs one indexed Cypher per kind and ships only
+	// the matching rows. Structural edges (defines / member_of /
+	// contains-file-of-symbol) which dominate edge counts on large
+	// repos drop out before they cross cgo. Order is fixed so the
+	// loop body stays trivially identical to the legacy AllEdges
+	// branch.
+	for _, k := range []graph.EdgeKind{
+		graph.EdgeCalls,
+		graph.EdgeImports,
+		graph.EdgeImplements,
+		graph.EdgeExtends,
+		graph.EdgeReferences,
+		graph.EdgeInstantiates,
+		graph.EdgeCrossRepoCalls,
+		graph.EdgeCrossRepoImplements,
+		graph.EdgeCrossRepoExtends,
+	} {
+		for e := range s.graph.EdgesByKind(k) {
+			if e == nil {
+				continue
+			}
+			fromUnit, fromOK := nodeToUnit[e.From]
+			toUnit, toOK := nodeToUnit[e.To]
+			if !fromOK || !toOK {
+				continue
+			}
+			if fromUnit == toUnit {
+				stats[fromUnit].internal++
+				stats[fromUnit].total++
+				continue
+			}
+			// Cross-unit: counts as ce for the source unit, ca for the target.
+			stats[fromUnit].ce[toUnit] = true
 			stats[fromUnit].total++
-			continue
+			stats[toUnit].ca[fromUnit] = true
+			stats[toUnit].total++
 		}
-		// Cross-unit: counts as ce for the source unit, ca for the target.
-		stats[fromUnit].ce[toUnit] = true
-		stats[fromUnit].total++
-		stats[toUnit].ca[fromUnit] = true
-		stats[toUnit].total++
 	}
 
 	rows := make([]couplingRow, 0, len(stats))

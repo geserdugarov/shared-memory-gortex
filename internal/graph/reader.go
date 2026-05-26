@@ -21,6 +21,14 @@ type Reader interface {
 	GetNode(id string) *Node
 	GetNodeByQualName(qualName string) *Node
 	FindNodesByName(name string) []*Node
+	// FindNodesByNameContaining returns nodes whose Name (case-
+	// insensitive) contains substr. The filter is pushed into the
+	// backend so only matching rows cross cgo on disk backends;
+	// the search hot path's substring fallback uses this instead of
+	// the old AllNodes()-then-filter pattern (which materialised the
+	// whole node set per call and didn't scale). limit caps the
+	// result; 0 means "no limit".
+	FindNodesByNameContaining(substr string, limit int) []*Node
 
 	// GetNodesByIDs is the batched sibling of GetNode. Disk-backed
 	// stores (Ladybug) collapse N individual point lookups into a

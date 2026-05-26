@@ -582,26 +582,30 @@ func (e *Engine) gatherBackendCandidates(query string, limit int, timings *Searc
 
 	// Substring fallback for remaining slots — strictly TextRank=-1
 	// (the rerank pipeline still considers them via signature/recency
-	// signals, but BM25 can't speak to them). Matches are collected,
-	// sorted by ID, then truncated, so the candidate set does not
-	// depend on the randomised map-iteration order of AllNodes().
+	// signals, but BM25 can't speak to them). The store-side
+	// FindNodesByNameContaining pushes the predicate into the backend
+	// index instead of materialising every node over cgo and filtering
+	// in Go — the old AllNodes loop is broken at Linux-kernel scale
+	// (10M+ symbols, hundreds of MB of nodes per query). We over-fetch
+	// by a small slack factor so dedup against existing cands still
+	// leaves room to fill `limit`.
 	if len(cands) < limit {
 		fallbackStart := time.Now()
-		lower := strings.ToLower(query)
-		var subMatches []*graph.Node
-		for _, n := range e.g.AllNodes() {
+		fetch := (limit - len(cands)) * 2
+		if fetch < limit {
+			fetch = limit
+		}
+		subMatches := e.g.FindNodesByNameContaining(query, fetch)
+		// Stable ordering — backends may return in catalog order, which
+		// is not a meaningful relevance signal here.
+		sort.Slice(subMatches, func(i, j int) bool { return subMatches[i].ID < subMatches[j].ID })
+		for _, n := range subMatches {
 			if n.Kind == graph.KindFile || n.Kind == graph.KindImport {
 				continue
 			}
 			if _, seen := idx[n.ID]; seen {
 				continue
 			}
-			if strings.Contains(strings.ToLower(n.Name), lower) {
-				subMatches = append(subMatches, n)
-			}
-		}
-		sort.Slice(subMatches, func(i, j int) bool { return subMatches[i].ID < subMatches[j].ID })
-		for _, n := range subMatches {
 			idx[n.ID] = len(cands)
 			cands = append(cands, &rerank.Candidate{Node: n, TextRank: -1, VectorRank: -1})
 			if len(cands) >= limit {

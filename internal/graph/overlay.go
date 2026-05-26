@@ -422,6 +422,60 @@ func (v *OverlaidView) FindNodesByName(name string) []*Node {
 	return out
 }
 
+// FindNodesByNameContaining merges overlay-touched name hits with the
+// base result, then re-applies the per-overlay-file masking the same
+// way FindNodesByName does. Order is overlay-first, then base; the
+// limit caps the merged total. Empty substr or both layers nil
+// returns nil.
+func (v *OverlaidView) FindNodesByNameContaining(substr string, limit int) []*Node {
+	if substr == "" {
+		return nil
+	}
+	needle := strings.ToLower(substr)
+	var out []*Node
+	// Overlay-side: walk the layer's nodesByName index — the same
+	// bucket FindNodesByName reads from — and accept any name whose
+	// lowercase form contains the needle.
+	if v.layer != nil {
+		for name, bucket := range v.layer.nodesByName {
+			if strings.Contains(strings.ToLower(name), needle) {
+				out = append(out, bucket...)
+				if limit > 0 && len(out) >= limit {
+					return out[:limit]
+				}
+			}
+		}
+	}
+	if v.base == nil {
+		return out
+	}
+	// Base-side: fetch with an inflated limit so overlay-mask drops
+	// don't leave a short page. Then re-apply the same overlaid-file
+	// + name-removed mask FindNodesByName uses.
+	fetch := limit
+	if fetch > 0 {
+		fetch *= 2
+	}
+	for _, n := range v.base.FindNodesByNameContaining(substr, fetch) {
+		if v.layer != nil {
+			if v.layer.HasFile(IDFile(n.ID)) {
+				continue
+			}
+			if v.layer.nameRemoved[n.Name] != nil && v.layer.nameRemoved[n.Name][n.ID] {
+				continue
+			}
+		}
+		out = append(out, n)
+		if limit > 0 && len(out) >= limit {
+			return out[:limit]
+		}
+	}
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
+	}
+	return out
+}
+
 // GetFileNodes: if the path is overlaid, return overlay's nodes
 // (empty for tombstones). Otherwise pass through to base.
 func (v *OverlaidView) GetFileNodes(filePath string) []*Node {

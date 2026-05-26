@@ -46,6 +46,7 @@ func RunConformance(t *testing.T, factory Factory) {
 	t.Run("AllNodesAndEdges", func(t *testing.T) { testAllNodesAndEdges(t, factory) })
 	t.Run("FindNodesByName", func(t *testing.T) { testFindNodesByName(t, factory) })
 	t.Run("FindNodesByNameInRepo", func(t *testing.T) { testFindNodesByNameInRepo(t, factory) })
+	t.Run("FindNodesByNameContaining", func(t *testing.T) { testFindNodesByNameContaining(t, factory) })
 	t.Run("GetFileNodes", func(t *testing.T) { testGetFileNodes(t, factory) })
 	t.Run("GetRepoNodes", func(t *testing.T) { testGetRepoNodes(t, factory) })
 	t.Run("GetRepoEdges", func(t *testing.T) { testGetRepoEdges(t, factory) })
@@ -369,6 +370,46 @@ func testFindNodesByNameInRepo(t *testing.T, factory Factory) {
 	want := []string{"r1/a.go::Foo"}
 	if fmt.Sprint(got) != fmt.Sprint(want) {
 		t.Fatalf("FindNodesByNameInRepo(Foo, r1) = %v, want %v", got, want)
+	}
+}
+
+func testFindNodesByNameContaining(t *testing.T, factory Factory) {
+	t.Helper()
+	s := factory(t)
+	// Three "log"-containing names + one unrelated.
+	s.AddNode(mkNode("a.go::Login", "Login", "a.go", graph.KindFunction))
+	s.AddNode(mkNode("b.go::LoginHandler", "LoginHandler", "b.go", graph.KindFunction))
+	s.AddNode(mkNode("c.go::Logout", "Logout", "c.go", graph.KindFunction))
+	s.AddNode(mkNode("d.go::Unrelated", "Unrelated", "d.go", graph.KindFunction))
+
+	// Case-insensitive substring match should return exactly the 3
+	// "log"-bearing nodes.
+	got := sortNodeIDs(s.FindNodesByNameContaining("log", 10))
+	want := []string{"a.go::Login", "b.go::LoginHandler", "c.go::Logout"}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("FindNodesByNameContaining(log, 10) = %v, want %v", got, want)
+	}
+
+	// Mixed-case query — must still match (case-insensitive).
+	gotUpper := sortNodeIDs(s.FindNodesByNameContaining("LOG", 10))
+	if fmt.Sprint(gotUpper) != fmt.Sprint(want) {
+		t.Fatalf("FindNodesByNameContaining(LOG, 10) = %v, want %v", gotUpper, want)
+	}
+
+	// Limit is honoured. Asking for 2 must return at most 2.
+	gotLimited := s.FindNodesByNameContaining("log", 2)
+	if len(gotLimited) != 2 {
+		t.Fatalf("FindNodesByNameContaining(log, 2) returned %d, want 2", len(gotLimited))
+	}
+
+	// Empty needle returns nothing — never the whole graph.
+	if got := s.FindNodesByNameContaining("", 10); len(got) != 0 {
+		t.Fatalf("FindNodesByNameContaining(\"\") returned %d, want 0", len(got))
+	}
+
+	// No match — empty slice.
+	if got := s.FindNodesByNameContaining("nonexistent_substring_xyz", 10); len(got) != 0 {
+		t.Fatalf("FindNodesByNameContaining(no-match) returned %d, want 0", len(got))
 	}
 }
 

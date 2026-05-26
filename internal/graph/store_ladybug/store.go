@@ -791,6 +791,37 @@ func (s *Store) FindNodesByNameInRepo(name, repoPrefix string) []*graph.Node {
 	return rowsToNodes(rows)
 }
 
+// FindNodesByNameContaining pushes the case-insensitive substring
+// filter into a single Cypher MATCH so only matching rows cross the
+// cgo boundary. Replaces the pre-existing search-substring fallback
+// pattern of AllNodes()-then-filter (which materialised the entire
+// node table per call — 68k rows for gortex's own graph; orders of
+// magnitude more on Linux-kernel-sized indexes).
+//
+// Ladybug's CONTAINS is not backed by an index here, so the cost is
+// still a server-side scan — but the row count crossing cgo is bound
+// to the matching subset rather than every node in the graph, and the
+// scan happens inside the engine's hot path rather than over a Go
+// for-loop. limit caps the result; 0 means "no limit".
+func (s *Store) FindNodesByNameContaining(substr string, limit int) []*graph.Node {
+	if substr == "" {
+		return nil
+	}
+	// LOWER(...) on both sides keeps the match case-insensitive; the
+	// graph treats `Login` / `login` as distinct names but a substring
+	// fallback wants to surface both. ToLower in Go before the bind so
+	// the engine never has to call LOWER on the literal.
+	needle := strings.ToLower(substr)
+	if limit > 0 {
+		const q = `MATCH (n:Node) WHERE LOWER(n.name) CONTAINS $q RETURN ` + nodeReturnCols + ` LIMIT $k`
+		rows := s.querySelect(q, map[string]any{"q": needle, "k": int64(limit)})
+		return rowsToNodes(rows)
+	}
+	const q = `MATCH (n:Node) WHERE LOWER(n.name) CONTAINS $q RETURN ` + nodeReturnCols
+	rows := s.querySelect(q, map[string]any{"q": needle})
+	return rowsToNodes(rows)
+}
+
 // GetFileNodes returns every node anchored to filePath.
 func (s *Store) GetFileNodes(filePath string) []*graph.Node {
 	const q = `MATCH (n:Node {file_path: $f}) RETURN ` + nodeReturnCols

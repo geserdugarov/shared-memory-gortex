@@ -1169,6 +1169,40 @@ func (g *Graph) FindNodesByNameInRepo(name, repoPrefix string) []*Node {
 	return out
 }
 
+// FindNodesByNameContaining returns nodes whose Name (case-insensitive)
+// contains substr. The in-memory backend has no name-substring index,
+// so this is a single pass over the byName buckets (which already group
+// nodes by exact name — the same allocation we'd pay for one FindNodesByName
+// call per distinct name). limit caps the slice; 0 means "no limit".
+//
+// Stable order is the caller's responsibility — bucket iteration is
+// deterministic per shard but cross-shard order isn't fixed.
+func (g *Graph) FindNodesByNameContaining(substr string, limit int) []*Node {
+	if substr == "" {
+		return nil
+	}
+	needle := strings.ToLower(substr)
+	var out []*Node
+	for _, s := range g.shards {
+		s.mu.RLock()
+		for name, bucket := range s.byName {
+			if !strings.Contains(strings.ToLower(name), needle) {
+				continue
+			}
+			out = append(out, bucket...)
+			if limit > 0 && len(out) >= limit {
+				s.mu.RUnlock()
+				return out[:limit]
+			}
+		}
+		s.mu.RUnlock()
+	}
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
+	}
+	return out
+}
+
 // GetFileNodes returns all nodes defined in the given file.
 func (g *Graph) GetFileNodes(filePath string) []*Node {
 	var out []*Node

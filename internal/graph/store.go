@@ -87,6 +87,17 @@ type Store interface {
 
 	FindNodesByName(name string) []*Node
 	FindNodesByNameInRepo(name, repoPrefix string) []*Node
+	// FindNodesByNameContaining returns nodes whose Name (case-
+	// insensitive) contains the given substring. The implementation
+	// pushes the filter into the backend so only matching rows cross
+	// the cgo boundary — the old search-substring fallback's
+	// AllNodes()-then-filter pattern materialised the whole node set
+	// per query and breaks at Linux-kernel scale (10M+ symbols).
+	// limit caps the result set so a very common substring can't blow
+	// up memory; pass 0 for "no limit" (caller's responsibility to
+	// handle). The order is implementation-defined — callers that
+	// need deterministic output sort the result.
+	FindNodesByNameContaining(substr string, limit int) []*Node
 	GetFileNodes(filePath string) []*Node
 	GetRepoNodes(repoPrefix string) []*Node
 

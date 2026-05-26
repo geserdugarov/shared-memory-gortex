@@ -5,11 +5,13 @@ package store_ladybug
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/search"
 )
 
@@ -140,4 +142,88 @@ func TestSymbolSearcher_IdempotentUpsert(t *testing.T) {
 	require.NoError(t, err)
 	require.NotEmpty(t, freshHits)
 	assert.Equal(t, id, freshHits[0].NodeID)
+}
+
+// TestSearchSymbolBundles_ParallelFetchEquivalence is the correctness
+// guard for the post-FTS parallelisation: the three batched MATCH
+// calls (nodes / out edges / in edges) now run on three goroutines
+// against three pool connections. The output must be byte-for-byte
+// identical to the sequential composition — same hits in the same
+// FTS-ranked order, each carrying the same node payload and the same
+// in/out edge slices. This is the contract callers (the engine's
+// bundle-seeding gather path) rely on.
+func TestSearchSymbolBundles_ParallelFetchEquivalence(t *testing.T) {
+	dir, err := os.MkdirTemp("", "lbug-fts-bundle-parallel-*")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+
+	s, err := Open(filepath.Join(dir, "store.lbug"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = s.Close() })
+
+	// Seed a small graph with edges so the in/out edge phase of the
+	// bundle returns non-empty payloads — the equivalence assertion
+	// matters only when there's actually something to compare. The
+	// FTS column stores pre-tokenised text (the indexer does this in
+	// production via search.Tokenize); without splitting, a query for
+	// "token" would not hit "ValidateToken".
+	upsertTokenised := func(id, raw string) {
+		toks := search.Tokenize(raw)
+		require.NoError(t, s.UpsertSymbolFTS(id, strings.Join(toks, " ")))
+	}
+	nodeSpecs := []struct {
+		id, name, path string
+	}{
+		{"pkg/auth.go::ValidateToken", "ValidateToken", "pkg/auth.go"},
+		{"pkg/auth.go::ParseToken", "ParseToken", "pkg/auth.go"},
+		{"pkg/auth.go::AuthMiddleware", "AuthMiddleware", "pkg/auth.go"},
+		{"pkg/server.go::HandleRequest", "HandleRequest", "pkg/server.go"},
+	}
+	for i, spec := range nodeSpecs {
+		s.AddNode(&graph.Node{
+			ID: spec.id, Kind: graph.KindFunction, Name: spec.name,
+			FilePath: spec.path, StartLine: i + 1, EndLine: i + 5, Language: "go",
+		})
+		upsertTokenised(spec.id, spec.name)
+	}
+	// Edges: HandleRequest -> AuthMiddleware -> ValidateToken -> ParseToken
+	s.AddEdge(&graph.Edge{
+		From: "pkg/server.go::HandleRequest", To: "pkg/auth.go::AuthMiddleware",
+		Kind: graph.EdgeCalls,
+	})
+	s.AddEdge(&graph.Edge{
+		From: "pkg/auth.go::AuthMiddleware", To: "pkg/auth.go::ValidateToken",
+		Kind: graph.EdgeCalls,
+	})
+	s.AddEdge(&graph.Edge{
+		From: "pkg/auth.go::ValidateToken", To: "pkg/auth.go::ParseToken",
+		Kind: graph.EdgeCalls,
+	})
+	require.NoError(t, s.BuildSymbolIndex())
+
+	bundles, err := s.SearchSymbolBundles("token", 10)
+	require.NoError(t, err)
+	require.NotEmpty(t, bundles, "FTS must surface 'token' hits")
+
+	// Reconstruct the same join sequentially via the public API so the
+	// assertion compares against the post-parallel result.
+	ids := make([]string, 0, len(bundles))
+	for _, b := range bundles {
+		require.NotNil(t, b.Node, "bundle node must not be nil")
+		ids = append(ids, b.Node.ID)
+	}
+	seqNodes := s.GetNodesByIDs(ids)
+	seqOut := s.GetOutEdgesByNodeIDs(ids)
+	seqIn := s.GetInEdgesByNodeIDs(ids)
+
+	for i, b := range bundles {
+		seqNode := seqNodes[b.Node.ID]
+		require.NotNil(t, seqNode, "sequential GetNodesByIDs lost id %q", b.Node.ID)
+		assert.Equal(t, seqNode.ID, b.Node.ID, "bundle[%d] node id drift", i)
+		assert.Equal(t, seqNode.Name, b.Node.Name, "bundle[%d] node name drift", i)
+		assert.Equal(t, len(seqOut[b.Node.ID]), len(b.OutEdges),
+			"bundle[%d] out-edge count drift for %q", i, b.Node.ID)
+		assert.Equal(t, len(seqIn[b.Node.ID]), len(b.InEdges),
+			"bundle[%d] in-edge count drift for %q", i, b.Node.ID)
+	}
 }

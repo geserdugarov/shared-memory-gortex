@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 
 	"github.com/zzet/gortex/internal/graph"
@@ -314,11 +315,16 @@ LIMIT $k`
 // its own batched fetch.
 //
 // Implementation cost: one FTS Cypher + three batched MATCH-by-ids
-// Cypher calls (nodes, outEdges, inEdges) — four cgo round-trips
-// total. The prior search path was 1 FTS + 1 nodes-by-ids + 2 edge
-// fetches inside the rerank prepare (also 4 cgo, but they live in
-// separate timing phases so the cost compounds across the engine
-// → rerank boundary). Probe (see bench/ladybug-bundle-probe):
+// Cypher calls (nodes, outEdges, inEdges). The three batched MATCH
+// calls fan out across goroutines via the connection pool — each
+// goroutine pulls its own pool Connection (cgo-safe; see connpool.go)
+// so the post-FTS phase is bounded by max() of the three round-trips
+// instead of their sum. Effective cgo round-trips: 1 FTS + 1
+// concurrent batch == 2 sequential phases. The prior search path was
+// 1 FTS + 1 nodes-by-ids + 2 edge fetches inside the rerank prepare
+// (also 4 cgo, but they live in separate timing phases so the cost
+// compounds across the engine → rerank boundary). Probe (see
+// bench/ladybug-bundle-probe):
 //
 //	NewServer (30 hits)         med=87.4ms
 //	handleStreamable (30 hits)  med=89.5ms
@@ -400,16 +406,37 @@ LIMIT $k`
 		return nil, nil
 	}
 
-	// Phase 2: batched node materialise.
-	nodes := s.GetNodesByIDs(ids)
-
-	// Phase 3 + 4: batched in/out edge fetch keyed on the same ids.
-	// These two are siblings of GetNodesByIDs in terms of cgo cost;
-	// the bundle's value is that the engine sees a single result it
-	// can hand straight to the rerank pipeline without round-tripping
-	// back through Graph for prepare's edge fetch.
-	out := s.GetOutEdgesByNodeIDs(ids)
-	in := s.GetInEdgesByNodeIDs(ids)
+	// Phases 2-4: batched node materialise + in/out edge fetch keyed
+	// on the same ids. The three calls have no data dependency between
+	// each other (they all read from `ids`) so we fan them out across
+	// three goroutines. Each call goes through executeOrQuery, which
+	// pulls its own pool connection — Ladybug's go binding panics on
+	// two goroutines sharing a single *lbug.Connection, so the pool
+	// fan-out is what makes this safe (see connpool.go).
+	//
+	// Effective wall-clock drops from sum(nodes,out,in) to max(nodes,
+	// out,in); on a typical bundle (~30 ids) that collapses three
+	// ~25-30 ms cgo round-trips into one ~30 ms phase.
+	var (
+		nodes map[string]*graph.Node
+		out   map[string][]*graph.Edge
+		in    map[string][]*graph.Edge
+		wg    sync.WaitGroup
+	)
+	wg.Add(3)
+	go func() {
+		defer wg.Done()
+		nodes = s.GetNodesByIDs(ids)
+	}()
+	go func() {
+		defer wg.Done()
+		out = s.GetOutEdgesByNodeIDs(ids)
+	}()
+	go func() {
+		defer wg.Done()
+		in = s.GetInEdgesByNodeIDs(ids)
+	}()
+	wg.Wait()
 
 	bundles := make([]graph.SymbolBundle, 0, len(ids))
 	for _, id := range ids {

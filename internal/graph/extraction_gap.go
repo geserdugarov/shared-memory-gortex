@@ -61,6 +61,24 @@ var usageEdgeKinds = map[EdgeKind]bool{
 	EdgeTests:        true,
 }
 
+// UsageInboundEdgeKinds returns the canonical list of incoming edge
+// kinds that classify a symbol as "used" by ClassifyZeroEdge. Exposed
+// for capability callers (NodeDegreeAggregator) that need to mirror
+// the in-graph usage filter server-side. Order is stable so the slice
+// is safe to pass directly to a Cypher parameter binding.
+func UsageInboundEdgeKinds() []EdgeKind {
+	return []EdgeKind{
+		EdgeCalls,
+		EdgeReferences,
+		EdgeInstantiates,
+		EdgeImplements,
+		EdgeExtends,
+		EdgeReads,
+		EdgeWrites,
+		EdgeTests,
+	}
+}
+
 // ClassifyZeroEdge inspects a symbol's incoming and outgoing edges and
 // returns how an empty usage/caller/impact query for it should be read.
 //

@@ -141,18 +141,27 @@ func (s *Server) mineCoChange() {
 // edges already in the graph. Returns true when at least one edge was
 // found — the signal that an enriched snapshot is loaded and no fresh
 // git mine is needed.
+//
+// EdgesByKind streams only the CoChange edges; the endpoint nodes are
+// fetched in one batched GetNodesByIDs call instead of two GetNode
+// round-trips per edge. On disk backends (Ladybug) that drops the
+// whole-graph AllEdges materialisation plus the per-edge cgo
+// GetNode trips that loaded the file paths.
 func (s *Server) coChangeFromEdges(scores map[string]map[string]float64, counts map[string]map[string]int) bool {
-	found := false
-	for _, e := range s.graph.AllEdges() {
-		if e.Kind != graph.EdgeCoChange {
+	// First pass: collect CoChange edges + the set of node IDs they
+	// reference. Both can stream from EdgesByKind in one Cypher
+	// round-trip on disk backends.
+	type ccEdge struct {
+		from, to string
+		score    float64
+		count    int
+	}
+	var edges []ccEdge
+	idSet := make(map[string]struct{})
+	for e := range s.graph.EdgesByKind(graph.EdgeCoChange) {
+		if e == nil {
 			continue
 		}
-		from := s.graph.GetNode(e.From)
-		to := s.graph.GetNode(e.To)
-		if from == nil || to == nil {
-			continue
-		}
-		found = true
 		score := e.Confidence
 		if e.Meta != nil {
 			if v, ok := e.Meta["score"].(float64); ok {
@@ -170,9 +179,35 @@ func (s *Server) coChangeFromEdges(scores map[string]map[string]float64, counts 
 				count = int(v)
 			}
 		}
-		addCoChangeLink(scores, counts, from.FilePath, to.FilePath, score, count)
+		edges = append(edges, ccEdge{from: e.From, to: e.To, score: score, count: count})
+		idSet[e.From] = struct{}{}
+		idSet[e.To] = struct{}{}
 	}
-	return found
+	if len(edges) == 0 {
+		return false
+	}
+
+	// Batched endpoint resolution — one Cypher WHERE id IN $ids vs.
+	// 2 * len(edges) per-row GetNode trips. On a workspace with
+	// thousands of co-change edges this is the bulk of the latency.
+	ids := make([]string, 0, len(idSet))
+	for id := range idSet {
+		ids = append(ids, id)
+	}
+	nodes := s.graph.GetNodesByIDs(ids)
+
+	for _, e := range edges {
+		from, ok := nodes[e.from]
+		if !ok || from == nil {
+			continue
+		}
+		to, ok := nodes[e.to]
+		if !ok || to == nil {
+			continue
+		}
+		addCoChangeLink(scores, counts, from.FilePath, to.FilePath, e.score, e.count)
+	}
+	return true
 }
 
 // addCoChangeLink records one directed co-change relationship.

@@ -92,13 +92,29 @@ func ComputeBetweenness(g graph.Store) *BetweennessResult {
 	}
 	sort.Strings(ids)
 
-	// Forward adjacency over the call / reference subgraph.
+	// Forward adjacency over the call / reference subgraph. Streamed
+	// via EdgesByKinds when the backend implements the multi-kind
+	// scanner so the disk path runs one IN-list MATCH instead of
+	// materialising the full edge table over cgo; the legacy AllEdges
+	// pass was a ~286k row over cgo cost for a typical hotspots run.
 	adj := make(map[string][]string, n)
-	for _, e := range g.AllEdges() {
-		if e.Kind != graph.EdgeCalls && e.Kind != graph.EdgeReferences {
-			continue
+	betweennessKinds := []graph.EdgeKind{graph.EdgeCalls, graph.EdgeReferences}
+	if scan, ok := g.(graph.EdgesByKindsScanner); ok {
+		for e := range scan.EdgesByKinds(betweennessKinds) {
+			if e == nil {
+				continue
+			}
+			adj[e.From] = append(adj[e.From], e.To)
 		}
-		adj[e.From] = append(adj[e.From], e.To)
+	} else {
+		for _, kind := range betweennessKinds {
+			for e := range g.EdgesByKind(kind) {
+				if e == nil {
+					continue
+				}
+				adj[e.From] = append(adj[e.From], e.To)
+			}
+		}
 	}
 
 	score := make(map[string]float64, n)

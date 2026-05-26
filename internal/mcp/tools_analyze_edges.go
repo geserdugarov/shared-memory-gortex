@@ -969,58 +969,74 @@ func (s *Server) handleAnalyzeErrorSurface(ctx context.Context, req mcp.CallTool
 		Errors    []string `json:"errors"`
 		ErrorMsgs []string `json:"error_msgs,omitempty"`
 	}
-	byThrower := map[string]*throwerRow{}
-	for e := range edgesByKinds(s.graph, graph.EdgeThrows) {
-		if pathPrefix != "" && !strings.HasPrefix(e.FilePath, pathPrefix) {
-			continue
+	rows := make([]*throwerRow, 0)
+	if surfacer, ok := s.graph.(graph.ThrowerErrorSurfacer); ok {
+		// Server-side path: one Cypher GROUP BY for the per-thrower
+		// throws+targets dedup, one for the per-thrower error-msg
+		// attachment. No per-thrower GetOutEdges fanout.
+		for _, r := range surfacer.ThrowerErrorSurface(pathPrefix) {
+			row := &throwerRow{
+				Symbol:    r.ThrowerID,
+				File:      r.FilePath,
+				Line:      r.Line,
+				Throws:    r.Throws,
+				Errors:    append([]string(nil), r.ErrorTargets...),
+				ErrorMsgs: append([]string(nil), r.ErrorMsgs...),
+			}
+			sort.Strings(row.Errors)
+			sort.Strings(row.ErrorMsgs)
+			rows = append(rows, row)
 		}
-		row, ok := byThrower[e.From]
-		if !ok {
-			n := s.graph.GetNode(e.From)
-			file := e.FilePath
-			line := e.Line
-			if n != nil {
-				if file == "" {
-					file = n.FilePath
+	} else {
+		byThrower := map[string]*throwerRow{}
+		for e := range edgesByKinds(s.graph, graph.EdgeThrows) {
+			if pathPrefix != "" && !strings.HasPrefix(e.FilePath, pathPrefix) {
+				continue
+			}
+			row, ok := byThrower[e.From]
+			if !ok {
+				n := s.graph.GetNode(e.From)
+				file := e.FilePath
+				line := e.Line
+				if n != nil {
+					if file == "" {
+						file = n.FilePath
+					}
+					if line == 0 {
+						line = n.StartLine
+					}
 				}
-				if line == 0 {
-					line = n.StartLine
+				row = &throwerRow{Symbol: e.From, File: file, Line: line}
+				byThrower[e.From] = row
+			}
+			row.Throws++
+			row.Errors = appendUnique(row.Errors, e.To)
+		}
+		// For every thrower, also surface the error_msg KindString
+		// literals it emits. EdgeThrows targets error types; the
+		// data-side companion (errors.New("…") → string::error_msg::…)
+		// carries the literal message.
+		for thrower, row := range byThrower {
+			for _, e := range s.graph.GetOutEdges(thrower) {
+				if e == nil || e.Kind != graph.EdgeEmits {
+					continue
 				}
+				n := s.graph.GetNode(e.To)
+				if n == nil || n.Kind != graph.KindString {
+					continue
+				}
+				ctxLabel, _ := n.Meta["context"].(string)
+				if ctxLabel != "error_msg" {
+					continue
+				}
+				row.ErrorMsgs = appendUnique(row.ErrorMsgs, n.Name)
 			}
-			row = &throwerRow{Symbol: e.From, File: file, Line: line}
-			byThrower[e.From] = row
 		}
-		row.Throws++
-		row.Errors = appendUnique(row.Errors, e.To)
-	}
-	// For every thrower, also surface the error_msg KindString
-	// literals it emits. EdgeThrows targets error types; the
-	// data-side companion (errors.New("…") → string::error_msg::…)
-	// carries the literal message. Joining both gives an agent both
-	// "what error types propagate" and "what literal messages
-	// originate here" in one row.
-	for thrower, row := range byThrower {
-		for _, e := range s.graph.GetOutEdges(thrower) {
-			if e == nil || e.Kind != graph.EdgeEmits {
-				continue
-			}
-			n := s.graph.GetNode(e.To)
-			if n == nil || n.Kind != graph.KindString {
-				continue
-			}
-			ctxLabel, _ := n.Meta["context"].(string)
-			if ctxLabel != "error_msg" {
-				continue
-			}
-			row.ErrorMsgs = appendUnique(row.ErrorMsgs, n.Name)
+		for _, r := range byThrower {
+			sort.Strings(r.Errors)
+			sort.Strings(r.ErrorMsgs)
+			rows = append(rows, r)
 		}
-	}
-
-	rows := make([]*throwerRow, 0, len(byThrower))
-	for _, r := range byThrower {
-		sort.Strings(r.Errors)
-		sort.Strings(r.ErrorMsgs)
-		rows = append(rows, r)
 	}
 	sort.Slice(rows, func(i, j int) bool {
 		// Throwers with the most distinct error targets surface

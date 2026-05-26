@@ -33,12 +33,11 @@ func (s *Server) handleGetUntestedSymbols(ctx context.Context, req mcp.CallToolR
 
 	// Fan-in map for ranking — incoming calls/references only; imports and
 	// defines would flood every exported symbol with meaningless coverage.
-	fanIn := make(map[string]int)
-	for _, e := range s.graph.AllEdges() {
-		if e.Kind == graph.EdgeCalls || e.Kind == graph.EdgeReferences {
-			fanIn[e.To]++
-		}
-	}
+	// Backends that implement graph.InEdgeCounter serve this from one
+	// Cypher count(*) join — on Ladybug the legacy AllEdges() loop
+	// materialised every edge over cgo just to bucket two kinds. The
+	// fallback walks AllEdges() as before.
+	fanIn := collectFanInByKind(s.graph, []graph.EdgeKind{graph.EdgeCalls, graph.EdgeReferences})
 
 	type untestedEntry struct {
 		ID       string `json:"id"`
@@ -117,21 +116,26 @@ func (s *Server) handleGetUntestedSymbols(ctx context.Context, req mcp.CallToolR
 // Test files are detected via isTestFile so this works across languages
 // (Go _test.go, Python test_*.py, JS .spec.ts, etc.) without per-language
 // special-casing here.
+//
+// Seeds the frontier via NodesByKind(function|method) so disk backends
+// only materialise the two kinds rather than the whole node table.
+// The test-file predicate is a Go string heuristic — the backend has
+// no equivalent — so it stays in the post-filter.
 func reachableFromTests(g graph.Store) map[string]bool {
 	covered := make(map[string]bool)
 
-	// Seed: every function/method defined in a test file.
+	// Seed: every function/method defined in a test file. NodesByKind
+	// pushes the kind filter into the backend; isTestFile stays Go.
 	var frontier []string
-	for _, n := range g.AllNodes() {
-		if n.Kind != graph.KindFunction && n.Kind != graph.KindMethod {
-			continue
-		}
-		if !isTestFile(n.FilePath) {
-			continue
-		}
-		if !covered[n.ID] {
-			covered[n.ID] = true
-			frontier = append(frontier, n.ID)
+	for _, kind := range []graph.NodeKind{graph.KindFunction, graph.KindMethod} {
+		for n := range g.NodesByKind(kind) {
+			if n == nil || !isTestFile(n.FilePath) {
+				continue
+			}
+			if !covered[n.ID] {
+				covered[n.ID] = true
+				frontier = append(frontier, n.ID)
+			}
 		}
 	}
 
@@ -153,4 +157,33 @@ func reachableFromTests(g graph.Store) map[string]bool {
 		frontier = next
 	}
 	return covered
+}
+
+// collectFanInByKind returns the per-target incoming-edge count for
+// every edge whose kind is in the allowlist. Prefers the
+// graph.InEdgeCounter capability — backends that ship it run one
+// Cypher count(*) per request instead of an AllEdges() materialisation
+// + Go-side bucketing.
+func collectFanInByKind(g graph.Store, kinds []graph.EdgeKind) map[string]int {
+	if len(kinds) == 0 {
+		return map[string]int{}
+	}
+	if ic, ok := g.(graph.InEdgeCounter); ok {
+		if got := ic.InEdgeCountsByKind(kinds); got != nil {
+			return got
+		}
+		return map[string]int{}
+	}
+	allowed := make(map[graph.EdgeKind]struct{}, len(kinds))
+	for _, k := range kinds {
+		allowed[k] = struct{}{}
+	}
+	out := make(map[string]int)
+	for _, e := range g.AllEdges() {
+		if _, ok := allowed[e.Kind]; !ok {
+			continue
+		}
+		out[e.To]++
+	}
+	return out
 }

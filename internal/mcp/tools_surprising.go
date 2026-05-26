@@ -91,36 +91,21 @@ func (s *Server) handleGetSurprisingConnections(ctx context.Context, req mcp.Cal
 		totalEdges = len(allEdges)
 	}
 
-	// In-degree: prefer the InDegreeForNodes capability so the
-	// fan-in computation runs as one indexed COUNT { … } per scoped
-	// target instead of a full AllEdges materialisation. Fall back
-	// to the per-edge bucket pass on backends that don't implement
-	// the counter.
-	inDegree := make(map[string]int, len(scopedSet))
-	if ic, ok := s.graph.(graph.InDegreeForNodes); ok && len(scopedSet) > 0 {
-		ids := make([]string, 0, len(scopedSet))
-		for id := range scopedSet {
-			ids = append(ids, id)
-		}
-		for id, c := range ic.InDegreeForNodes(ids) {
-			inDegree[id] = c
-		}
-	} else {
-		if allEdges == nil {
-			allEdges = s.graph.AllEdges()
-		}
-		for _, e := range allEdges {
-			if _, ok := scopedSet[e.To]; ok {
-				inDegree[e.To]++
-			}
-		}
-	}
-
-	// The per-edge anomaly walk still needs the edge stream. Lazily
-	// materialise it now — the kind tally and in-degree may have
-	// already pulled it.
+	// In-degree still walks edges Go-side — the per-edge anomaly walk
+	// further down already pulls the full edge stream, so bucketing
+	// fan-in during that traversal is free. The InDegreeForNodes
+	// capability runs one COUNT { … } per id; on the gortex workspace
+	// the scoped set is ~30k function/method nodes, and tens of
+	// thousands of indexed subqueries are noticeably slower than the
+	// single AllEdges materialisation the anomaly walk already pays.
 	if allEdges == nil {
 		allEdges = s.graph.AllEdges()
+	}
+	inDegree := make(map[string]int, len(scopedSet))
+	for _, e := range allEdges {
+		if _, ok := scopedSet[e.To]; ok {
+			inDegree[e.To]++
+		}
 	}
 
 	// Determine which edge kinds are "unusual" — share of total

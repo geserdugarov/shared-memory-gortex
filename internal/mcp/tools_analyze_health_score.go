@@ -10,6 +10,7 @@ import (
 
 	mcp "github.com/mark3labs/mcp-go/mcp"
 
+	"github.com/zzet/gortex/internal/analysis"
 	"github.com/zzet/gortex/internal/graph"
 )
 
@@ -156,25 +157,48 @@ func (s *Server) handleAnalyzeHealthScore(ctx context.Context, req mcp.CallToolR
 		allowedKinds = parseAnalyzeKindsFilter(k)
 	}
 
-	// Build fan-in / fan-out / community-crossing maps in one edge
-	// pass. Same arithmetic shape as FindHotspots — we read the
-	// raw axes here rather than calling FindHotspots so the per-
-	// node fan-in is available for symbols below its threshold.
+	// Build fan-in / fan-out / community-crossing maps. Same
+	// arithmetic shape as FindHotspots -- we read the raw axes here
+	// rather than calling FindHotspots so the per-node fan-in is
+	// available for symbols below its threshold.
+	//
+	// Fan-in / fan-out go through analysis.CollectFanCounts, which
+	// uses the NodeFanAggregator capability when the backend
+	// supports it (one bulk Cypher per direction over the candidate
+	// id set) and falls back to a per-kind EdgesByKind stream
+	// otherwise. Crossings still need per-edge (from, to) for the
+	// Calls + References kinds -- streamed via EdgesByKind so even
+	// the fallback path never materialises the full edge set.
 	nodeToComm := map[string]string{}
 	if c := s.getCommunities(); c != nil {
 		nodeToComm = c.NodeToComm
 	}
-	fanIn := map[string]int{}
-	fanOut := map[string]int{}
+
+	scoped := s.scopedNodes(ctx)
+	candidateIDs := make([]string, 0, len(scoped))
+	for _, n := range scoped {
+		if n == nil {
+			continue
+		}
+		if _, ok := allowedKinds[n.Kind]; !ok {
+			continue
+		}
+		if pathPrefix != "" && !strings.HasPrefix(n.FilePath, pathPrefix) {
+			continue
+		}
+		candidateIDs = append(candidateIDs, n.ID)
+	}
+	fanIn, fanOut := analysis.CollectFanCounts(s.graph, candidateIDs,
+		[]graph.EdgeKind{graph.EdgeCalls, graph.EdgeReferences},
+		[]graph.EdgeKind{graph.EdgeCalls},
+	)
+
 	crossings := map[string]int{}
-	for _, e := range s.graph.AllEdges() {
-		if e.Kind == graph.EdgeCalls || e.Kind == graph.EdgeReferences {
-			fanIn[e.To]++
-		}
-		if e.Kind == graph.EdgeCalls {
-			fanOut[e.From]++
-		}
-		if e.Kind == graph.EdgeCalls || e.Kind == graph.EdgeReferences {
+	for _, kind := range []graph.EdgeKind{graph.EdgeCalls, graph.EdgeReferences} {
+		for e := range s.graph.EdgesByKind(kind) {
+			if e == nil {
+				continue
+			}
 			from := nodeToComm[e.From]
 			to := nodeToComm[e.To]
 			if from != "" && to != "" && from != to {
@@ -191,7 +215,10 @@ func (s *Server) handleAnalyzeHealthScore(ctx context.Context, req mcp.CallToolR
 	now := time.Now()
 
 	rows := make([]healthScoreRow, 0, 128)
-	for _, n := range s.scopedNodes(ctx) {
+	for _, n := range scoped {
+		if n == nil {
+			continue
+		}
 		if _, ok := allowedKinds[n.Kind]; !ok {
 			continue
 		}

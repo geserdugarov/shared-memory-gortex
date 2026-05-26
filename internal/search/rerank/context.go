@@ -247,6 +247,15 @@ func (c *Context) now() int64 {
 // Ladybug backend each per-candidate GetInEdges / GetOutEdges call
 // costs ~14ms cgo; batching collapses ~150 round-trips per Rerank
 // into 2.
+//
+// Bundle pre-seed fast path: when the caller has set cachePreSeeded
+// (via SeedEdgeCaches with preSeeded=true), prepare keeps the existing
+// caches in place and skips the batched edge fetch entirely. The
+// fanInMax / fanOutMax stats are computed from the already-cached
+// maps — same numbers, no cgo. This is the load-bearing skip the
+// SymbolBundleSearcherBackend path depends on: the bundle's edges
+// were already gathered server-side; a second round-trip here would
+// pure-overhead the win.
 func (c *Context) prepare(cands []*Candidate) {
 	c.preparedCands = cands
 	c.communityCount = make(map[string]int, len(cands))
@@ -259,8 +268,13 @@ func (c *Context) prepare(cands []*Candidate) {
 	c.fileScoreSum = make(map[string]float64, len(cands))
 	c.maxFileScoreSum = 0
 	c.pathPenaltyCache = make(map[string]float64, len(cands))
-	c.outEdgeCache = nil
-	c.inEdgeCache = nil
+	// Preserve the seeded edge caches when the caller signaled
+	// cachePreSeeded; the legacy reset path below the candidate walk
+	// only runs when the caches are NOT authoritative.
+	if !c.cachePreSeeded {
+		c.outEdgeCache = nil
+		c.inEdgeCache = nil
+	}
 
 	// First pass: collect candidate IDs (the input to the batched edge
 	// fetch) and populate the non-edge scratch fields.
@@ -304,20 +318,67 @@ func (c *Context) prepare(cands []*Candidate) {
 	}
 
 	// Second pass: one batched in-edge + one out-edge round-trip
-	// against Graph, then walk the cached maps to compute fanInMax /
-	// fanOutMax. Skipped when Graph is nil — fan signals contribute 0.
+	// against Graph, scoped to the IDs that are NOT yet cached.
+	// When cachePreSeeded covers every candidate (the bundle hot
+	// path's typical shape), the missing slice is empty and the
+	// round-trips are skipped entirely — pure cache-served fan-in /
+	// fan-out. When the bundle only covers some IDs (vector or
+	// fallback hits get appended without bundle edges), we fetch
+	// only the uncovered tail and merge into the existing cache.
+	// Skipped when Graph is nil — fan signals contribute 0.
 	if c.Graph != nil && len(ids) > 0 {
-		c.outEdgeCache = c.Graph.GetOutEdgesByNodeIDs(ids)
-		c.inEdgeCache = c.Graph.GetInEdgesByNodeIDs(ids)
-		for _, id := range ids {
-			if fi := len(c.inEdgeCache[id]); fi > c.fanInMax {
-				c.fanInMax = fi
+		missingOut := missingEdgeIDs(ids, c.outEdgeCache)
+		missingIn := missingEdgeIDs(ids, c.inEdgeCache)
+		// Backfill — when the cache already covers everything, both
+		// missing slices are empty and no cgo round-trip fires.
+		if len(missingOut) > 0 {
+			fetched := c.Graph.GetOutEdgesByNodeIDs(missingOut)
+			if c.outEdgeCache == nil {
+				c.outEdgeCache = make(map[string][]*graph.Edge, len(fetched))
 			}
-			if fo := len(c.outEdgeCache[id]); fo > c.fanOutMax {
-				c.fanOutMax = fo
+			for id, es := range fetched {
+				c.outEdgeCache[id] = es
+			}
+		}
+		if len(missingIn) > 0 {
+			fetched := c.Graph.GetInEdgesByNodeIDs(missingIn)
+			if c.inEdgeCache == nil {
+				c.inEdgeCache = make(map[string][]*graph.Edge, len(fetched))
+			}
+			for id, es := range fetched {
+				c.inEdgeCache[id] = es
 			}
 		}
 	}
+	for _, id := range ids {
+		if fi := len(c.inEdgeCache[id]); fi > c.fanInMax {
+			c.fanInMax = fi
+		}
+		if fo := len(c.outEdgeCache[id]); fo > c.fanOutMax {
+			c.fanOutMax = fo
+		}
+	}
+}
+
+// missingEdgeIDs returns the subset of ids whose edge slice is NOT
+// already in cache. Used by prepare's backfill: when the bundle path
+// pre-seeded most candidates but not all (vector / fallback hits get
+// appended without bundle edges), only the uncovered ids cross the
+// engine boundary. An empty result means the cache is complete — the
+// fetch round-trip can be skipped entirely.
+func missingEdgeIDs(ids []string, cache map[string][]*graph.Edge) []string {
+	if cache == nil {
+		// No pre-seed at all — caller has to fetch the full set; return
+		// the input unchanged so the existing batched fetch path runs.
+		return ids
+	}
+	missing := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if _, ok := cache[id]; !ok {
+			missing = append(missing, id)
+		}
+	}
+	return missing
 }
 
 // outEdges returns the prepared outgoing-edge slice for nodeID. Reads

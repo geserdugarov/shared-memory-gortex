@@ -57,10 +57,7 @@ func (s *Server) handleAnalyzeTestsAsEdges(ctx context.Context, req mcp.CallTool
 	testsBySymbol := make(map[string][]string)
 	symbolsByTest := make(map[string][]string)
 	edgeCount := 0
-	for _, e := range s.graph.AllEdges() {
-		if e.Kind != graph.EdgeTests {
-			continue
-		}
+	for e := range edgesByKinds(s.graph, graph.EdgeTests) {
 		edgeCount++
 		testsBySymbol[e.To] = append(testsBySymbol[e.To], e.From)
 		symbolsByTest[e.From] = append(symbolsByTest[e.From], e.To)

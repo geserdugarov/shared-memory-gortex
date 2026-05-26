@@ -815,3 +815,80 @@ type NodeFanRow struct {
 type NodeFanAggregator interface {
 	NodeFanCounts(ids []string, fanInKinds []EdgeKind, fanOutKinds []EdgeKind) []NodeFanRow
 }
+
+// FileImporterRow is the per-row payload returned by FileImporters.
+// FromFile is the importing file's path (the result the caller cares
+// about); FromID / FromName / FromKind describe the node that owns
+// the EdgeImports edge, in case the caller needs more than just the
+// file list.
+type FileImporterRow struct {
+	FromFile string
+	FromID   string
+	FromName string
+	FromKind NodeKind
+}
+
+// FileImporters is an optional capability backends MAY implement to
+// answer "which files import filePath?" with a single backend round-
+// trip instead of a Go-side AllEdges() scan. The MCP check_references
+// tool's importing-files block hammered AllEdges() per call: ~286k
+// edges materialised over cgo on the gortex workspace, then a per-
+// edge GetNode(e.To) + GetNode(e.From) — multiple thousand cgo round-
+// trips for a single check_references call. A backend that implements
+// FileImporters runs the equivalent join inside the query engine and
+// only surfaces the rows that match.
+//
+// Match semantics mirror the original handler: an EdgeImports edge
+// counts when its To node's FilePath equals filePath OR when the To
+// node's ID equals filePath (the file's own node id, used by the
+// indexer for file-level import bindings). The same-file dedup the
+// caller applies stays in Go — backends just stream the candidate
+// rows.
+//
+// Optional capability — handleCheckReferences falls back to the
+// AllEdges-driven loop when the backend doesn't implement it.
+type FileImporters interface {
+	FileImporters(filePath string) []FileImporterRow
+}
+
+// InEdgeCounter is an optional capability backends MAY implement to
+// compute incoming-edge fan-in counts per target node for a fixed
+// set of edge kinds in one backend round-trip. The fallback iterates
+// AllEdges() Go-side; on Ladybug that materialises every edge over
+// cgo (~286k rows on the gortex workspace) just to bucket by To.
+// The capability instead runs `MATCH ()-[e:Edge]->(n) WHERE e.kind
+// IN $kinds RETURN n.id, count(*)` and ships back only the per-target
+// counts — a fraction of the rows and zero per-row Go object alloc.
+//
+// Used by handleGetUntestedSymbols to compute the calls+references
+// fan-in ranking. The map keys are node IDs; values are the integer
+// count of matching incoming edges. Targets with zero matching in-
+// edges are absent from the map (callers index with `m[id]` and rely
+// on the zero-value default).
+//
+// Optional capability — the handler falls back to AllEdges-driven
+// bucketing when the backend doesn't implement it.
+type InEdgeCounter interface {
+	InEdgeCountsByKind(kinds []EdgeKind) map[string]int
+}
+
+// NodesInFilesByKindFinder is an optional capability backends MAY
+// implement to answer "which nodes of kinds K live in files F?"
+// with a single backend round-trip. The fallback iterates AllNodes()
+// Go-side; on Ladybug that materialises the full node table over
+// cgo per call. The capability instead runs `MATCH (n:Node) WHERE
+// n.file_path IN $files AND n.kind IN $kinds RETURN ...` and ships
+// only the matching rows.
+//
+// Used by handleFindDeclaration to build the per-file enclosing-
+// symbol index off the small set of trigram-match file paths. The
+// Go fallback's AllNodes pull was ~70k rows on the gortex workspace
+// to land at ~hundreds of relevant rows.
+//
+// Empty files / empty kinds returns nil — never a whole-graph scan.
+//
+// Optional capability — the handler falls back to AllNodes when the
+// backend doesn't implement it.
+type NodesInFilesByKindFinder interface {
+	NodesInFilesByKind(files []string, kinds []NodeKind) []*Node
+}

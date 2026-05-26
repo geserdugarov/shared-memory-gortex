@@ -76,6 +76,9 @@ func RunConformance(t *testing.T, factory Factory) {
 	t.Run("IfaceImplementsScanner", func(t *testing.T) { testIfaceImplementsScanner(t, factory) })
 	t.Run("NodeDegreeAggregator", func(t *testing.T) { testNodeDegreeAggregator(t, factory) })
 	t.Run("NodeFanAggregator", func(t *testing.T) { testNodeFanAggregator(t, factory) })
+	t.Run("FileImporters", func(t *testing.T) { testFileImporters(t, factory) })
+	t.Run("InEdgeCounter", func(t *testing.T) { testInEdgeCounter(t, factory) })
+	t.Run("NodesInFilesByKindFinder", func(t *testing.T) { testNodesInFilesByKindFinder(t, factory) })
 }
 
 // -- fixture helpers ---------------------------------------------------
@@ -1602,5 +1605,168 @@ func testNodeFanAggregator(t *testing.T, factory Factory) {
 	}
 	if zeros[0].NodeID != "Hub" || zeros[0].FanIn != 0 || zeros[0].FanOut != 0 {
 		t.Fatalf("NodeFanCounts(empty kinds) = %+v, want Hub/0/0", zeros[0])
+	}
+}
+
+// testFileImporters exercises the optional graph.FileImporters
+// capability. Seeds two importing files (one production, one test)
+// plus an unrelated import edge that targets a different file. The
+// returned rows must include exactly the importers of the target
+// file — both via the file-node ID and via the FilePath-on-symbol
+// shape — and must not surface the unrelated edge.
+func testFileImporters(t *testing.T, factory Factory) {
+	t.Helper()
+	s := factory(t)
+	fi, ok := s.(graph.FileImporters)
+	if !ok {
+		t.Skip("backend does not implement graph.FileImporters")
+	}
+
+	// target file node + a symbol inside it.
+	s.AddNode(mkNode("pkg/target.go", "target.go", "pkg/target.go", graph.KindFile))
+	s.AddNode(mkNode("TargetFunc", "TargetFunc", "pkg/target.go", graph.KindFunction))
+
+	// Two importing files: one production, one test. Each has an
+	// import edge — one targets the file node by id, the other
+	// targets a symbol inside the file (FilePath match path).
+	s.AddNode(mkNode("pkg/prod.go", "prod.go", "pkg/prod.go", graph.KindFile))
+	s.AddNode(mkNode("pkg/test_test.go", "test_test.go", "pkg/test_test.go", graph.KindFile))
+
+	// And an unrelated importer that points elsewhere — must NOT
+	// surface in the results.
+	s.AddNode(mkNode("pkg/other.go", "other.go", "pkg/other.go", graph.KindFile))
+	s.AddNode(mkNode("pkg/elsewhere.go", "elsewhere.go", "pkg/elsewhere.go", graph.KindFile))
+
+	s.AddEdge(mkEdge("pkg/prod.go", "pkg/target.go", graph.EdgeImports))
+	s.AddEdge(mkEdge("pkg/test_test.go", "TargetFunc", graph.EdgeImports))
+	s.AddEdge(mkEdge("pkg/other.go", "pkg/elsewhere.go", graph.EdgeImports))
+	// A non-imports edge to the target file must also drop out.
+	s.AddEdge(mkEdge("pkg/prod.go", "TargetFunc", graph.EdgeCalls))
+
+	rows := fi.FileImporters("pkg/target.go")
+	got := make([]string, 0, len(rows))
+	for _, r := range rows {
+		got = append(got, r.FromFile)
+	}
+	sort.Strings(got)
+	want := []string{"pkg/prod.go", "pkg/test_test.go"}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("FileImporters = %v, want %v", got, want)
+	}
+
+	if got := fi.FileImporters(""); len(got) != 0 {
+		t.Fatalf("FileImporters(empty) = %d rows, want 0", len(got))
+	}
+	if got := fi.FileImporters("pkg/no_such.go"); len(got) != 0 {
+		t.Fatalf("FileImporters(unknown) = %d rows, want 0", len(got))
+	}
+}
+
+// testInEdgeCounter exercises the optional graph.InEdgeCounter
+// capability. Seeds a small graph and asserts the per-To fan-in
+// count matches what an AllEdges-bucketing loop would compute for
+// the same edge-kind set.
+func testInEdgeCounter(t *testing.T, factory Factory) {
+	t.Helper()
+	s := factory(t)
+	ic, ok := s.(graph.InEdgeCounter)
+	if !ok {
+		t.Skip("backend does not implement graph.InEdgeCounter")
+	}
+
+	s.AddNode(mkNode("A", "A", "a.go", graph.KindFunction))
+	s.AddNode(mkNode("B", "B", "a.go", graph.KindFunction))
+	s.AddNode(mkNode("C", "C", "a.go", graph.KindFunction))
+	s.AddNode(mkNode("T", "T", "a.go", graph.KindType))
+
+	// B is called twice (from A and C), referenced once (from A).
+	e1 := mkEdge("A", "B", graph.EdgeCalls)
+	e1.Line = 1
+	e2 := mkEdge("C", "B", graph.EdgeCalls)
+	e2.Line = 2
+	e3 := mkEdge("A", "B", graph.EdgeReferences)
+	e3.Line = 3
+	// T is referenced once and held by an import edge that should
+	// not be counted under {calls,references}.
+	e4 := mkEdge("A", "T", graph.EdgeReferences)
+	e4.Line = 4
+	e5 := mkEdge("A", "T", graph.EdgeImports)
+	e5.Line = 5
+	s.AddEdge(e1)
+	s.AddEdge(e2)
+	s.AddEdge(e3)
+	s.AddEdge(e4)
+	s.AddEdge(e5)
+
+	got := ic.InEdgeCountsByKind([]graph.EdgeKind{graph.EdgeCalls, graph.EdgeReferences})
+	if got["B"] != 3 {
+		t.Fatalf("count[B] = %d, want 3", got["B"])
+	}
+	if got["T"] != 1 {
+		t.Fatalf("count[T] = %d, want 1", got["T"])
+	}
+	if _, ok := got["A"]; ok {
+		t.Fatalf("A should have zero matching incoming edges, got %d", got["A"])
+	}
+
+	// Empty kind list must return nil — never the whole graph.
+	if got := ic.InEdgeCountsByKind(nil); got != nil {
+		t.Fatalf("InEdgeCountsByKind(nil) = %v, want nil", got)
+	}
+
+	// Single-kind filter dedups when callers pass duplicates.
+	got2 := ic.InEdgeCountsByKind([]graph.EdgeKind{graph.EdgeCalls, graph.EdgeCalls})
+	if got2["B"] != 2 {
+		t.Fatalf("count[B] (calls only, deduped) = %d, want 2", got2["B"])
+	}
+}
+
+// testNodesInFilesByKindFinder exercises the optional
+// graph.NodesInFilesByKindFinder capability. Seeds a graph spanning
+// three files and three kinds; the result must include only the
+// requested-kind nodes whose FilePath sits in the requested file
+// set.
+func testNodesInFilesByKindFinder(t *testing.T, factory Factory) {
+	t.Helper()
+	s := factory(t)
+	fn, ok := s.(graph.NodesInFilesByKindFinder)
+	if !ok {
+		t.Skip("backend does not implement graph.NodesInFilesByKindFinder")
+	}
+
+	// f1.go: function + method + type.
+	s.AddNode(mkNode("f1::F1", "F1", "f1.go", graph.KindFunction))
+	s.AddNode(mkNode("f1::M1", "M1", "f1.go", graph.KindMethod))
+	s.AddNode(mkNode("f1::T1", "T1", "f1.go", graph.KindType))
+	// f2.go: function only.
+	s.AddNode(mkNode("f2::F2", "F2", "f2.go", graph.KindFunction))
+	// f3.go: drops out of every result — not in the requested files.
+	s.AddNode(mkNode("f3::F3", "F3", "f3.go", graph.KindFunction))
+
+	got := fn.NodesInFilesByKind(
+		[]string{"f1.go", "f2.go"},
+		[]graph.NodeKind{graph.KindFunction, graph.KindMethod},
+	)
+	gotIDs := sortNodeIDs(got)
+	want := []string{"f1::F1", "f1::M1", "f2::F2"}
+	if fmt.Sprint(gotIDs) != fmt.Sprint(want) {
+		t.Fatalf("NodesInFilesByKind = %v, want %v", gotIDs, want)
+	}
+
+	// Empty files / kinds must return nil — never a whole-graph scan.
+	if got := fn.NodesInFilesByKind(nil, []graph.NodeKind{graph.KindFunction}); got != nil {
+		t.Fatalf("NodesInFilesByKind(nil files) = %v, want nil", got)
+	}
+	if got := fn.NodesInFilesByKind([]string{"f1.go"}, nil); got != nil {
+		t.Fatalf("NodesInFilesByKind(nil kinds) = %v, want nil", got)
+	}
+
+	// Dedup: passing the same file / kind twice must not double-yield.
+	gotDup := fn.NodesInFilesByKind(
+		[]string{"f1.go", "f1.go"},
+		[]graph.NodeKind{graph.KindType, graph.KindType},
+	)
+	if len(gotDup) != 1 || gotDup[0].ID != "f1::T1" {
+		t.Fatalf("NodesInFilesByKind(dup) = %v, want [f1::T1]", sortNodeIDs(gotDup))
 	}
 }

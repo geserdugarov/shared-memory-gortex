@@ -743,6 +743,47 @@ func (g *Graph) NodeDegreeCounts(ids []string, usageKinds []EdgeKind) []NodeDegr
 	return out
 }
 
+// FileImporters is the in-memory reference implementation of the
+// FileImporters capability. Iterates EdgeImports via the byKind
+// bucket — same cost as the legacy AllEdges()+filter loop in
+// handleCheckReferences, but exposes the predicate as a single call
+// the disk backends can short-circuit with one Cypher.
+//
+// Matches edges whose To node satisfies filePath == n.FilePath OR
+// filePath == n.ID. The dual match keeps parity with the indexer's
+// two import shapes: file-targeted imports point at the file node
+// (n.ID == filePath), while symbol-targeted imports land on a symbol
+// whose FilePath equals filePath.
+func (g *Graph) FileImporters(filePath string) []FileImporterRow {
+	if filePath == "" {
+		return nil
+	}
+	var out []FileImporterRow
+	for e := range g.EdgesByKind(EdgeImports) {
+		if e == nil {
+			continue
+		}
+		to := g.GetNode(e.To)
+		if to == nil {
+			continue
+		}
+		if to.FilePath != filePath && to.ID != filePath {
+			continue
+		}
+		from := g.GetNode(e.From)
+		if from == nil {
+			continue
+		}
+		out = append(out, FileImporterRow{
+			FromFile: from.FilePath,
+			FromID:   from.ID,
+			FromName: from.Name,
+			FromKind: from.Kind,
+		})
+	}
+	return out
+}
+
 // NodeFanCounts is the in-memory reference implementation of
 // NodeFanAggregator. Two passes over the per-node in/out edge buckets
 // the in-memory backend already maintains, filtered by the caller's
@@ -796,6 +837,78 @@ func (g *Graph) NodeFanCounts(ids []string, fanInKinds []EdgeKind, fanOutKinds [
 			}
 		}
 		out = append(out, row)
+	}
+	return out
+}
+
+// InEdgeCountsByKind is the in-memory reference implementation of
+// the InEdgeCounter capability. Walks each requested EdgeKind via
+// the byKind bucket and increments a per-To counter. Same algorithm
+// the AllEdges-bucketing fallback in handleGetUntestedSymbols runs;
+// the win lives in disk backends where AllEdges() materialises every
+// edge over cgo just to bucket by target.
+//
+// Dedupes the kind set up front so a sloppy caller passing the same
+// kind twice doesn't double-count — matches the Cypher backend's
+// IN-list dedup.
+func (g *Graph) InEdgeCountsByKind(kinds []EdgeKind) map[string]int {
+	if len(kinds) == 0 {
+		return nil
+	}
+	seen := make(map[EdgeKind]struct{}, len(kinds))
+	out := make(map[string]int)
+	for _, k := range kinds {
+		if _, ok := seen[k]; ok {
+			continue
+		}
+		seen[k] = struct{}{}
+		for e := range g.EdgesByKind(k) {
+			if e == nil {
+				continue
+			}
+			out[e.To]++
+		}
+	}
+	return out
+}
+
+// NodesInFilesByKind is the in-memory reference implementation of
+// the NodesInFilesByKindFinder capability. Filters NodesByKind for
+// each requested kind down to the file set. Same algorithm as the
+// Go-side loop in find_declaration's buildDeclFileIndex; the win
+// lives in disk backends where AllNodes() over cgo dwarfs the few
+// hundred surviving rows.
+func (g *Graph) NodesInFilesByKind(files []string, kinds []NodeKind) []*Node {
+	if len(files) == 0 || len(kinds) == 0 {
+		return nil
+	}
+	wanted := make(map[string]struct{}, len(files))
+	for _, f := range files {
+		if f == "" {
+			continue
+		}
+		wanted[f] = struct{}{}
+	}
+	if len(wanted) == 0 {
+		return nil
+	}
+	// Dedup the kinds so a sloppy caller doesn't double-scan.
+	seenKind := make(map[NodeKind]struct{}, len(kinds))
+	var out []*Node
+	for _, k := range kinds {
+		if _, ok := seenKind[k]; ok {
+			continue
+		}
+		seenKind[k] = struct{}{}
+		for n := range g.NodesByKind(k) {
+			if n == nil {
+				continue
+			}
+			if _, ok := wanted[n.FilePath]; !ok {
+				continue
+			}
+			out = append(out, n)
+		}
 	}
 	return out
 }

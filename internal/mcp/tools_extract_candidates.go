@@ -57,48 +57,7 @@ func (s *Server) handleGetExtractionCandidates(ctx context.Context, req mcp.Call
 	pathPrefix := strings.TrimSpace(req.GetString("path_prefix", ""))
 	limit := max(req.GetInt("limit", 25), 1)
 
-	scoped := s.scopedNodes(ctx)
-	rows := make([]extractCandidateRow, 0, len(scoped))
-	for _, n := range scoped {
-		if n.Kind != graph.KindFunction && n.Kind != graph.KindMethod {
-			continue
-		}
-		if pathPrefix != "" && !strings.HasPrefix(n.FilePath, pathPrefix) {
-			continue
-		}
-		if n.StartLine == 0 || n.EndLine == 0 {
-			continue
-		}
-		lineCount := n.EndLine - n.StartLine + 1
-		if lineCount < minLines {
-			continue
-		}
-
-		callers := callerCount(s.graph, n.ID)
-		if callers < minCallers {
-			continue
-		}
-		fanOut := distinctCalleeCount(s.graph, n.ID)
-		if fanOut < minFanOut {
-			continue
-		}
-
-		// Log-scaled composite — long-tail values don't dominate the
-		// short-tail. Adding 1 inside each log keeps the score >= 0.
-		score := math.Log1p(float64(lineCount)) *
-			math.Log1p(float64(callers)) *
-			math.Log1p(float64(fanOut))
-
-		rows = append(rows, extractCandidateRow{
-			ID: n.ID, Name: n.Name, File: n.FilePath,
-			StartLine: n.StartLine, EndLine: n.EndLine,
-			LineCount:   lineCount,
-			CallerCount: callers,
-			FanOut:      fanOut,
-			Score:       roundScore(score),
-			Rationale:   buildExtractRationale(lineCount, callers, fanOut),
-		})
-	}
+	rows := s.collectExtractionCandidates(ctx, minLines, minCallers, minFanOut, pathPrefix)
 
 	sort.Slice(rows, func(i, j int) bool {
 		if rows[i].Score != rows[j].Score {
@@ -122,6 +81,107 @@ func (s *Server) handleGetExtractionCandidates(ctx context.Context, req mcp.Call
 			"min_fan_out": minFanOut,
 		},
 	})
+}
+
+// collectExtractionCandidates evaluates the three threshold gates
+// (min lines, min callers, min fan-out) over every function/method
+// in scope, returning the surviving rows.
+//
+// Picks ExtractCandidatesScanner when the backend implements it: that
+// path runs the caller-count + fan-out aggregations server-side in
+// one Cypher per direction instead of the AllNodes + per-node
+// GetInEdges + GetOutEdges loop the fallback runs. On Ladybug the
+// fallback fires 2N cgo round-trips per call and materialises every
+// edge bucket just to count distinct endpoints. The pushdown drops
+// the call to two aggregations the planner can index.
+//
+// The session's workspace scope is applied as a post-filter when
+// the capability is used — kind / threshold pre-filtering is the
+// dominant win, so workspace gating Go-side is cheap.
+func (s *Server) collectExtractionCandidates(
+	ctx context.Context,
+	minLines, minCallers, minFanOut int,
+	pathPrefix string,
+) []extractCandidateRow {
+	callKinds := []graph.EdgeKind{graph.EdgeCalls, graph.EdgeCrossRepoCalls}
+	if scanner, ok := s.graph.(graph.ExtractCandidatesScanner); ok {
+		raw := scanner.ExtractCandidates(callKinds, minLines, minCallers, minFanOut, pathPrefix)
+		// Session-scope post-filter: skip the lookup when the session
+		// is unbound (every node is in scope) so the bench-friendly
+		// path stays a pure stream of rows.
+		_, _, bound := s.sessionScope(ctx)
+		var scopeIDs map[string]*graph.Node
+		if bound {
+			ids := make([]string, 0, len(raw))
+			for _, r := range raw {
+				ids = append(ids, r.NodeID)
+			}
+			scopeIDs = s.graph.GetNodesByIDs(ids)
+		}
+		out := make([]extractCandidateRow, 0, len(raw))
+		for _, r := range raw {
+			if bound {
+				n := scopeIDs[r.NodeID]
+				if n == nil || !s.nodeInSessionScope(ctx, n) {
+					continue
+				}
+			}
+			score := math.Log1p(float64(r.LineCount)) *
+				math.Log1p(float64(r.CallerCount)) *
+				math.Log1p(float64(r.FanOut))
+			out = append(out, extractCandidateRow{
+				ID: r.NodeID, Name: r.Name, File: r.FilePath,
+				StartLine:   r.StartLine,
+				EndLine:     r.EndLine,
+				LineCount:   r.LineCount,
+				CallerCount: r.CallerCount,
+				FanOut:      r.FanOut,
+				Score:       roundScore(score),
+				Rationale:   buildExtractRationale(r.LineCount, r.CallerCount, r.FanOut),
+			})
+		}
+		return out
+	}
+	// In-memory fallback — kept inline so the call site doesn't
+	// branch on the capability twice.
+	scoped := s.scopedNodes(ctx)
+	rows := make([]extractCandidateRow, 0, len(scoped))
+	for _, n := range scoped {
+		if n.Kind != graph.KindFunction && n.Kind != graph.KindMethod {
+			continue
+		}
+		if pathPrefix != "" && !strings.HasPrefix(n.FilePath, pathPrefix) {
+			continue
+		}
+		if n.StartLine == 0 || n.EndLine == 0 {
+			continue
+		}
+		lineCount := n.EndLine - n.StartLine + 1
+		if lineCount < minLines {
+			continue
+		}
+		callers := callerCount(s.graph, n.ID)
+		if callers < minCallers {
+			continue
+		}
+		fanOut := distinctCalleeCount(s.graph, n.ID)
+		if fanOut < minFanOut {
+			continue
+		}
+		score := math.Log1p(float64(lineCount)) *
+			math.Log1p(float64(callers)) *
+			math.Log1p(float64(fanOut))
+		rows = append(rows, extractCandidateRow{
+			ID: n.ID, Name: n.Name, File: n.FilePath,
+			StartLine: n.StartLine, EndLine: n.EndLine,
+			LineCount:   lineCount,
+			CallerCount: callers,
+			FanOut:      fanOut,
+			Score:       roundScore(score),
+			Rationale:   buildExtractRationale(lineCount, callers, fanOut),
+		})
+	}
+	return rows
 }
 
 // callerCount returns the number of distinct call-site origins for

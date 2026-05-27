@@ -86,6 +86,12 @@ type Store struct {
 	// PageRanker / CommunityDetector / ComponentFinder / KCorer
 	// implementations.
 	algo algoState
+
+	// fileIDs accelerates per-file lookups (GetFileSubGraph,
+	// GetFileNodes …) by sidestepping the Node-table full scan Kuzu
+	// would otherwise need. Maintained on every node mutation; see
+	// file_index.go.
+	fileIDs *fileIDIndex
 }
 
 // Compile-time assertion: *Store satisfies graph.Store.
@@ -163,7 +169,39 @@ func OpenWithOptions(path string, opts Options) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("store_ladybug: init conn pool: %w", err)
 	}
-	return &Store{db: db, conn: conn, pool: pool}, nil
+	st := &Store{db: db, conn: conn, pool: pool, fileIDs: newFileIDIndex()}
+	// Populate the file→id accelerator from any data already on disk
+	// (daemon restart, ladybug snapshot reload). A fresh DB returns 0
+	// rows and this is a cheap no-op; an existing DB pays one
+	// sequential Node scan in exchange for sub-millisecond file
+	// lookups for the rest of the process lifetime.
+	if err := st.populateFileIDIndexLocked(); err != nil {
+		conn.Close()
+		db.Close()
+		return nil, fmt.Errorf("store_ladybug: populate file-id index: %w", err)
+	}
+	return st, nil
+}
+
+// populateFileIDIndexLocked seeds the fileIDs accelerator from the
+// on-disk Node table. Runs once at Open. Streaming the (id, file_path)
+// projection keeps the working set small — we don't materialise the
+// full node rows for this.
+func (s *Store) populateFileIDIndexLocked() error {
+	if s.fileIDs == nil {
+		s.fileIDs = newFileIDIndex()
+	}
+	const q = `MATCH (n:Node) WHERE n.file_path <> '' RETURN n.id, n.file_path`
+	rows := s.querySelect(q, nil)
+	for _, r := range rows {
+		if len(r) < 2 {
+			continue
+		}
+		id, _ := r[0].(string)
+		fp, _ := r[1].(string)
+		s.fileIDs.add(fp, id)
+	}
+	return nil
 }
 
 // Close closes the underlying connection and database. Drops any
@@ -246,6 +284,9 @@ func (s *Store) upsertNodeLocked(n *graph.Node) {
 	if err != nil {
 		panicOnFatal(fmt.Errorf("encode meta: %w", err))
 		return
+	}
+	if s.fileIDs != nil {
+		s.fileIDs.add(n.FilePath, n.ID)
 	}
 	// MERGE on id, then SET every column. This is the upsert pattern
 	// for KuzuDB — a bare CREATE on a duplicate PK raises a
@@ -432,6 +473,9 @@ func (s *Store) AddBatch(nodes []*graph.Node, edges []*graph.Edge) {
 // addNodesUnwindLocked materialises nodes as a list of structs and
 // runs them through one UNWIND + MERGE per chunk.
 func (s *Store) addNodesUnwindLocked(nodes []*graph.Node) {
+	if s.fileIDs != nil {
+		s.fileIDs.addNodes(nodes)
+	}
 	for i := 0; i < len(nodes); i += kuzuBatchChunkSize {
 		end := i + kuzuBatchChunkSize
 		if end > len(nodes) {
@@ -745,7 +789,11 @@ DELETE e`
 func (s *Store) EvictFile(filePath string) (nodesRemoved, edgesRemoved int) {
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
-	return s.evictByScopeLocked("file_path", filePath)
+	n, e := s.evictByScopeLocked("file_path", filePath)
+	if s.fileIDs != nil {
+		s.fileIDs.removeFile(filePath)
+	}
+	return n, e
 }
 
 // EvictRepo removes every node in repoPrefix and every edge that
@@ -753,7 +801,30 @@ func (s *Store) EvictFile(filePath string) (nodesRemoved, edgesRemoved int) {
 func (s *Store) EvictRepo(repoPrefix string) (nodesRemoved, edgesRemoved int) {
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
-	return s.evictByScopeLocked("repo_prefix", repoPrefix)
+	// Collect the file paths that will be evicted BEFORE the DELETE,
+	// so we can drop their entries from the fileIDs accelerator
+	// without scanning the whole map ourselves. evictByScopeLocked's
+	// DETACH DELETE wipes the rows, after which the file_path column
+	// is no longer queryable.
+	var affectedPaths []string
+	if s.fileIDs != nil {
+		const pathsQ = `MATCH (n:Node) WHERE n.repo_prefix = $r AND n.file_path <> '' RETURN DISTINCT n.file_path`
+		rows := s.querySelectLocked(pathsQ, map[string]any{"r": repoPrefix})
+		affectedPaths = make([]string, 0, len(rows))
+		for _, r := range rows {
+			if len(r) == 0 {
+				continue
+			}
+			if p, ok := r[0].(string); ok && p != "" {
+				affectedPaths = append(affectedPaths, p)
+			}
+		}
+	}
+	n, e := s.evictByScopeLocked("repo_prefix", repoPrefix)
+	if s.fileIDs != nil {
+		s.fileIDs.removeFiles(affectedPaths)
+	}
+	return n, e
 }
 
 // evictByScopeLocked is the shared body of EvictFile / EvictRepo.
@@ -860,6 +931,19 @@ func (s *Store) FindNodesByNameContaining(substr string, limit int) []*graph.Nod
 
 // GetFileNodes returns every node anchored to filePath.
 func (s *Store) GetFileNodes(filePath string) []*graph.Node {
+	// Fast path via the Go-side file→id accelerator: hand the ids
+	// straight to a primary-key MATCH so Kuzu uses the HASH PK
+	// index instead of full-scanning Node to find a missing
+	// file_path secondary index.
+	if s.fileIDs != nil {
+		ids := s.fileIDs.idsFor(filePath)
+		if len(ids) == 0 {
+			return nil
+		}
+		const q = `MATCH (n:Node) WHERE n.id IN $ids RETURN ` + nodeReturnCols
+		rows := s.querySelect(q, map[string]any{"ids": stringSliceToAny(ids)})
+		return rowsToNodes(rows)
+	}
 	const q = `MATCH (n:Node {file_path: $f}) RETURN ` + nodeReturnCols
 	rows := s.querySelect(q, map[string]any{"f": filePath})
 	return rowsToNodes(rows)
@@ -1701,6 +1785,13 @@ func (s *Store) copyBulkLocked(nodes []*graph.Node, edges []*graph.Edge) error {
 		}
 	}
 	nodes = dedupedNodes
+	// Feed the file→id accelerator from the deduped buffer. Done here
+	// (before COPY) so we don't have to re-scan after the write — the
+	// COPY appends every row anyway, success-or-failure handling
+	// upstream already rolls writeGen back on a fatal error.
+	if s.fileIDs != nil {
+		s.fileIDs.addNodes(nodes)
+	}
 
 	// Dedup edges by identity tuple (last write wins). Same rationale
 	// as the in-memory store's MERGE semantics.

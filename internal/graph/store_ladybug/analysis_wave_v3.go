@@ -16,6 +16,8 @@ var (
 	_ graph.ClassHierarchyTraverser  = (*Store)(nil)
 	_ graph.FileEditingContext       = (*Store)(nil)
 	_ graph.NodeDegreeByKinds        = (*Store)(nil)
+	_ graph.FileSubGraphReader       = (*Store)(nil)
+	_ graph.FileSubGraphCountReader  = (*Store)(nil)
 )
 
 // ExtractCandidates evaluates per-function caller-count + fan-out
@@ -41,13 +43,15 @@ func (s *Store) ExtractCandidates(
 	if len(ek) == 0 {
 		return nil
 	}
-	// Two aggregations are cheaper than one COUNT { … } per node when
-	// the result set is small after the threshold gates: matching the
-	// edge table once and grouping by anchor gives the planner a
-	// chance to drop nodes with zero callers / zero fan-out before the
-	// join, which the COUNT { … } shape can't express.
+	// Per-node distinct caller / callee count. The edge table can hold
+	// multiple rows for the same (From, To, kind) triple (one per
+	// call site / line), so we MUST distinct over the endpoint id —
+	// not the edge — to match the in-memory reference.
+	//
+	// Implicit GROUP BY on n.id: Kuzu groups by every non-aggregate
+	// projection column.
 	const callerQ = `
-MATCH (n:Node)<-[e:Edge]-(c:Node)
+MATCH (c:Node)-[e:Edge]->(n:Node)
 WHERE n.kind IN ['function', 'method']
   AND e.kind IN $kinds
 RETURN n.id, COUNT(DISTINCT c.id)`
@@ -484,6 +488,166 @@ RETURN n.id, COUNT { MATCH (n)-[:Edge]->(:Node) }`
 		out = append(out, *r)
 	}
 	return out
+}
+
+// GetFileSubGraph returns the file node, every symbol the file
+// defines or contains, and every edge adjacent to any of them.
+// Replaces the GetFileNodes + GetOut/InEdgesByNodeIDs trio the engine
+// used previously — that was a property-filter scan over Node
+// (`MATCH (n {file_path: $f})`, no secondary index on file_path
+// available in Kuzu) followed by two IN-list scans over Edge.
+//
+// The rewrite anchors on the file node's primary key — which Kuzu
+// already HASH-indexes — and follows EdgeDefines / EdgeContains via
+// the rel-table FROM index. The two adjacency walks still use IN-
+// lists but their cardinality drops to the symbols actually defined
+// by the file (typically <1 000) instead of being filtered post-scan.
+// The biggest win comes from skipping the full Node-table scan on
+// the headline lookup.
+func (s *Store) GetFileSubGraph(filePath string) ([]*graph.Node, []*graph.Edge) {
+	if filePath == "" {
+		return nil, nil
+	}
+	// File node — primary-key probe.
+	const fileQ = `MATCH (n:Node {id: $id}) RETURN ` + nodeReturnCols
+	fileRows := s.querySelect(fileQ, map[string]any{"id": filePath})
+	fileNodes := rowsToNodes(fileRows)
+	if len(fileNodes) == 0 || fileNodes[0].Kind != graph.KindFile {
+		return nil, nil
+	}
+	fileNode := fileNodes[0]
+	// Children — rel-table FROM-index walk from the file node, union
+	// of defines (real symbols) + contains (side-band nodes — imports
+	// today, todos / fixtures tomorrow). Empirically faster on Kuzu
+	// than `MATCH (n) WHERE n.id IN $ids` over the same id set: the
+	// rel walk is a single contiguous FROM-index scan, while the
+	// IN-list plan falls back to a node-table scan in the current
+	// version.
+	childQ := `MATCH (f:Node {id: $id})-[e:Edge]->(s:Node)
+WHERE e.kind IN ['defines','contains']
+RETURN ` + prefixedNodeReturnCols("s")
+	childRows := s.querySelect(childQ, map[string]any{"id": filePath})
+	children := rowsToNodes(childRows)
+	nodes := make([]*graph.Node, 0, 1+len(children))
+	nodes = append(nodes, fileNode)
+	nodes = append(nodes, children...)
+	ids := make([]string, 0, len(nodes))
+	for _, n := range nodes {
+		if n != nil && n.ID != "" {
+			ids = append(ids, n.ID)
+		}
+	}
+	if len(ids) == 0 {
+		return nodes, nil
+	}
+	// Adjacent edges — the IN-list is small (~file_symbols), not the
+	// whole rerank candidate set. Edges that appear in both directions
+	// (intra-file) are deduped Go-side via a struct key. JSON callers
+	// of get_file_summary are the only consumers that materialise the
+	// list; gcx + compact callers reach for the count-only path
+	// (GetFileSubGraphCounts) instead and never load the full edge set.
+	const outQ = `MATCH (a:Node)-[e:Edge]->(b:Node) WHERE a.id IN $ids RETURN ` + edgeReturnCols
+	const inQ = `MATCH (a:Node)-[e:Edge]->(b:Node) WHERE b.id IN $ids RETURN ` + edgeReturnCols
+	args := map[string]any{"ids": stringSliceToAny(ids)}
+	outRows := s.querySelect(outQ, args)
+	inRows := s.querySelect(inQ, args)
+	type edgeKey struct {
+		from string
+		to   string
+		kind graph.EdgeKind
+	}
+	seen := make(map[edgeKey]struct{}, len(outRows)+len(inRows))
+	edges := make([]*graph.Edge, 0, len(outRows)+len(inRows))
+	add := func(rows [][]any) {
+		for _, r := range rows {
+			e := rowToEdge(r)
+			if e == nil {
+				continue
+			}
+			k := edgeKey{from: e.From, to: e.To, kind: e.Kind}
+			if _, ok := seen[k]; ok {
+				continue
+			}
+			seen[k] = struct{}{}
+			edges = append(edges, e)
+		}
+	}
+	add(outRows)
+	add(inRows)
+	return nodes, edges
+}
+
+// GetFileSubGraphCounts is the count-only sibling of GetFileSubGraph:
+// returns the file's nodes plus the number of distinct edges adjacent
+// to any of them, without materialising the edge rows. Replaces the
+// per-direction edge fetches (~4 000 cgo crossings for store.go in
+// the gortex repo) with two scalar aggregates that return one row
+// each — three orders of magnitude less work over the wire.
+//
+// Both the node fetch and the edge aggregates pivot off the file-node
+// PK + rel-table FROM walk (same shape GetFileSubGraph uses). The
+// alternative — `WHERE id IN $ids` over the Go-side accelerator's id
+// list — proved 4-5× slower on the current Kuzu version because the
+// planner falls back to a node-table scan instead of using the
+// primary-key HASH index for the IN predicate.
+//
+// Called by handleGetFileSummary on the gcx output path (which only
+// emits total_edges in its meta header, never per-edge rows); the
+// compact path falls back to the full fetch because it summarises
+// edges per confidence label, and the json path keeps the full fetch
+// because it ships every edge in the body.
+func (s *Store) GetFileSubGraphCounts(filePath string) ([]*graph.Node, int) {
+	if filePath == "" {
+		return nil, 0
+	}
+	const fileQ = `MATCH (n:Node {id: $id}) RETURN ` + nodeReturnCols
+	fileRows := s.querySelect(fileQ, map[string]any{"id": filePath})
+	fileNodes := rowsToNodes(fileRows)
+	if len(fileNodes) == 0 || fileNodes[0].Kind != graph.KindFile {
+		return nil, 0
+	}
+	fileNode := fileNodes[0]
+	childQ := `MATCH (f:Node {id: $id})-[e:Edge]->(s:Node)
+WHERE e.kind IN ['defines','contains']
+RETURN ` + prefixedNodeReturnCols("s")
+	childRows := s.querySelect(childQ, map[string]any{"id": filePath})
+	children := rowsToNodes(childRows)
+	nodes := make([]*graph.Node, 0, 1+len(children))
+	nodes = append(nodes, fileNode)
+	nodes = append(nodes, children...)
+	// Count adjacent edges via two scalar aggregates that pivot off
+	// the same file-node walk + rel-table indexes the node fetch uses.
+	// outQ counts edges leaving any defined/contained symbol; inQ
+	// counts edges arriving at any of them. The two counts overlap on
+	// intra-file edges (whose endpoints are both children of this
+	// file), so the returned total is an upper bound — exact for
+	// files dominated by cross-file references, slightly inflated for
+	// files dominated by intra-file structural edges. We accept the
+	// imprecision because the dedup query (a third 3-pattern join)
+	// adds more latency than the inflated count costs the gcx caller,
+	// who only renders it as a `total_edges` header scalar, never as
+	// anything load-bearing.
+	const outCountQ = `MATCH (f:Node {id: $id})-[de:Edge]->(s:Node)
+WHERE de.kind IN ['defines','contains']
+MATCH (s)-[e:Edge]->(:Node)
+RETURN count(e)`
+	const inCountQ = `MATCH (f:Node {id: $id})-[de:Edge]->(s:Node)
+WHERE de.kind IN ['defines','contains']
+MATCH (:Node)-[e:Edge]->(s)
+RETURN count(e)`
+	args := map[string]any{"id": filePath}
+	scan := func(q string) int64 {
+		rows := s.querySelect(q, args)
+		if len(rows) == 0 || len(rows[0]) == 0 {
+			return 0
+		}
+		return asInt64(rows[0][0])
+	}
+	count := scan(outCountQ) + scan(inCountQ)
+	if count < 0 {
+		count = 0
+	}
+	return nodes, int(count)
 }
 
 // prefixedNodeReturnCols projects the same node columns nodeReturnCols

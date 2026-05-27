@@ -1780,6 +1780,133 @@ func nodeReceiverType(n *graph.Node) string {
 	return ""
 }
 
+// memberMethodsByType returns typeID → method-name-set for every
+// EdgeMemberOf edge whose source is a KindMethod node. Routed through
+// the storage layer's MemberMethodsByType capability when the backend
+// implements it (one Cypher join, server-side), falling back to the
+// EdgesByKind + per-edge GetNode loop the resolver used before the
+// capability landed. Used by InferImplements (and shaped to match its
+// existing map[string]map[string]bool API).
+func memberMethodsByType(g graph.Store) map[string]map[string]bool {
+	if cap, ok := g.(graph.MemberMethodsByType); ok {
+		raw := cap.MemberMethodsByType()
+		if len(raw) == 0 {
+			return nil
+		}
+		out := make(map[string]map[string]bool, len(raw))
+		for typeID, methods := range raw {
+			set := make(map[string]bool, len(methods))
+			for _, m := range methods {
+				set[m.Name] = true
+			}
+			out[typeID] = set
+		}
+		return out
+	}
+	out := map[string]map[string]bool{}
+	for e := range g.EdgesByKind(graph.EdgeMemberOf) {
+		methodNode := g.GetNode(e.From)
+		if methodNode == nil || methodNode.Kind != graph.KindMethod {
+			continue
+		}
+		if out[e.To] == nil {
+			out[e.To] = make(map[string]bool)
+		}
+		out[e.To][methodNode.Name] = true
+	}
+	return out
+}
+
+// memberMethodNodesByType returns typeID → name → method-node for
+// every EdgeMemberOf edge whose source is a KindMethod node. Routed
+// through the storage layer's MemberMethodsByType capability when the
+// backend implements it (the projection ships only the four columns
+// the consumer reads — ID / Name / FilePath / StartLine — packed into
+// a synthetic *Node that carries no Meta / QualName / Language); falls
+// back to the EdgesByKind + per-edge GetNode loop otherwise. Used by
+// InferOverrides which keys methods by name and reads ID/FilePath/
+// StartLine off the node when it emits an EdgeOverrides edge.
+func memberMethodNodesByType(g graph.Store) map[string]map[string]*graph.Node {
+	if cap, ok := g.(graph.MemberMethodsByType); ok {
+		raw := cap.MemberMethodsByType()
+		if len(raw) == 0 {
+			return nil
+		}
+		out := make(map[string]map[string]*graph.Node, len(raw))
+		for typeID, methods := range raw {
+			set := make(map[string]*graph.Node, len(methods))
+			for _, m := range methods {
+				set[m.Name] = &graph.Node{
+					ID:        m.MethodID,
+					Kind:      graph.KindMethod,
+					Name:      m.Name,
+					FilePath:  m.FilePath,
+					StartLine: m.StartLine,
+				}
+			}
+			out[typeID] = set
+		}
+		return out
+	}
+	out := map[string]map[string]*graph.Node{}
+	for e := range g.EdgesByKind(graph.EdgeMemberOf) {
+		method := g.GetNode(e.From)
+		if method == nil || method.Kind != graph.KindMethod {
+			continue
+		}
+		set := out[e.To]
+		if set == nil {
+			set = make(map[string]*graph.Node)
+			out[e.To] = set
+		}
+		set[method.Name] = method
+	}
+	return out
+}
+
+// structuralParentEdges returns every EdgeExtends / EdgeImplements /
+// EdgeComposes edge whose endpoints are both KindType / KindInterface,
+// projected as the (FromID, ToID, Origin) tuples InferOverrides
+// consumes. Routed through the storage layer's StructuralParentEdges
+// capability when the backend implements it (one Cypher join with
+// kind filters on both sides — no per-edge GetNode); falls back to
+// the AllEdges + per-edge GetNode walk otherwise.
+func structuralParentEdges(g graph.Store) []graph.StructuralParentEdgeRow {
+	if cap, ok := g.(graph.StructuralParentEdges); ok {
+		return cap.StructuralParentEdges()
+	}
+	parentKinds := map[graph.EdgeKind]bool{
+		graph.EdgeExtends:    true,
+		graph.EdgeImplements: true,
+		graph.EdgeComposes:   true,
+	}
+	var out []graph.StructuralParentEdgeRow
+	for _, e := range g.AllEdges() {
+		if e == nil || !parentKinds[e.Kind] {
+			continue
+		}
+		from := g.GetNode(e.From)
+		to := g.GetNode(e.To)
+		if from == nil || to == nil {
+			continue
+		}
+		if from.Kind != graph.KindType && from.Kind != graph.KindInterface {
+			continue
+		}
+		if to.Kind != graph.KindType && to.Kind != graph.KindInterface {
+			continue
+		}
+		out = append(out, graph.StructuralParentEdgeRow{
+			FromID:   from.ID,
+			ToID:     to.ID,
+			FromKind: from.Kind,
+			ToKind:   to.Kind,
+			Origin:   e.Origin,
+		})
+	}
+	return out
+}
+
 // InferImplements detects structural interface satisfaction by comparing
 // method sets and adds EdgeImplements edges from types to interfaces.
 // Returns the number of edges added.
@@ -1825,19 +1952,7 @@ func (r *Resolver) InferImplements() int {
 	}
 
 	// Step 2: Build map of type ID -> set of method names via EdgeMemberOf edges.
-	typeMethods := make(map[string]map[string]bool)
-	for e := range r.graph.EdgesByKind(graph.EdgeMemberOf) {
-		// EdgeMemberOf: From=method, To=type
-		methodNode := r.graph.GetNode(e.From)
-		if methodNode == nil || methodNode.Kind != graph.KindMethod {
-			continue
-		}
-		typeID := e.To
-		if typeMethods[typeID] == nil {
-			typeMethods[typeID] = make(map[string]bool)
-		}
-		typeMethods[typeID][methodNode.Name] = true
-	}
+	typeMethods := memberMethodsByType(r.graph)
 
 	// Step 3: For each type, check if its method set satisfies each interface.
 	//
@@ -1856,6 +1971,12 @@ func (r *Resolver) InferImplements() int {
 	for tid := range typeMethods {
 		typeList = append(typeList, tid)
 	}
+
+	// Prefetch every type node referenced by EdgeMemberOf in one batch
+	// before the workers spin up — on disk backends a per-worker
+	// GetNode(typeID) was an N+1 over cgo that the workers' parallelism
+	// could not hide.
+	typeNodes := r.graph.GetNodesByIDs(typeList)
 
 	workers := runtime.NumCPU()
 	if workers < 1 {
@@ -1886,7 +2007,7 @@ func (r *Resolver) InferImplements() int {
 			var out []pair
 			for _, typeID := range slice {
 				methods := typeMethods[typeID]
-				typeNode := r.graph.GetNode(typeID)
+				typeNode := typeNodes[typeID]
 				if typeNode == nil || (typeNode.Kind != graph.KindType && typeNode.Kind != graph.KindInterface) {
 					continue
 				}
@@ -1964,19 +2085,7 @@ func (r *Resolver) InferOverrides() int {
 	defer r.mu.Unlock()
 
 	// Step 1: index methods by their owning type via EdgeMemberOf.
-	typeMembers := make(map[string]map[string]*graph.Node) // typeID → name → method node
-	for e := range r.graph.EdgesByKind(graph.EdgeMemberOf) {
-		method := r.graph.GetNode(e.From)
-		if method == nil || method.Kind != graph.KindMethod {
-			continue
-		}
-		set := typeMembers[e.To]
-		if set == nil {
-			set = make(map[string]*graph.Node)
-			typeMembers[e.To] = set
-		}
-		set[method.Name] = method
-	}
+	typeMembers := memberMethodNodesByType(r.graph) // typeID → name → method node
 	if len(typeMembers) == 0 {
 		return 0
 	}
@@ -1985,33 +2094,17 @@ func (r *Resolver) InferOverrides() int {
 	// edge, walk the child's methods and emit EdgeOverrides where the
 	// parent has a same-named method. Skip if the override edge
 	// already exists.
-	parentKinds := map[graph.EdgeKind]bool{
-		graph.EdgeExtends:    true,
-		graph.EdgeImplements: true,
-		graph.EdgeComposes:   true,
-	}
 	type overridePair struct {
 		from, to *graph.Node
 		origin   string
 	}
 	var pending []overridePair
-	for _, e := range r.graph.AllEdges() {
-		if !parentKinds[e.Kind] {
+	for _, row := range structuralParentEdges(r.graph) {
+		if row.FromID == row.ToID {
 			continue
 		}
-		child := r.graph.GetNode(e.From)
-		parent := r.graph.GetNode(e.To)
-		if child == nil || parent == nil || child.ID == parent.ID {
-			continue
-		}
-		if child.Kind != graph.KindType && child.Kind != graph.KindInterface {
-			continue
-		}
-		if parent.Kind != graph.KindType && parent.Kind != graph.KindInterface {
-			continue
-		}
-		childMethods := typeMembers[child.ID]
-		parentMethods := typeMembers[parent.ID]
+		childMethods := typeMembers[row.FromID]
+		parentMethods := typeMembers[row.ToID]
 		if len(childMethods) == 0 || len(parentMethods) == 0 {
 			continue
 		}
@@ -2019,10 +2112,10 @@ func (r *Resolver) InferOverrides() int {
 		// the override edge so blast-radius queries can filter by
 		// min_tier consistently.
 		origin := graph.OriginASTInferred
-		if e.Origin == graph.OriginASTResolved {
+		if row.Origin == graph.OriginASTResolved {
 			origin = graph.OriginASTResolved
-		} else if rank := graph.OriginRank(e.Origin); rank >= graph.OriginRank(graph.OriginLSPDispatch) {
-			origin = e.Origin
+		} else if rank := graph.OriginRank(row.Origin); rank >= graph.OriginRank(graph.OriginLSPDispatch) {
+			origin = row.Origin
 		}
 		for name, cm := range childMethods {
 			pm, ok := parentMethods[name]

@@ -497,14 +497,15 @@ func goMapToLbugStruct(value map[string]any) (*C.lbug_value, error) {
 	}
 	sort.Strings(sortedKeys)
 	for _, k := range sortedKeys {
-		fieldNames = append(fieldNames, C.CString(k))
+		cName := C.CString(k)
+		fieldNames = append(fieldNames, cName)
+		defer C.free(unsafe.Pointer(cName))
 		lbugValue, error := goValueToLbugValue(value[k])
 		if error != nil {
 			return nil, fmt.Errorf("failed to convert value in the map with error: %w", error)
 		}
 		fieldValues = append(fieldValues, lbugValue)
 		defer C.lbug_value_destroy(lbugValue)
-		defer C.free(unsafe.Pointer(C.CString(k)))
 	}
 
 	var lbugValue *C.lbug_value
@@ -607,7 +608,9 @@ func goValueToLbugValue(value any) (*C.lbug_value, error) {
 	case float32:
 		lbugValue = C.lbug_value_create_float(C.float(v))
 	case string:
-		lbugValue = C.lbug_value_create_string(C.CString(v))
+		cStr := C.CString(v)
+		lbugValue = C.lbug_value_create_string(cStr)
+		C.free(unsafe.Pointer(cStr))
 	case time.Time:
 		if timeHasNanoseconds(v) {
 			lbugValue = C.lbug_value_create_timestamp_ns(timeToLbugTimestampNs(v))

@@ -666,25 +666,34 @@ func FindHotspots(g graph.Store, communities *CommunityResult, threshold float64
 
 	// Community crossings per node: outgoing edges (Calls or
 	// References) whose target sits in a different community than
-	// the source. Streamed per-kind via EdgesByKind so neither
-	// backend pays for an unfiltered AllEdges walk; the per-kind
-	// MATCH on disk backends is the same plan EdgesByKind feeds
-	// every other analyzer.
-	crossings := make(map[string]int)
-	countCrossings := func(kind graph.EdgeKind) {
-		for e := range g.EdgesByKind(kind) {
-			if e == nil {
-				continue
-			}
-			fromComm := nodeToComm[e.From]
-			toComm := nodeToComm[e.To]
-			if fromComm != "" && toComm != "" && fromComm != toComm {
-				crossings[e.From]++
+	// the source. CommunityCrossingsByKind ships only the (from, to)
+	// projection from a single IN-list join — the disk path stops
+	// re-materialising the full edge row per kind. Backends that
+	// don't implement the capability fall back to the per-kind
+	// EdgesByKind walk that mirrors the in-memory reference.
+	crossingKinds := []graph.EdgeKind{graph.EdgeCalls, graph.EdgeReferences}
+	var crossings map[string]int
+	if cc, ok := g.(graph.CommunityCrossingsByKind); ok {
+		crossings = cc.CommunityCrossingsByKind(crossingKinds, nodeToComm)
+	}
+	if crossings == nil {
+		crossings = make(map[string]int)
+		countCrossings := func(kind graph.EdgeKind) {
+			for e := range g.EdgesByKind(kind) {
+				if e == nil {
+					continue
+				}
+				fromComm := nodeToComm[e.From]
+				toComm := nodeToComm[e.To]
+				if fromComm != "" && toComm != "" && fromComm != toComm {
+					crossings[e.From]++
+				}
 			}
 		}
+		for _, k := range crossingKinds {
+			countCrossings(k)
+		}
 	}
-	countCrossings(graph.EdgeCalls)
-	countCrossings(graph.EdgeReferences)
 
 	// Betweenness centrality — exact on small graphs, sampled on
 	// large ones. Normalized to 0-100 against the graph's own max so

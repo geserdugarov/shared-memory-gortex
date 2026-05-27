@@ -3140,6 +3140,66 @@ func (g *Graph) FileEditingContext(filePath string, kinds []NodeKind) *FileEditi
 	return res
 }
 
+// GetFileSubGraph is the in-memory reference implementation of the
+// FileSubGraphReader capability. Iterates the existing per-file
+// byFile bucket and the per-node outEdges / inEdges shards — the
+// same lookups Engine.GetFileSymbols' fallback path already runs,
+// just collapsed behind one method so the disk backends can push the
+// whole walk into a single Cypher pattern match.
+func (g *Graph) GetFileSubGraph(filePath string) ([]*Node, []*Edge) {
+	if filePath == "" {
+		return nil, nil
+	}
+	nodes := g.GetFileNodes(filePath)
+	if len(nodes) == 0 {
+		return nil, nil
+	}
+	ids := make([]string, 0, len(nodes))
+	for _, n := range nodes {
+		if n != nil && n.ID != "" {
+			ids = append(ids, n.ID)
+		}
+	}
+	outByID := g.GetOutEdgesByNodeIDs(ids)
+	inByID := g.GetInEdgesByNodeIDs(ids)
+	type edgeKey struct {
+		from string
+		to   string
+		kind EdgeKind
+	}
+	seen := make(map[edgeKey]struct{}, 2*len(ids))
+	edges := make([]*Edge, 0, 2*len(ids))
+	add := func(e *Edge) {
+		if e == nil {
+			return
+		}
+		k := edgeKey{from: e.From, to: e.To, kind: e.Kind}
+		if _, ok := seen[k]; ok {
+			return
+		}
+		seen[k] = struct{}{}
+		edges = append(edges, e)
+	}
+	for _, id := range ids {
+		for _, e := range outByID[id] {
+			add(e)
+		}
+		for _, e := range inByID[id] {
+			add(e)
+		}
+	}
+	return nodes, edges
+}
+
+// GetFileSubGraphCounts is the in-memory reference implementation of
+// FileSubGraphCountReader. The per-node bucket reads are already
+// O(1) so it just walks GetFileSubGraph and reports len(edges); the
+// row-materialisation win belongs to disk backends.
+func (g *Graph) GetFileSubGraphCounts(filePath string) ([]*Node, int) {
+	nodes, edges := g.GetFileSubGraph(filePath)
+	return nodes, len(edges)
+}
+
 // NodeDegreeByKinds is the in-memory reference implementation of the
 // NodeDegreeByKinds capability. Walks NodesByKinds and reads each
 // node's in/out edge buckets — the disk backend overrides with one

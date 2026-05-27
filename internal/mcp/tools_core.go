@@ -564,11 +564,22 @@ func filterSubGraph(sg *query.SubGraph, allowed map[string]bool) *query.SubGraph
 			edges = append(edges, e)
 		}
 	}
+	totalEdges := len(edges)
+	// Counts-only payloads arrive with Edges == nil and TotalEdges
+	// pre-populated — preserve the upstream count instead of zeroing
+	// it. Inexact in the presence of a non-trivial filter (we'd need
+	// the edges to know which belong to filtered-out nodes), but the
+	// gcx output that asks for the count-only path runs with the
+	// session's workspace scope already applied at the store, so the
+	// filter pass is typically a no-op.
+	if len(sg.Edges) == 0 && sg.TotalEdges > 0 {
+		totalEdges = sg.TotalEdges
+	}
 	return &query.SubGraph{
 		Nodes:      nodes,
 		Edges:      edges,
 		TotalNodes: len(nodes),
-		TotalEdges: len(edges),
+		TotalEdges: totalEdges,
 		Truncated:  sg.Truncated,
 	}
 }
@@ -617,6 +628,51 @@ func enrichSubGraphEdges(sg *query.SubGraph) {
 			e.Origin = graph.DefaultOriginFor(e.Kind, e.Confidence, src)
 		}
 		e.Tier = graph.ResolvedBy(e.Origin)
+	}
+}
+
+// stripFileAndImportNodes returns a copy of sg with KindFile + KindImport
+// nodes removed (and edges that reference them dropped). Used by
+// handleGetFileSummary to keep its output focused on the symbols a
+// file *defines* — the file node and per-statement import nodes are
+// useful internals (e.g. for the file-neighbourhood walk that drives
+// the Ladybug-side pushdown) but noise in the agent-visible payload.
+func stripFileAndImportNodes(sg *query.SubGraph) *query.SubGraph {
+	if sg == nil {
+		return nil
+	}
+	keep := make(map[string]bool, len(sg.Nodes))
+	nodes := make([]*graph.Node, 0, len(sg.Nodes))
+	for _, n := range sg.Nodes {
+		if n == nil || n.Kind == graph.KindFile || n.Kind == graph.KindImport {
+			continue
+		}
+		nodes = append(nodes, n)
+		keep[n.ID] = true
+	}
+	edges := make([]*graph.Edge, 0, len(sg.Edges))
+	for _, e := range sg.Edges {
+		if e == nil || !keep[e.From] || !keep[e.To] {
+			continue
+		}
+		edges = append(edges, e)
+	}
+	totalEdges := len(edges)
+	// Counts-only payloads arrive with Edges == nil and TotalEdges
+	// already populated by the store. Keep that count — the file +
+	// import nodes we're stripping pulled some edges with them so it's
+	// a slight overcount, but the gcx callers that take this path
+	// only render it as a header scalar, not as anything load-bearing.
+	if len(sg.Edges) == 0 && sg.TotalEdges > 0 {
+		totalEdges = sg.TotalEdges
+	}
+	return &query.SubGraph{
+		Nodes:       nodes,
+		Edges:       edges,
+		TotalNodes:  len(nodes),
+		TotalEdges:  totalEdges,
+		Truncated:   sg.Truncated,
+		CallerNotes: sg.CallerNotes,
 	}
 }
 
@@ -736,7 +792,7 @@ func (s *Server) registerCoreTools() {
 
 	s.addTool(
 		mcp.NewTool("get_file_summary",
-			mcp.WithDescription("Use instead of Read to understand a file's role: returns all its symbols and imports without reading source lines."),
+			mcp.WithDescription("Use instead of Read to understand a file's role: returns the symbols a file defines (functions, methods, types, fields, …) without reading source lines. The file node itself and import nodes are excluded — use find_import_path or get_dependencies for import-shape queries."),
 			mcp.WithString("path", mcp.Required(), mcp.Description("Relative file path")),
 			mcp.WithBoolean("compact", mcp.Description("One-line-per-symbol text output (saves 50-70% tokens)")),
 			mcp.WithString("format", mcp.Description("Output format: json (default), gcx (GCX1 compact wire format), or toon")),
@@ -1583,7 +1639,21 @@ func (s *Server) handleGetFileSummary(ctx context.Context, req mcp.CallToolReque
 	// Auto re-index stale file before querying.
 	s.ensureFresh([]string{fp})
 
-	sg := s.engineFor(ctx).GetFileSymbols(fp)
+	// gcx is the high-volume agent format and only emits total_edges
+	// in its meta header — never per-edge rows. Route gcx-only calls
+	// through the count-only path so the disk backends skip
+	// materialising every adjacent edge across cgo (a 4 000-row
+	// round-trip on a 500-symbol file becomes two scalar aggregates).
+	// compact + json paths still take the full SubGraph because
+	// compact summarises edges per confidence label and json ships
+	// every edge in the body.
+	gcxOnly := s.isGCX(ctx, req) && !isCompact(req)
+	var sg *query.SubGraph
+	if gcxOnly {
+		sg = s.engineFor(ctx).GetFileSymbolsCounts(fp)
+	} else {
+		sg = s.engineFor(ctx).GetFileSymbols(fp)
+	}
 	if len(sg.Nodes) == 0 {
 		return mcp.NewToolResultError("no symbols found for file: " + fp), nil
 	}
@@ -1598,12 +1668,26 @@ func (s *Server) handleGetFileSummary(ctx context.Context, req mcp.CallToolReque
 		return mcp.NewToolResultError("no symbols found for file in specified scope: " + fp), nil
 	}
 
+	// get_file_summary's contract is "what symbols does this file
+	// define" — the file node itself and import nodes ride on
+	// GetFileSubGraph because they're useful for other walkers, but
+	// the encoder layer wants the symbols-only view. The compact
+	// path already filtered both kinds inline; the cleaner home is
+	// here so every output format (compact, gcx, json, toon) sees the
+	// same shape.
+	sg = stripFileAndImportNodes(sg)
+	if len(sg.Nodes) == 0 {
+		return mcp.NewToolResultError("no symbols found for file: " + fp), nil
+	}
+
 	if isCompact(req) {
 		return mcp.NewToolResultText(compactSubGraph(sg)), nil
 	}
 
-	// ETag conditional fetch.
-	etag := computeETag(sg)
+	// ETag conditional fetch. Use the structural SubGraph hash —
+	// json.Marshal'ing the whole SubGraph + Meta on every call was the
+	// dominant cost on large files (~2 ms / call on a 500-symbol file).
+	etag := etagSubGraph(sg)
 	if ifNoneMatch := req.GetString("if_none_match", ""); ifNoneMatch != "" && ifNoneMatch == etag {
 		return notModifiedResult(etag), nil
 	}

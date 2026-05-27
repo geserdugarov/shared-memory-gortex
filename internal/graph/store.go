@@ -1433,6 +1433,58 @@ type FileEditingContext interface {
 	FileEditingContext(filePath string, kinds []NodeKind) *FileEditingContextResult
 }
 
+// FileSubGraphReader is an optional capability backends MAY implement
+// to return the full file neighbourhood — the file node, every node
+// defined in or contained by it, and every adjacent edge — in a
+// single backend round-trip.
+//
+// On the in-memory backend the per-id GetOutEdges / GetInEdges loop
+// is already O(1) per node, so the query.Engine.GetFileSymbols
+// fallback wraps it. On disk backends the same loop is
+// O(file_symbols × cgo) — ~547 symbols on a real file fanned out into
+// ~5 000 cgo round-trips just to dedup edges in Go. The capability
+// lets Ladybug express the walk as one Cypher pattern match that
+// uses the primary-key HASH index on Node.id plus the rel-table's
+// FROM index on Edge — both already present without any DDL change.
+//
+// Returned slices are deduplicated by the implementation. Missing
+// file returns (nil, nil); empty file (file node only, no symbols)
+// returns ([file], nil). Callers that need the symbols-only view
+// strip KindFile + KindImport on top (see
+// internal/mcp/tools_core.go::stripFileAndImportNodes).
+//
+// Optional capability — query.Engine.GetFileSymbols falls back to
+// GetFileNodes + GetOut/InEdgesByNodeIDs when the backend doesn't
+// implement it.
+type FileSubGraphReader interface {
+	GetFileSubGraph(filePath string) (nodes []*Node, edges []*Edge)
+}
+
+// FileSubGraphCountReader is the count-only sibling of
+// FileSubGraphReader: returns the file's nodes plus the number of
+// distinct edges adjacent to any of them, without materialising the
+// edges themselves.
+//
+// The Ladybug headline cost for get_file_summary on a 500-symbol file
+// was the ~4 000-row cgo crossing to ship every adjacent edge back to
+// Go. The gcx and compact output paths only emit a total_edges scalar
+// in their meta headers — never per-edge rows — so handleGetFileSummary
+// routes gcx through this method and skips the row materialisation
+// entirely. The json output path keeps the full GetFileSubGraph call
+// because it serialises every edge in the body, and the compact path
+// keeps it because it summarises edges per confidence label.
+//
+// On the in-memory backend the per-node edge bucket lookups are
+// already O(1), so its implementation just counts via the same path
+// GetFileSubGraph walks; the win is on disk backends.
+//
+// Optional capability — query.Engine.GetFileSymbolsCounts falls back
+// to len(GetFileSubGraph().edges) when the backend doesn't implement
+// it.
+type FileSubGraphCountReader interface {
+	GetFileSubGraphCounts(filePath string) (nodes []*Node, edgeCount int)
+}
+
 // NodeDegreeByKinds is an optional capability backends MAY implement
 // to return per-node total in/out edge counts for every node whose
 // kind is in the supplied set, server-side. Replaces the

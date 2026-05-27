@@ -129,16 +129,64 @@ func (e *Engine) FindSymbols(name string, kinds ...graph.NodeKind) []*graph.Node
 	return filtered
 }
 
-// GetFileSymbols returns all symbols defined in a file.
+// GetFileSymbolsCounts returns the file's symbols and the count of
+// edges adjacent to them, without materialising the edges themselves.
+// Use it instead of GetFileSymbols when the caller only needs an
+// edge total (gcx + compact output paths in get_file_summary), since
+// the disk backends can collapse the edge round-trip into a server-
+// side aggregate that's orders of magnitude cheaper than shipping
+// every row back over cgo.
+//
+// Backends that implement graph.FileSubGraphCountReader handle the
+// count server-side; others fall through to a full GetFileSymbols call
+// and report len(sg.Edges) (correct, just not cheap).
+func (e *Engine) GetFileSymbolsCounts(filePath string) *SubGraph {
+	if pd, ok := e.g.(graph.FileSubGraphCountReader); ok {
+		nodes, edgeCount := pd.GetFileSubGraphCounts(filePath)
+		if len(nodes) == 0 {
+			return &SubGraph{}
+		}
+		return &SubGraph{
+			Nodes:      nodes,
+			TotalNodes: len(nodes),
+			TotalEdges: edgeCount,
+		}
+	}
+	sg := e.GetFileSymbols(filePath)
+	if sg == nil {
+		return &SubGraph{}
+	}
+	// Strip edges — the caller asked for counts only and we don't
+	// want stale edge buffers riding back on the SubGraph.
+	sg.Edges = nil
+	return sg
+}
+
+// GetFileSymbols returns the file node, every symbol the file
+// defines or contains, and every edge adjacent to any of them.
+//
+// Backends that implement graph.FileSubGraphReader (the Ladybug
+// store, for instance) handle the whole walk in one method call so
+// they can express the symbol enumeration as a primary-key probe +
+// rel-table FROM walk instead of a property-filter scan over Node.
+// Backends without the capability fall through to the
+// GetFileNodes + GetOut/InEdgesByNodeIDs trio — equivalent on the
+// in-memory graph (the per-id lookups are already O(1)).
 func (e *Engine) GetFileSymbols(filePath string) *SubGraph {
+	if pd, ok := e.g.(graph.FileSubGraphReader); ok {
+		nodes, edges := pd.GetFileSubGraph(filePath)
+		if len(nodes) == 0 {
+			return &SubGraph{}
+		}
+		return &SubGraph{
+			Nodes: nodes, Edges: edges,
+			TotalNodes: len(nodes), TotalEdges: len(edges),
+		}
+	}
 	nodes := e.g.GetFileNodes(filePath)
 	if len(nodes) == 0 {
 		return &SubGraph{}
 	}
-	// Batched in/out edges: one Cypher per direction instead of 2N
-	// per-node queries. Replaces the per-node GetIn/OutEdges loop —
-	// for a file with 30 symbols that was 60 backend round-trips on
-	// Ladybug just to collect imports + intra-file references.
 	ids := make([]string, 0, len(nodes))
 	for _, n := range nodes {
 		ids = append(ids, n.ID)
@@ -1139,14 +1187,29 @@ func isTestSource(n *graph.Node) bool {
 }
 
 func dedup(edges []*graph.Edge) []*graph.Edge {
-	seen := make(map[string]bool)
-	var out []*graph.Edge
+	if len(edges) == 0 {
+		return edges
+	}
+	// Struct key avoids the per-edge string concatenation the old
+	// implementation paid (e.From + "->" + e.To + ":" + kind) — on a
+	// 4 000-edge file the alloc storm dominated GetFileSymbols.
+	type dedupKey struct {
+		from string
+		to   string
+		kind graph.EdgeKind
+	}
+	seen := make(map[dedupKey]struct{}, len(edges))
+	out := make([]*graph.Edge, 0, len(edges))
 	for _, e := range edges {
-		key := e.From + "->" + e.To + ":" + string(e.Kind)
-		if !seen[key] {
-			seen[key] = true
-			out = append(out, e)
+		if e == nil {
+			continue
 		}
+		k := dedupKey{from: e.From, to: e.To, kind: e.Kind}
+		if _, ok := seen[k]; ok {
+			continue
+		}
+		seen[k] = struct{}{}
+		out = append(out, e)
 	}
 	return out
 }

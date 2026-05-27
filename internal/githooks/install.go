@@ -74,6 +74,13 @@ type InstallOpts struct {
 	// at run time" — the right default for shared repos where the
 	// branch name varies per checkout.
 	ChurnBranch string
+	// RegenReleases toggles a `gortex enrich releases` run. Same
+	// motivation as RegenChurn: keeps `analyze kind=releases` answers
+	// fresh without paying the per-call tag walk.
+	RegenReleases bool
+	// ReleasesBranch is the rev whose reachable tags bound the
+	// timeline. Empty means "resolve at hook run time".
+	ReleasesBranch string
 }
 
 func (o InstallOpts) withDefaults() InstallOpts {
@@ -117,6 +124,14 @@ func hookCommands(hook string, opts InstallOpts) []string {
 		} else {
 			cmds = append(cmds, fmt.Sprintf("(%s enrich churn --branch=%q) >/dev/null 2>&1 || true",
 				opts.Binary, opts.ChurnBranch))
+		}
+	}
+	if opts.RegenReleases {
+		if strings.TrimSpace(opts.ReleasesBranch) == "" {
+			cmds = append(cmds, fmt.Sprintf("(%s enrich releases) >/dev/null 2>&1 || true", opts.Binary))
+		} else {
+			cmds = append(cmds, fmt.Sprintf("(%s enrich releases --branch=%q) >/dev/null 2>&1 || true",
+				opts.Binary, opts.ReleasesBranch))
 		}
 	}
 	if len(cmds) == 2 {

@@ -96,6 +96,11 @@ const (
 	// (and the post-commit / post-merge git hooks) don't have to fight
 	// the LadyBug write lock the daemon holds.
 	ControlEnrichChurn = "enrich_churn"
+	// ControlEnrichReleases dispatches to Controller.EnrichReleases.
+	// Same routing rationale as ControlEnrichChurn — the CLI hands the
+	// enrichment to the daemon when one is up so the write lock stays
+	// uncontested.
+	ControlEnrichReleases = "enrich_releases"
 )
 
 // TrackParams is the payload for ControlTrack.
@@ -264,6 +269,28 @@ type EnrichChurnResult struct {
 	Symbols    int    `json:"symbols"`
 	Branch     string `json:"branch"`
 	HeadSHA    string `json:"head_sha"`
+	DurationMS int64  `json:"duration_ms"`
+}
+
+// EnrichReleasesParams is the payload for ControlEnrichReleases.
+//
+// Path scopes the enrichment to a single tracked repo (prefix or
+// absolute root, "" for "every tracked repo"). Branch restricts the
+// considered tags to those reachable from that branch; empty Branch
+// means "every tag in the repo" — matches the legacy `analyze
+// kind=releases` behaviour.
+type EnrichReleasesParams struct {
+	Path   string `json:"path,omitempty"`
+	Branch string `json:"branch,omitempty"`
+}
+
+// EnrichReleasesResult is the payload returned under Result for a
+// successful ControlEnrichReleases call. Files is the count of file
+// nodes stamped with meta.added_in across every repo that
+// participated.
+type EnrichReleasesResult struct {
+	Files      int    `json:"files"`
+	Branch     string `json:"branch,omitempty"`
 	DurationMS int64  `json:"duration_ms"`
 }
 

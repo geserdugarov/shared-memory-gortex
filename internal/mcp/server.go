@@ -849,6 +849,7 @@ func NewServer(engine *query.Engine, g graph.Store, idx *indexer.Indexer, watche
 	s.registerInspectionsTools()
 	s.registerChurnRateTool()
 	s.registerEnrichChurnTool()
+	s.registerEnrichReleasesTool()
 	s.registerCoChangeTool()
 	s.registerArtifactTools()
 	s.registerCouplingMetricsTool()

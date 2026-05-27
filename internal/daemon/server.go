@@ -102,6 +102,10 @@ type Controller interface {
 	// CLI invocations (and the post-commit / post-merge git hook) can
 	// trigger it without taking the LadyBug write lock the daemon owns.
 	EnrichChurn(ctx context.Context, params EnrichChurnParams) (EnrichChurnResult, error)
+	// EnrichReleases runs the per-file release enricher against the
+	// daemon's in-process graph. Same routing rationale as
+	// EnrichChurn — keeps the LadyBug write lock with the daemon.
+	EnrichReleases(ctx context.Context, params EnrichReleasesParams) (EnrichReleasesResult, error)
 	// Shutdown is invoked via the control surface and should return
 	// quickly; the daemon's actual shutdown work happens after the
 	// response is written.
@@ -535,6 +539,21 @@ func (s *Server) handleControl(_ *Session, req ControlRequest) ControlResponse {
 		buf, err := json.Marshal(result)
 		if err != nil {
 			return controlErr(ErrInternal, "marshal enrich_churn result: "+err.Error())
+		}
+		return ControlResponse{OK: true, Result: buf}
+
+	case ControlEnrichReleases:
+		var p EnrichReleasesParams
+		if err := unmarshalParams(req.Params, &p); err != nil {
+			return controlErr(ErrInternal, err.Error())
+		}
+		result, err := s.Controller.EnrichReleases(ctx, p)
+		if err != nil {
+			return controlErr(ErrInternal, err.Error())
+		}
+		buf, err := json.Marshal(result)
+		if err != nil {
+			return controlErr(ErrInternal, "marshal enrich_releases result: "+err.Error())
 		}
 		return ControlResponse{OK: true, Result: buf}
 	}

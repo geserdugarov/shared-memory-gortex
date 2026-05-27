@@ -23,7 +23,6 @@ import (
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/persistence"
 	"github.com/zzet/gortex/internal/query"
-	"github.com/zzet/gortex/internal/releases"
 	"github.com/zzet/gortex/internal/tokens"
 	"go.uber.org/zap"
 )
@@ -146,7 +145,7 @@ func (s *Server) registerEnhancementTools() {
 			mcp.WithNumber("min_pct", mcp.Description("(coverage_gaps) Lower-inclusive coverage threshold — default 0")),
 			mcp.WithNumber("max_pct", mcp.Description("(coverage_gaps) Upper-exclusive coverage threshold — default 100, i.e. anything not fully covered")),
 			mcp.WithString("provider", mcp.Description("(stale_flags) Filter to a single provider — launchdarkly, growthbook, unleash, internal")),
-			mcp.WithString("tag", mcp.Description("(todos) Filter by tag — TODO / FIXME / HACK / XXX / NOTE — case-insensitive")),
+			mcp.WithString("tag", mcp.Description("(todos) Filter by tag — TODO / FIXME / HACK / XXX / NOTE — case-insensitive. (releases) Filter to one release tag — returns the file list whose meta.added_in matches; populate via enrich_releases first.")),
 			mcp.WithString("assignee", mcp.Description("(todos) Filter by exact assignee — case-sensitive")),
 			mcp.WithString("ticket", mcp.Description("(todos) Filter by exact ticket reference — e.g. PROJ-42")),
 			mcp.WithBoolean("has_assignee", mcp.Description("(todos) Keep only TODOs that have an assignee set")),
@@ -1839,32 +1838,157 @@ func (s *Server) handleAnalyzeInteropUsers(ctx context.Context, req mcp.CallTool
 	})
 }
 
-// handleAnalyzeReleases walks git tags chronologically and stamps
-// meta.added_in on every file node with the earliest tag whose
-// tree contained that file. Symbols inherit indirectly via their
-// owning file — answers "added in v1.4?" with one graph hop from
-// any symbol to its file. Re-runnable: each call re-walks tags
-// and overwrites existing meta.
+// handleAnalyzeReleases reads the pre-computed release timeline from
+// the graph. Inputs come from meta.added_in (stamped on KindFile
+// nodes) and the KindRelease nodes the enricher materialises — one
+// per tag, ordered, carrying file_count metadata. No git subprocess
+// at read time.
+//
+// When nothing in scope carries release metadata the tool returns a
+// structured error pointing the agent at `enrich_releases` (or the
+// `gortex enrich releases` CLI) rather than silently returning an
+// empty result; the latter would look like "this repo has no
+// releases" even when the cause is "you haven't enriched yet".
+//
+// Optional filter `tag` returns only the named release with the list
+// of files whose meta.added_in matches it — answers "what shipped in
+// v1.4?" with a single graph scan.
 func (s *Server) handleAnalyzeReleases(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	roots := s.collectRepoRoots(req.GetString("repo", ""))
-	if len(roots) == 0 {
-		return mcp.NewToolResultError("releases enrichment requires at least one indexed repo with a root path"), nil
+	if s.graph == nil {
+		return mcp.NewToolResultError("graph not initialized"), nil
 	}
-	total := 0
-	perRepo := make(map[string]any, len(roots))
-	for prefix, root := range roots {
-		count, err := releases.EnrichGraphWithRepoPrefix(s.graph, root, prefix)
-		if err != nil {
-			perRepo[prefix] = map[string]any{"root": root, "error": err.Error()}
+	repoFilter := strings.TrimSpace(req.GetString("repo", ""))
+	tagFilter := strings.TrimSpace(req.GetString("tag", ""))
+
+	type releaseRow struct {
+		ID         string   `json:"id"`
+		Tag        string   `json:"tag"`
+		RepoPrefix string   `json:"repo_prefix,omitempty"`
+		FileCount  int      `json:"file_count"`
+		Order      int      `json:"order"`
+		Files      []string `json:"files,omitempty"`
+	}
+	releaseByTag := map[string]*releaseRow{}
+	for _, n := range s.graph.AllNodes() {
+		if n.Kind != graph.KindRelease {
 			continue
 		}
-		total += count
-		perRepo[prefix] = map[string]any{"root": root, "enriched": count}
+		if repoFilter != "" && n.RepoPrefix != repoFilter {
+			continue
+		}
+		row := &releaseRow{
+			ID:         n.ID,
+			Tag:        n.Name,
+			RepoPrefix: n.RepoPrefix,
+		}
+		if n.Meta != nil {
+			row.FileCount = intFromAny(n.Meta["file_count"])
+			row.Order = intFromAny(n.Meta["order"])
+		}
+		key := releaseKey(n.RepoPrefix, n.Name)
+		releaseByTag[key] = row
 	}
-	return s.respondJSONOrTOON(ctx, req, map[string]any{
-		"enriched": total,
-		"per_repo": perRepo,
+
+	if tagFilter != "" {
+		// Caller wants the file list for one release. We surface it
+		// from meta.added_in rather than a tree walk, so the answer
+		// is whatever the last enrich pass observed.
+		row, ok := releaseByTag[releaseKey(repoFilter, tagFilter)]
+		if !ok {
+			// Tolerate the no-prefix form: agents pass "v1.4" without
+			// realising the graph stores multi-repo tags as
+			// "<prefix>/v1.4". Fall back to a tag-name-only match.
+			for k, r := range releaseByTag {
+				if r.Tag == tagFilter {
+					row = r
+					_ = k
+					break
+				}
+			}
+		}
+		if row == nil {
+			return s.respondJSONOrTOON(ctx, req, map[string]any{
+				"error":      fmt.Sprintf("no KindRelease node for tag %q; run `enrich_releases` first", tagFilter),
+				"suggestion": "enrich_releases",
+				"releases":   []releaseRow{},
+				"total":      0,
+			})
+		}
+		for _, n := range s.graph.AllNodes() {
+			if n.Kind != graph.KindFile || n.FilePath == "" {
+				continue
+			}
+			if repoFilter != "" && n.RepoPrefix != repoFilter {
+				continue
+			}
+			if n.Meta == nil {
+				continue
+			}
+			added, _ := n.Meta["added_in"].(string)
+			if added != row.Tag {
+				continue
+			}
+			row.Files = append(row.Files, n.FilePath)
+		}
+		sort.Strings(row.Files)
+		return s.respondJSONOrTOON(ctx, req, map[string]any{
+			"releases":  []releaseRow{*row},
+			"total":     1,
+			"tag":       tagFilter,
+			"file_hits": len(row.Files),
+		})
+	}
+
+	// No tag filter: return the timeline. Use `order` (oldest=0) so
+	// callers can flip to newest-first via reverse.
+	if len(releaseByTag) == 0 {
+		// Distinguish "no enrichment yet" from "repo has no tags" by
+		// peeking at any file's meta.added_in. If even one file has
+		// the field set the enrichment ran and produced no releases
+		// (an unlikely combination; surface as an empty timeline);
+		// otherwise return the structured error.
+		hasAnyAddedIn := false
+		for _, n := range s.graph.AllNodes() {
+			if n.Kind == graph.KindFile && n.Meta != nil {
+				if _, ok := n.Meta["added_in"].(string); ok {
+					hasAnyAddedIn = true
+					break
+				}
+			}
+		}
+		if !hasAnyAddedIn {
+			return s.respondJSONOrTOON(ctx, req, map[string]any{
+				"error":      "no release timeline in scope; run `enrich_releases` (or `gortex enrich releases`) to populate KindRelease nodes and meta.added_in",
+				"suggestion": "enrich_releases",
+				"releases":   []releaseRow{},
+				"total":      0,
+			})
+		}
+	}
+	rows := make([]releaseRow, 0, len(releaseByTag))
+	for _, r := range releaseByTag {
+		rows = append(rows, *r)
+	}
+	sort.Slice(rows, func(i, j int) bool {
+		if rows[i].Order != rows[j].Order {
+			return rows[i].Order < rows[j].Order
+		}
+		return rows[i].Tag < rows[j].Tag
 	})
+	return s.respondJSONOrTOON(ctx, req, map[string]any{
+		"releases": rows,
+		"total":    len(rows),
+	})
+}
+
+// releaseKey builds the lookup key from a (repoPrefix, tag) pair so
+// the tag-filtered path can compare scoped IDs against the bare
+// agent input.
+func releaseKey(repoPrefix, tag string) string {
+	if repoPrefix == "" {
+		return tag
+	}
+	return repoPrefix + "/" + tag
 }
 
 // handleAnalyzeBlame runs `git blame -p` against the indexed

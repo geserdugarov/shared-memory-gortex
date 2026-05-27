@@ -41,6 +41,9 @@ func (f *fakeController) SearchSymbols(_ context.Context, _ daemon.SearchSymbols
 func (f *fakeController) EnrichChurn(_ context.Context, _ daemon.EnrichChurnParams) (daemon.EnrichChurnResult, error) {
 	return daemon.EnrichChurnResult{}, nil
 }
+func (f *fakeController) EnrichReleases(_ context.Context, _ daemon.EnrichReleasesParams) (daemon.EnrichReleasesResult, error) {
+	return daemon.EnrichReleasesResult{}, nil
+}
 
 // startTestDaemon spins up a real daemon on a short-path unix socket and
 // points GORTEX_DAEMON_SOCKET at it so daemon.Dial finds it.

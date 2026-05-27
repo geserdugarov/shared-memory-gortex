@@ -233,6 +233,30 @@ func TestInstallHook_PostMergeAndChurn(t *testing.T) {
 	}
 }
 
+func TestInstallHook_RegenReleases(t *testing.T) {
+	repo := initRepo(t)
+	path, err := InstallHook(repo, "post-merge", InstallOpts{
+		RegenReleases:  true,
+		ReleasesBranch: "origin/main",
+	})
+	if err != nil {
+		t.Fatalf("InstallHook post-merge: %v", err)
+	}
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read hook: %v", err)
+	}
+	got := string(body)
+	for _, want := range []string{
+		"gortex enrich releases",
+		`--branch="origin/main"`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("hook missing %q. Body:\n%s", want, got)
+		}
+	}
+}
+
 func TestInstallHook_RejectsUnsupportedHook(t *testing.T) {
 	repo := initRepo(t)
 	if _, err := InstallHook(repo, "pre-push", InstallOpts{RegenMermaid: true}); err == nil {

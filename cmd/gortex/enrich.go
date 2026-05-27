@@ -2,8 +2,10 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"github.com/spf13/cobra"
 
@@ -11,6 +13,7 @@ import (
 	"github.com/zzet/gortex/internal/cochange"
 	"github.com/zzet/gortex/internal/config"
 	"github.com/zzet/gortex/internal/coverage"
+	"github.com/zzet/gortex/internal/daemon"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/indexer"
 	"github.com/zzet/gortex/internal/parser"
@@ -34,6 +37,7 @@ var (
 	enrichBlameSnapshot    string
 	enrichCoverageSnapshot string
 	enrichReleasesSnapshot string
+	enrichReleasesBranch   string
 	enrichCochangeSnapshot string
 
 	enrichAllSnapshot string
@@ -94,6 +98,8 @@ func init() {
 		"write the enriched graph as a gob.gz snapshot to this path")
 	enrichReleasesCmd.Flags().StringVar(&enrichReleasesSnapshot, "snapshot", "",
 		"write the enriched graph as a gob.gz snapshot to this path")
+	enrichReleasesCmd.Flags().StringVar(&enrichReleasesBranch, "branch", "",
+		"restrict to tags reachable from this branch (default: resolve origin/main/master). Empty means every tag in the repo")
 	enrichCochangeCmd.Flags().StringVar(&enrichCochangeSnapshot, "snapshot", "",
 		"write the enriched graph as a gob.gz snapshot to this path")
 	enrichAllCmd.Flags().StringVar(&enrichAllSnapshot, "snapshot", "",
@@ -207,6 +213,17 @@ func runEnrichReleases(cmd *cobra.Command, args []string) error {
 	if len(args) >= 1 {
 		path = args[0]
 	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return fmt.Errorf("abs path %q: %w", path, err)
+	}
+
+	// Daemon path: forward to the running daemon so the enrichment
+	// runs against its in-process (and possibly LadyBug-backed)
+	// graph. Mirrors the churn CLI's behaviour.
+	if daemon.IsRunning() {
+		return forwardEnrichReleasesToDaemon(cmd, abs)
+	}
 
 	cfg, err := config.Load(cfgFile)
 	if err != nil {
@@ -222,8 +239,16 @@ func runEnrichReleases(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	branch := enrichReleasesBranch
+	if branch == "" {
+		branch = gitDefaultBranch(idx.RootPath())
+	}
+
 	sp := newCLISpinner(cmd, "Stamping releases")
-	count, err := releases.EnrichGraph(g, idx.RootPath())
+	if branch != "" {
+		sp.Set("", branch)
+	}
+	count, err := releases.EnrichGraphForBranch(g, idx.RootPath(), "", branch)
 	if err != nil {
 		sp.Fail(err)
 		return fmt.Errorf("releases: %w", err)
@@ -233,7 +258,9 @@ func runEnrichReleases(cmd *cobra.Command, args []string) error {
 
 	result := map[string]any{
 		"enriched": count,
+		"branch":   branch,
 		"root":     idx.RootPath(),
+		"mode":     "standalone",
 	}
 	if enrichReleasesSnapshot != "" {
 		if err := saveSnapshotTo(g, nil, nil, snapshotVector{}, "gortex-enrich-releases", enrichReleasesSnapshot, logger); err != nil {
@@ -242,6 +269,49 @@ func runEnrichReleases(cmd *cobra.Command, args []string) error {
 		result["snapshot"] = enrichReleasesSnapshot
 	}
 	return printEnrichResult(result)
+}
+
+// forwardEnrichReleasesToDaemon sends a ControlEnrichReleases RPC
+// and renders the response. Same shape as forwardEnrichChurnToDaemon.
+func forwardEnrichReleasesToDaemon(cmd *cobra.Command, absPath string) error {
+	c, err := daemon.Dial(daemon.Handshake{Mode: daemon.ModeControl, ClientName: "cli-enrich-releases"})
+	if err != nil {
+		if errors.Is(err, daemon.ErrDaemonUnavailable) {
+			return fmt.Errorf("daemon socket detected but dial failed; restart the daemon or run with no daemon (it falls back to in-memory)")
+		}
+		return fmt.Errorf("dial daemon: %w", err)
+	}
+	defer func() { _ = c.Close() }()
+
+	resp, err := c.Control(daemon.ControlEnrichReleases, daemon.EnrichReleasesParams{
+		Path:   absPath,
+		Branch: enrichReleasesBranch,
+	})
+	if err != nil {
+		return fmt.Errorf("control enrich_releases: %w", err)
+	}
+	if !resp.OK {
+		return fmt.Errorf("daemon rejected enrich_releases [%s]: %s", resp.ErrorCode, resp.ErrorMsg)
+	}
+	var out daemon.EnrichReleasesResult
+	if len(resp.Result) > 0 {
+		if err := json.Unmarshal(resp.Result, &out); err != nil {
+			return fmt.Errorf("parse daemon response: %w", err)
+		}
+	}
+	sp := newCLISpinner(cmd, "Enriched via daemon")
+	sp.Set("", fmt.Sprintf("%d files · %s", out.Files, out.Branch))
+	sp.Done()
+	payload := map[string]any{
+		"enriched":    out.Files,
+		"branch":      out.Branch,
+		"duration_ms": out.DurationMS,
+		"mode":        "daemon",
+	}
+	if absPath != "" {
+		payload["path"] = absPath
+	}
+	return printEnrichResult(payload)
 }
 
 func runEnrichCochange(cmd *cobra.Command, args []string) error {

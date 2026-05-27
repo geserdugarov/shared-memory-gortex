@@ -12,15 +12,17 @@ import (
 )
 
 var (
-	githookRegenMermaid  bool
-	githookRegenWiki     bool
-	githookRegenDocs     bool
-	githookRegenChurn    bool
-	githookMermaidOutDir string
-	githookWikiOutDir    string
-	githookDocsOutPath   string
-	githookChurnBranch   string
-	githookBinary        string
+	githookRegenMermaid   bool
+	githookRegenWiki      bool
+	githookRegenDocs      bool
+	githookRegenChurn     bool
+	githookRegenReleases  bool
+	githookMermaidOutDir  string
+	githookWikiOutDir     string
+	githookDocsOutPath    string
+	githookChurnBranch    string
+	githookReleasesBranch string
+	githookBinary         string
 )
 
 var githookCmd = &cobra.Command{
@@ -66,6 +68,10 @@ func init() {
 		"include `gortex enrich churn` so get_churn_rate stays fresh without an at-read-time git subprocess")
 	githookInstallCmd.Flags().StringVar(&githookChurnBranch, "churn-branch", "",
 		"branch / tag / SHA the churn enricher pins to (default: resolve at hook run-time)")
+	githookInstallCmd.Flags().BoolVar(&githookRegenReleases, "regen-releases", false,
+		"include `gortex enrich releases` so analyze kind=releases reads pre-computed Meta")
+	githookInstallCmd.Flags().StringVar(&githookReleasesBranch, "releases-branch", "",
+		"branch / tag / SHA the releases enricher restricts to (default: resolve at hook run-time)")
 	githookInstallCmd.Flags().StringVar(&githookMermaidOutDir, "mermaid-out-dir", "docs/architecture/",
 		"output directory for mermaid diagrams")
 	githookInstallCmd.Flags().StringVar(&githookWikiOutDir, "wiki-out-dir", "wiki",
@@ -100,28 +106,30 @@ func runGithookInstall(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	if !githookRegenMermaid && !githookRegenWiki && !githookRegenDocs && !githookRegenChurn {
+	if !githookRegenMermaid && !githookRegenWiki && !githookRegenDocs && !githookRegenChurn && !githookRegenReleases {
 		// Default to mermaid when nothing was chosen — minimum
 		// useful behaviour.
 		githookRegenMermaid = true
 	}
 	path, err := githooks.InstallHook(repoRoot, hook, githooks.InstallOpts{
-		Binary:        githookBinary,
-		RegenMermaid:  githookRegenMermaid,
-		RegenWiki:     githookRegenWiki,
-		RegenDocs:     githookRegenDocs,
-		RegenChurn:    githookRegenChurn,
-		ChurnBranch:   githookChurnBranch,
-		MermaidOutDir: githookMermaidOutDir,
-		WikiOutDir:    githookWikiOutDir,
-		DocsOutPath:   githookDocsOutPath,
+		Binary:         githookBinary,
+		RegenMermaid:   githookRegenMermaid,
+		RegenWiki:      githookRegenWiki,
+		RegenDocs:      githookRegenDocs,
+		RegenChurn:     githookRegenChurn,
+		ChurnBranch:    githookChurnBranch,
+		RegenReleases:  githookRegenReleases,
+		ReleasesBranch: githookReleasesBranch,
+		MermaidOutDir:  githookMermaidOutDir,
+		WikiOutDir:     githookWikiOutDir,
+		DocsOutPath:    githookDocsOutPath,
 	})
 	if err != nil {
 		return err
 	}
 	_, _ = fmt.Fprintf(cmd.OutOrStdout(),
-		"installed %s hook at %s\nactions: mermaid=%t wiki=%t docs=%t churn=%t\n",
-		hook, path, githookRegenMermaid, githookRegenWiki, githookRegenDocs, githookRegenChurn)
+		"installed %s hook at %s\nactions: mermaid=%t wiki=%t docs=%t churn=%t releases=%t\n",
+		hook, path, githookRegenMermaid, githookRegenWiki, githookRegenDocs, githookRegenChurn, githookRegenReleases)
 	return nil
 }
 

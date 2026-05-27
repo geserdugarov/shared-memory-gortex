@@ -19,6 +19,7 @@ import (
 	"github.com/zzet/gortex/internal/daemon"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/indexer"
+	"github.com/zzet/gortex/internal/releases"
 	"github.com/zzet/gortex/internal/search"
 	"github.com/zzet/gortex/internal/semantic/lsp"
 )
@@ -168,6 +169,61 @@ func (c *realController) EnrichChurn(ctx context.Context, p daemon.EnrichChurnPa
 		combined.Symbols += res.Symbols
 		combined.Branch = res.Branch
 		combined.HeadSHA = res.HeadSHA
+	}
+	combined.DurationMS = time.Since(started).Milliseconds()
+	return combined, nil
+}
+
+// EnrichReleases runs the per-file release enricher against the
+// daemon's graph. Mirrors EnrichChurn — c.mu is held for the duration,
+// targets resolve via the multi-indexer, and an empty Branch lets
+// each repo's default branch be resolved on demand (so feature-branch
+// tags don't leak into the timeline).
+func (c *realController) EnrichReleases(ctx context.Context, p daemon.EnrichReleasesParams) (daemon.EnrichReleasesResult, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.graph == nil {
+		return daemon.EnrichReleasesResult{}, fmt.Errorf("graph not initialized")
+	}
+	if c.multiIndexer == nil {
+		return daemon.EnrichReleasesResult{}, fmt.Errorf("multi-repo indexer not initialized")
+	}
+
+	type target struct {
+		prefix string
+		root   string
+	}
+	var targets []target
+	want := strings.TrimSpace(p.Path)
+	for prefix, meta := range c.multiIndexer.AllMetadata() {
+		if want != "" && want != prefix && want != meta.RootPath {
+			continue
+		}
+		targets = append(targets, target{prefix: prefix, root: meta.RootPath})
+	}
+	if len(targets) == 0 {
+		return daemon.EnrichReleasesResult{}, fmt.Errorf("no tracked repo matches %q", p.Path)
+	}
+	_ = ctx // graph mutation is synchronous; no cancellation surface today
+
+	started := time.Now()
+	var combined daemon.EnrichReleasesResult
+	for _, t := range targets {
+		branch := strings.TrimSpace(p.Branch)
+		if branch == "" {
+			branch = gitDefaultBranch(t.root)
+			// Empty branch is still legal — releases.EnrichGraphForBranch
+			// treats "" as "every tag", which is the right default when
+			// no default branch can be resolved (e.g. a clone without
+			// origin/HEAD set yet).
+		}
+		count, err := releases.EnrichGraphForBranch(c.graph, t.root, t.prefix, branch)
+		if err != nil {
+			return daemon.EnrichReleasesResult{}, fmt.Errorf("enrich %s: %w", t.prefix, err)
+		}
+		combined.Files += count
+		combined.Branch = branch
 	}
 	combined.DurationMS = time.Since(started).Milliseconds()
 	return combined, nil

@@ -88,6 +88,10 @@ func (f *fakeController) EnrichChurn(_ context.Context, _ EnrichChurnParams) (En
 	return EnrichChurnResult{}, nil
 }
 
+func (f *fakeController) EnrichReleases(_ context.Context, _ EnrichReleasesParams) (EnrichReleasesResult, error) {
+	return EnrichReleasesResult{}, nil
+}
+
 // newDaemon spins up a Server on a short socket path + Fake controller.
 // macOS limits Unix socket paths to ~104 chars (sizeof(sun_path)), and
 // Go's t.TempDir() path can exceed that for long test names, so we mint

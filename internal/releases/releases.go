@@ -37,8 +37,26 @@ import (
 // unavailable. Errors silently produce an empty list — releases
 // enrichment is best-effort like blame.
 func ListTags(repoRoot string) []string {
-	cmd := exec.Command("git", "-C", repoRoot,
-		"for-each-ref", "--sort=creatordate", "--format=%(refname:short)", "refs/tags/")
+	return ListTagsOnBranch(repoRoot, "")
+}
+
+// ListTagsOnBranch is ListTags scoped to tags reachable from `branch`.
+// Empty branch means "every tag in the repo", matching ListTags.
+//
+// Restricting to a single branch is the canonical defence against
+// feature-branch tags polluting the release timeline: tags that were
+// only ever pushed on a topic branch (a "v0.0.0-test" tag from a
+// rebase scratch, for instance) shouldn't appear in the persisted
+// release order. Pass the repo's default branch ("origin/main",
+// "main", …) when callers want that semantic.
+func ListTagsOnBranch(repoRoot, branch string) []string {
+	args := []string{"-C", repoRoot, "for-each-ref",
+		"--sort=creatordate", "--format=%(refname:short)"}
+	if strings.TrimSpace(branch) != "" {
+		args = append(args, "--merged="+branch)
+	}
+	args = append(args, "refs/tags/")
+	cmd := exec.Command("git", args...)
 	out, err := cmd.Output()
 	if err != nil {
 		return nil
@@ -112,11 +130,24 @@ func EnrichGraph(g graph.Store, repoRoot string) (int, error) {
 // EnrichGraph. EnrichGraph delegates to it with an empty prefix; the
 // multi-repo enricher passes the per-repo prefix so KindRelease IDs
 // stay collision-free across repos.
+//
+// Walks every tag in the repo. Use EnrichGraphForBranch when callers
+// want to restrict the timeline to tags reachable from a specific
+// branch — typically the default branch — so topic-branch tags don't
+// pollute the persisted history.
 func EnrichGraphWithRepoPrefix(g graph.Store, repoRoot, repoPrefix string) (int, error) {
+	return EnrichGraphForBranch(g, repoRoot, repoPrefix, "")
+}
+
+// EnrichGraphForBranch is EnrichGraphWithRepoPrefix scoped to tags
+// reachable from `branch`. Empty branch means "every tag", matching
+// the legacy behaviour. Mutations round-trip through g.AddNode so
+// LadyBug-backed stores persist the result.
+func EnrichGraphForBranch(g graph.Store, repoRoot, repoPrefix, branch string) (int, error) {
 	if g == nil || repoRoot == "" {
 		return 0, nil
 	}
-	tags := ListTags(repoRoot)
+	tags := ListTagsOnBranch(repoRoot, branch)
 	if len(tags) == 0 {
 		return 0, nil
 	}
@@ -189,6 +220,12 @@ func EnrichGraphWithRepoPrefix(g graph.Store, repoRoot, repoPrefix string) (int,
 			n.Meta = map[string]any{}
 		}
 		n.Meta["added_in"] = tag
+		// Re-upsert so LadyBug-backed stores persist the Meta change.
+		// In-memory stores treat this as a no-op (the pointer is
+		// already in the graph); the disk-backed implementations need
+		// the AddNode call to round-trip Meta through their write
+		// path. Mirrors the churn enricher.
+		g.AddNode(n)
 		enriched++
 	}
 	return enriched, nil

@@ -25,14 +25,26 @@ type Store struct {
 	conn *lbug.Connection // setup connection — DDL + extension installs
 	pool *connPool        // per-Store fan-out for query traffic
 
-	// writeMu serialises every mutation. KuzuDB's C engine is
-	// thread-safe internally but the Go binding shares a single
-	// kuzu_connection handle across goroutines; serialising at the
-	// Go layer keeps semantics predictable under the conformance
-	// suite's 8-goroutine concurrency test and turns Cypher
-	// statements into the same sequential trace the in-memory
-	// store sees.
-	writeMu sync.Mutex
+	// writeMu serialises every mutation AND excludes reads for the
+	// duration of a write. It is an RWMutex: writes take the exclusive
+	// Lock (one writer at a time, no concurrent readers), reads take the
+	// shared RLock (any number of concurrent readers, none while a write
+	// is in flight).
+	//
+	// The read-exclusion is load-bearing, not just for logical
+	// consistency: ladybug's bulk COPY extends the .lbug file in place,
+	// and a read issued on a *different* pooled connection while that
+	// COPY is mid-flight lands in a half-written buffer page. The benign
+	// outcome is an "IO exception: Cannot read N bytes at position M"
+	// (degraded to an empty result on the read path); the malign outcome
+	// is a SIGSEGV inside lbug_connection_query as the COPY's own CGo
+	// call trips over the concurrently-mutated buffer-pool state. Holding
+	// the writer side across every COPY/MERGE/DELETE and the reader side
+	// across every query makes the two mutually exclusive, which is the
+	// only contract this ladybug revision actually honours under
+	// concurrency. Concurrent reads still parallelise via RLock, so the
+	// steady-state fan-out the conformance suite exercises is preserved.
+	writeMu sync.RWMutex
 
 	// resolveMu is the resolver-coordination mutex returned by
 	// ResolveMutex. Held by cross-repo / temporal / external resolver
@@ -863,6 +875,23 @@ func (s *Store) EvictRepo(repoPrefix string) (nodesRemoved, edgesRemoved int) {
 		}
 	}
 	n, e := s.evictByScopeLocked("repo_prefix", repoPrefix)
+	// ALSO evict nodes whose ID is in this repo's namespace (`<prefix>/…`)
+	// but whose repo_prefix column is empty. Edge-endpoint stubs created
+	// by mergeStubNodeLocked (cross-repo resolution, the global resolve
+	// pass) are written with repo_prefix='' even when their ID is
+	// `<prefix>/unresolved::Name` — so the repo_prefix-scoped delete above
+	// misses them. They then collide on the INSERT-only bulk COPY when
+	// this repo is re-tracked (warm-restart reconcile), failing the COPY
+	// with "duplicated primary key" and — because the repo's real rows
+	// were already evicted — dropping the whole repo from the graph. The
+	// trailing slash keeps `gortex/` from matching `gortex-cloud/…`.
+	// Skipped for the single-repo (empty-prefix) store, where every ID is
+	// already covered by the repo_prefix='' delete shape.
+	if repoPrefix != "" {
+		const delByID = `MATCH (n:Node) WHERE n.id STARTS WITH $idp DETACH DELETE n`
+		s.runWriteLocked(delByID, map[string]any{"idp": repoPrefix + "/"})
+		s.writeGen.Add(1)
+	}
 	if s.fileIDs != nil {
 		s.fileIDs.removeFiles(affectedPaths)
 	}
@@ -1637,6 +1666,16 @@ func (s *Store) runWriteLocked(query string, args map[string]any) {
 // to the pool — open iterators hold the kuzu_query handle and
 // the connection isn't safe to reuse until the result is closed.
 func (s *Store) querySelect(query string, args map[string]any) [][]any {
+	// RLock excludes the read from the window any writer (COPY / MERGE /
+	// DELETE) holds the exclusive Lock — a read on a sibling pooled
+	// connection while a COPY extends the .lbug file is the source of
+	// both the "Cannot read N bytes" IO exceptions and the harder
+	// lbug_connection_query SIGSEGV. Concurrent reads still run in
+	// parallel; only a write blocks them. Callers that already hold the
+	// write Lock must route through querySelectLocked, which skips this
+	// acquisition (an RWMutex is not reentrant).
+	s.writeMu.RLock()
+	defer s.writeMu.RUnlock()
 	return s.querySelectInner(query, args)
 }
 

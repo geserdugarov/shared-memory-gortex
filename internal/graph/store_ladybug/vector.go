@@ -187,6 +187,17 @@ func (s *Store) BulkUpsertEmbeddings(items []graph.VectorItem) error {
 		return nil
 	}
 
+	// Drop the HNSW index BEFORE mutating the table. Ladybug cannot
+	// COPY (or bulk-DELETE) into a table that still carries a vector
+	// index — the operation hangs/aborts deep in the engine, which on a
+	// warm restart (where the prior run's index is already present)
+	// manifests as the whole reconcile worker wedging at 0% CPU and
+	// never reaching "watching". Dropping first mirrors what
+	// BuildVectorIndex already does before CREATE_VECTOR_INDEX. Safe
+	// no-op when no index exists; BuildVectorIndex recreates it after
+	// the embedding pass.
+	_ = runCypherSafe(s, fmt.Sprintf(`CALL DROP_VECTOR_INDEX('SymbolVec', '%s')`, vecIndexName))
+	s.vec.indexBuilt.Store(false)
 	if err := runCypherSafe(s, `MATCH (v:SymbolVec) DELETE v`); err != nil {
 		return fmt.Errorf("clear SymbolVec before bulk upsert: %w", err)
 	}

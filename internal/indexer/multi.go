@@ -379,6 +379,26 @@ func (mi *MultiIndexer) EndBatch() {
 	mi.RunGlobalGraphPasses(context.Background())
 }
 
+// ResetBatch clears deferred-batch mode WITHOUT running the graph-wide
+// derivation passes. It is the warm-restart fast-path counterpart to
+// EndBatch: when the warmup reconcile loop observed zero changed files
+// across every repo, the persistent backend already holds every resolved
+// and derived edge from the prior run, so RunGlobalGraphPasses (plus the
+// RunDeferredPassesAll / RunGlobalResolve the caller also skips) would
+// only recompute what's already on disk — the work that turns a warm
+// restart into a 30s–500s stall. The per-Indexer SetDeferGlobalPasses
+// flag is still restored so a later watch-triggered TrackRepoCtx /
+// IncrementalReindex runs its passes inline as normal.
+func (mi *MultiIndexer) ResetBatch() {
+	mi.mu.Lock()
+	defer mi.mu.Unlock()
+	mi.deferGlobalPasses = false
+	mi.deferResolve = false
+	for _, idx := range mi.indexers {
+		idx.SetDeferGlobalPasses(false)
+	}
+}
+
 // RunGlobalGraphPasses runs the graph-wide derivation passes once
 // against the shared graph: InferImplements (structural interface
 // satisfaction), InferOverrides (method-level overrides on
@@ -1085,7 +1105,41 @@ func (mi *MultiIndexer) ReconcileRepoCtx(ctx context.Context, entry config.RepoE
 	idx.SetRootPath(absPath)
 	idx.SetFileMtimes(priorMtimes)
 
-	result, err := idx.IncrementalReindex(absPath)
+	// Choose the reconcile strategy. A repo that changed while the
+	// daemon was down must NOT take IncrementalReindex's per-file path:
+	// re-resolving a changed file there goes through per-edge
+	// graph.ReindexEdges, and the per-edge ladybug write hangs inside
+	// lbug_connection_prepare on the first write to a freshly reopened
+	// store (the warm restart wedges forever at 0% CPU). The shadow/bulk
+	// re-track path (IndexCtx) resolves in an in-memory shadow and
+	// commits one bulk COPY, so it never issues a per-edge write to the
+	// reopened store. It re-indexes the whole repo, but only repos that
+	// actually changed pay it, and it is reliable where the per-edge path
+	// is not. A repo with zero changes keeps the fast IncrementalReindex
+	// no-op (walk + 0 stale → return), which is what makes an unchanged
+	// warm restart near-instant.
+	// The shadow/bulk re-track workaround for the per-edge ReindexEdges
+	// hang applies ONLY to disk-backed stores (ladybug), which is where
+	// the first per-edge write to a reopened store wedges in
+	// lbug_connection_prepare. The in-memory backend (*graph.Graph) has
+	// no reopen and no CGo write path, and IncrementalReindex is the
+	// authoritative path there — it evicts offline-deleted files in place
+	// (a re-track of a shared in-memory graph would not). Gate on the
+	// store type so the memory backend keeps its exact prior behaviour.
+	_, memoryBacked := mi.graph.(*graph.Graph)
+	var result *IndexResult
+	if !memoryBacked && idx.HasChangesSinceMtimes(absPath) {
+		result, err = idx.IndexCtx(ctx, absPath)
+		if err == nil && result != nil && result.StaleFileCount == 0 {
+			// Signal "this repo did re-indexing work" to the warmup
+			// change-detector (which keys on StaleFileCount): a full
+			// re-track touches every file, so the daemon's global
+			// resolution passes must run.
+			result.StaleFileCount = result.FileCount
+		}
+	} else {
+		result, err = idx.IncrementalReindex(absPath)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("reconciling %s: %w", absPath, err)
 	}

@@ -133,6 +133,19 @@ func (s *Store) BulkUpsertSymbolFTS(repoPrefix string, items []graph.SymbolFTSIt
 		return nil
 	}
 
+	// Drop the FTS index BEFORE mutating the table. Ladybug cannot
+	// DELETE-from / COPY-into a table that still carries an FTS index —
+	// the operation errors, and the failed statement leaves the pooled
+	// connection poisoned; discarding it then crashes the daemon in
+	// lbug_connection_destroy. On a cold start the table has no index
+	// yet so this is a no-op, but on a warm-restart re-track the prior
+	// run's index is present and this drop is what keeps the re-track
+	// from taking the whole daemon down. BuildSymbolIndex recreates the
+	// index after the corpus is rewritten. Same hazard (and fix) as the
+	// SymbolVec vector-index path.
+	_ = runCypherSafe(s, fmt.Sprintf(`CALL DROP_FTS_INDEX('SymbolFTS', '%s')`, ftsIndexName))
+	s.fts.indexBuilt.Store(false)
+
 	// Wipe prior FTS rows for this repo only so sibling repos
 	// in a MultiIndexer store keep their corpus. Without this
 	// scoping a clean rebuild of repo A would wipe repo B's rows

@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"go.uber.org/zap"
@@ -691,6 +692,15 @@ func warmupDaemonState(state *daemonState, logger *zap.Logger) *indexer.MultiWat
 
 	jobs := make(chan config.RepoEntry, len(repos))
 	var wg sync.WaitGroup
+	// changedRepos counts repos that actually did indexing work this
+	// warmup: a cold full-track, or a reconcile that re-indexed / evicted
+	// at least one file. When it stays zero, NOTHING on disk changed
+	// since the last shutdown, so the persisted graph already holds every
+	// resolved and derived edge — the global resolution passes below
+	// (RunDeferredPassesAll / RunGlobalResolve / RunGlobalGraphPasses) are
+	// pure recomputation and get skipped, which is what makes a true warm
+	// restart near-instant instead of replaying the full cold-warmup cost.
+	var changedRepos atomic.Int64
 	for i := 0; i < workers; i++ {
 		wg.Add(1)
 		go func() {
@@ -747,13 +757,26 @@ func warmupDaemonState(state *daemonState, logger *zap.Logger) *indexer.MultiWat
 				pathFn := "track"
 				if priorMtimes != nil {
 					pathFn = "reconcile"
-					if _, err := state.multiIndexer.ReconcileRepoCtx(ctx, entry, priorMtimes); err != nil {
+					res, err := state.multiIndexer.ReconcileRepoCtx(ctx, entry, priorMtimes)
+					switch {
+					case err != nil:
 						logger.Warn("daemon: startup reconcile failed",
 							zap.String("path", entry.Path), zap.Error(err))
+						// Treat a failed reconcile as "changed" so the global
+						// passes still run — degrade toward correctness, not
+						// toward the fast path, when we can't trust the delta.
+						changedRepos.Add(1)
+					case res != nil && (res.StaleFileCount > 0 || res.DeletedFileCount > 0 || len(res.FailedFiles) > 0):
+						changedRepos.Add(1)
 					}
-				} else if _, err := state.multiIndexer.TrackRepoCtx(ctx, entry); err != nil {
-					logger.Warn("daemon: startup track failed",
-						zap.String("path", entry.Path), zap.Error(err))
+				} else {
+					// No prior mtimes → full cold (re)index of this repo,
+					// which is "changed" by definition.
+					changedRepos.Add(1)
+					if _, err := state.multiIndexer.TrackRepoCtx(ctx, entry); err != nil {
+						logger.Warn("daemon: startup track failed",
+							zap.String("path", entry.Path), zap.Error(err))
+					}
 				}
 				elapsed := time.Since(repoStart)
 				if elapsed > 2*time.Second {
@@ -779,19 +802,36 @@ func warmupDaemonState(state *daemonState, logger *zap.Logger) *indexer.MultiWat
 		"elapsed_ms":    time.Since(phaseStart).Milliseconds(),
 	})
 
+	// Warm-restart fast path. When the reconcile loop above re-indexed
+	// nothing, the persistent backend already carries every resolved and
+	// derived edge from the prior run; the deferred per-repo passes, the
+	// cross-repo resolve, and the graph-wide derivation passes would all
+	// just recompute what's on disk. Skipping them is what turns a warm
+	// restart from a multi-minute replay of the cold-warmup cost into a
+	// near-instant "open store, reconcile zero files, start watching".
+	// The in-memory backend reaches here too, but its snapshot replay
+	// already restored the derived edges, so the skip is equally safe.
+	anyChanged := changedRepos.Load() > 0
+	logger.Info("daemon: warmup change detection",
+		zap.Int64("changed_repos", changedRepos.Load()),
+		zap.Int("tracked_repos", len(repos)),
+		zap.Bool("global_passes", anyChanged))
+
 	// Drain deferred per-repo passes (ResolveAll / semantic enrich /
 	// contract extract+commit) serially across the indexers the parallel
 	// loop populated. Must run before RunGlobalResolve so cross-repo
 	// resolution sees fully-lifted per-repo placeholder edges.
-	phaseStart = time.Now()
-	publishReadinessPhase(state, "deferred_passes_all", false, nil)
-	state.multiIndexer.RunDeferredPassesAll(ctx)
-	logger.Info("daemon: warmup phase done",
-		zap.String("phase", "deferred_passes_all"),
-		zap.Duration("elapsed", time.Since(phaseStart)))
-	publishReadinessPhase(state, "deferred_passes_all_done", false, map[string]any{
-		"elapsed_ms": time.Since(phaseStart).Milliseconds(),
-	})
+	if anyChanged {
+		phaseStart = time.Now()
+		publishReadinessPhase(state, "deferred_passes_all", false, nil)
+		state.multiIndexer.RunDeferredPassesAll(ctx)
+		logger.Info("daemon: warmup phase done",
+			zap.String("phase", "deferred_passes_all"),
+			zap.Duration("elapsed", time.Since(phaseStart)))
+		publishReadinessPhase(state, "deferred_passes_all_done", false, map[string]any{
+			"elapsed_ms": time.Since(phaseStart).Milliseconds(),
+		})
+	}
 
 	// Rehydrate per-repo contract registries from the snapshot. Only
 	// target indexers whose registry is still nil — a non-nil registry
@@ -864,24 +904,33 @@ func warmupDaemonState(state *daemonState, logger *zap.Logger) *indexer.MultiWat
 	// for a fresh-start daemon (where there's no snapshot to reconcile
 	// against). After resolution, contract bridge edges may have
 	// changed too, so ReconcileContractEdges runs again.
-	phaseStart = time.Now()
-	publishReadinessPhase(state, "global_resolve", false, nil)
-	state.multiIndexer.RunGlobalResolve()
-	logger.Info("daemon: warmup phase done",
-		zap.String("phase", "global_resolve"),
-		zap.Duration("elapsed", time.Since(phaseStart)))
-	publishReadinessPhase(state, "global_resolve_done", false, map[string]any{
-		"elapsed_ms": time.Since(phaseStart).Milliseconds(),
-	})
+	if anyChanged {
+		phaseStart = time.Now()
+		publishReadinessPhase(state, "global_resolve", false, nil)
+		state.multiIndexer.RunGlobalResolve()
+		logger.Info("daemon: warmup phase done",
+			zap.String("phase", "global_resolve"),
+			zap.Duration("elapsed", time.Since(phaseStart)))
+		publishReadinessPhase(state, "global_resolve_done", false, map[string]any{
+			"elapsed_ms": time.Since(phaseStart).Milliseconds(),
+		})
+	}
 
 	// Finish the batch: turn off the per-repo skip flag and run the
 	// graph-wide derivation passes once. RunGlobalResolve above just
 	// lifted the last cross-repo placeholder EdgeCalls, so EdgeTests
 	// derivation here picks up cross-repo test→subject pairs that
-	// were unresolved during the per-repo loop.
+	// were unresolved during the per-repo loop. On the warm-restart fast
+	// path (nothing changed) ResetBatch clears the deferred-batch flags
+	// without re-running those passes — the persisted graph already has
+	// the derived edges.
 	phaseStart = time.Now()
 	publishReadinessPhase(state, "end_batch", false, nil)
-	state.multiIndexer.EndBatch()
+	if anyChanged {
+		state.multiIndexer.EndBatch()
+	} else {
+		state.multiIndexer.ResetBatch()
+	}
 	logger.Info("daemon: warmup phase done",
 		zap.String("phase", "end_batch"),
 		zap.Duration("elapsed", time.Since(phaseStart)))

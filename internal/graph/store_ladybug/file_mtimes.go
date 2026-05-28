@@ -1,6 +1,8 @@
 package store_ladybug
 
 import (
+	"strings"
+
 	"github.com/zzet/gortex/internal/graph"
 )
 
@@ -36,8 +38,24 @@ func (s *Store) BulkSetFileMtimes(repoPrefix string, mtimes map[string]int64) er
 		if id == "" {
 			continue
 		}
+		// The incoming map is keyed by RELATIVE path (the indexer keys
+		// fileMtimes by relKey). PRIMARY KEY(file_id) on the FileMtime
+		// table is global, but relative paths are NOT unique across
+		// repos: every tree-sitter grammar repo carries `src/parser.c`,
+		// `grammar.js`, `binding.gyp`, etc. Storing the bare relative
+		// path as file_id let those rows collide cross-repo — the
+		// last-writing repo's MERGE overwrote the row's repo_prefix, so
+		// every other repo sharing that path silently lost its mtimes
+		// and re-indexed (full COPY) on every warm restart. Prefix the
+		// id with the repo prefix to make it globally unique, matching
+		// the `repoPrefix + "/" + relPath` convention node file_paths
+		// already use. LoadFileMtimes strips the prefix back off.
+		fileID := id
+		if repoPrefix != "" {
+			fileID = repoPrefix + "/" + id
+		}
 		rows = append(rows, map[string]any{
-			"file_id":     id,
+			"file_id":     fileID,
 			"repo_prefix": repoPrefix,
 			"mtime_ns":    mt,
 		})
@@ -83,6 +101,17 @@ func (s *Store) LoadFileMtimes(repoPrefix string) map[string]int64 {
 	if len(rows) == 0 {
 		return nil
 	}
+	// Strip the repo prefix BulkSetFileMtimes prepends so the returned
+	// keys are relative paths again — that's what the indexer's
+	// fileMtimes map / IsStale comparison expect. Tolerate rows written
+	// by the pre-fix code (bare relative file_id): when the prefix isn't
+	// present we use the id verbatim, so a store mid-migration loads
+	// both shapes without re-indexing the repos that were never
+	// collision victims.
+	strip := ""
+	if repoPrefix != "" {
+		strip = repoPrefix + "/"
+	}
 	out := make(map[string]int64, len(rows))
 	for _, r := range rows {
 		if len(r) < 2 {
@@ -91,6 +120,9 @@ func (s *Store) LoadFileMtimes(repoPrefix string) map[string]int64 {
 		id, _ := r[0].(string)
 		if id == "" {
 			continue
+		}
+		if strip != "" {
+			id = strings.TrimPrefix(id, strip)
 		}
 		out[id] = asInt64(r[1])
 	}

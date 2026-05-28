@@ -76,8 +76,17 @@ type IndexResult struct {
 	// file node carrying skipped_due_to_size / skipped_due_to_timeout
 	// telemetry. Zero unless one of those caps is set.
 	SkippedFiles int          `json:"skipped_files,omitempty"`
-	DurationMs   int64        `json:"duration_ms"`
-	Errors       []IndexError `json:"errors,omitempty"`
+	// DeletedFileCount is the number of previously-indexed files that
+	// were evicted this pass because they no longer exist on disk (only
+	// populated by IncrementalReindex). Together with StaleFileCount it
+	// lets a batch caller — the daemon warmup loop in particular — decide
+	// whether a repo actually changed since the last shutdown: when both
+	// are zero across every repo, the persisted graph already carries
+	// every resolved / derived edge and the global resolution passes can
+	// be skipped entirely (the warm-restart fast path).
+	DeletedFileCount int          `json:"deleted_file_count,omitempty"`
+	DurationMs       int64        `json:"duration_ms"`
+	Errors           []IndexError `json:"errors,omitempty"`
 }
 
 // EdgeSanityViolated reports the post-reindex sanity-check failure: an
@@ -1757,6 +1766,30 @@ func (idx *Indexer) IndexCtx(ctx context.Context, root string) (result *IndexRes
 		zap.Bool("shadow_taken", blOK && firstIndex && belowShadowMax),
 	)
 	if blOK && firstIndex && belowShadowMax {
+		// Warm-restart safety. `firstIndex` is a PER-INDEXER sentinel, and
+		// a fresh per-repo Indexer is constructed on every daemon restart,
+		// so firstIndex is true on every restart — even when the
+		// persistent disk store already holds this repo's nodes from a
+		// prior run. The shadow drain below ends in BulkLoad's INSERT-only
+		// COPY, which (per this function's own contract) "running against a
+		// non-empty store would corrupt or duplicate". On the ladybug
+		// backend a duplicate-primary-key COPY does not error cleanly — it
+		// SIGSEGVs inside lbug_connection_query and takes the whole daemon
+		// down, then re-fires on the next restart (the repo's mtimes never
+		// got persisted because warmup died first): a crash loop. Evicting
+		// the repo's existing rows first makes the COPY land on a clean
+		// slate. EvictRepo self-guards with a count query, so this is a
+		// cheap no-op for the genuine first-index cases (true cold start,
+		// a newly-tracked repo) where the disk store has no rows for this
+		// prefix. preNodes>0 short-circuits the call entirely on the
+		// first repo of a cold start (empty store).
+		if preNodes > 0 {
+			if n, e := idx.graph.EvictRepo(idx.RepoPrefix()); n > 0 || e > 0 {
+				idx.logger.Info("indexer: evicted stale repo rows before bulk reload (warm restart)",
+					zap.String("repo", idx.RepoPrefix()),
+					zap.Int("nodes", n), zap.Int("edges", e))
+			}
+		}
 		idx.indexCount.Add(1)
 		diskTarget = idx.graph
 		inMemShadow = graph.New()
@@ -3571,7 +3604,22 @@ func (idx *Indexer) IncrementalReindexPaths(root string, paths []string) (*Index
 		resolver.SynthesizeExternalCalls(idx.graph, idx.externalCallSynthesisEnabled())
 	}
 
-	idx.buildSearchIndex()
+	// Skip the search-index rebuild on a zero-change reconcile when the
+	// backend already persists its search structures (ladybug: native
+	// FTS + native HNSW vectors). buildSearchIndex re-reads every node
+	// (GetRepoNodes) and re-embeds them, then BulkUpsertEmbeddings does
+	// a `DELETE all SymbolVec` + COPY into a table that still carries the
+	// prior run's HNSW index. On a warm restart that work is pure
+	// recompute of already-persisted data, AND running it concurrently
+	// across the parallel-warmup workers is a CGo crash site (COPY into
+	// an indexed table; cross-repo DELETE-all stomp). When nothing
+	// changed there is nothing to re-embed, so skip it entirely — the
+	// persisted index is authoritative. The in-memory backends (BM25 /
+	// Bleve) must still rebuild from the replayed snapshot, so they keep
+	// the unconditional path.
+	if len(staleFiles) > 0 || len(deletedFiles) > 0 || !isSymbolSearcherBackend(idx.search) {
+		idx.buildSearchIndex()
+	}
 
 	if len(staleFiles) > 0 || len(deletedFiles) > 0 {
 		idx.extractContracts()
@@ -3582,10 +3630,11 @@ func (idx *Indexer) IncrementalReindexPaths(root string, paths []string) (*Index
 	result := &IndexResult{
 		NodeCount:      nodes,
 		EdgeCount:      edges,
-		FileCount:      len(diskFiles),
-		StaleFileCount: len(staleFiles),
-		FailedFiles:    failedFiles,
-		DurationMs:     time.Since(start).Milliseconds(),
+		FileCount:        len(diskFiles),
+		StaleFileCount:   len(staleFiles),
+		DeletedFileCount: len(deletedFiles),
+		FailedFiles:      failedFiles,
+		DurationMs:       time.Since(start).Milliseconds(),
 	}
 	idx.warnIfEdgeSanityViolated(result)
 	return result, nil
@@ -3773,8 +3822,16 @@ func (idx *Indexer) IncrementalReindex(root string) (*IndexResult, error) {
 		// the global clone pass once at the end.
 	}
 
-	// Rebuild search index to ensure consistency.
-	idx.buildSearchIndex()
+	// Rebuild search index to ensure consistency — but skip it on a
+	// zero-change reconcile against a backend that persists its search
+	// structures natively (ladybug). See the matching guard in the
+	// other incremental path: re-embedding + the DELETE-all-then-COPY
+	// into the still-indexed SymbolVec table is both wasted work and a
+	// parallel-warmup CGo crash site, and there is nothing to rebuild
+	// when no file changed.
+	if len(staleFiles) > 0 || len(deletedFiles) > 0 || !isSymbolSearcherBackend(idx.search) {
+		idx.buildSearchIndex()
+	}
 
 	// Update totalDetected so index_health reports correctly after cache restore.
 	if idx.totalDetected == 0 {
@@ -3791,10 +3848,11 @@ func (idx *Indexer) IncrementalReindex(root string) (*IndexResult, error) {
 	result := &IndexResult{
 		NodeCount:      nodes,
 		EdgeCount:      edges,
-		FileCount:      len(diskFiles),
-		StaleFileCount: len(staleFiles),
-		FailedFiles:    failedFiles,
-		DurationMs:     time.Since(start).Milliseconds(),
+		FileCount:        len(diskFiles),
+		StaleFileCount:   len(staleFiles),
+		DeletedFileCount: len(deletedFiles),
+		FailedFiles:      failedFiles,
+		DurationMs:       time.Since(start).Milliseconds(),
 	}
 	idx.warnIfEdgeSanityViolated(result)
 	return result, nil
@@ -5592,6 +5650,85 @@ func (idx *Indexer) extractContracts() {
 // Unicode form than fileMtimes was keyed with still resolves — without
 // the fold the lookup would miss and the file be reported permanently
 // stale, re-indexing it under a second key on every pass.
+// HasChangesSinceMtimes reports whether any indexable file under root
+// changed (mtime differs or is new) or was deleted, relative to the
+// indexer's currently-loaded fileMtimes. It runs the SAME walk +
+// staleness + deletion logic as IncrementalReindex but writes nothing.
+//
+// The daemon warmup uses it to choose a reconcile strategy for a
+// reopened repo: a repo with zero changes takes the fast no-op
+// IncrementalReindex path, while a repo that changed while the daemon
+// was down is routed through the shadow/bulk-COPY re-track path instead.
+// That routing matters because IncrementalReindex re-resolves changed
+// files through per-edge graph.ReindexEdges, and the per-edge ladybug
+// write path HANGS inside lbug_connection_prepare on the first write to
+// a freshly reopened store — the warm restart wedges at 0% CPU forever.
+// The shadow path resolves entirely in an in-memory graph and commits
+// the result in one bulk COPY, so it never issues a per-edge write to
+// the reopened store. It re-indexes the whole repo (more work than a
+// true incremental pass), but it is reliable, and only repos that
+// actually changed during downtime pay the cost.
+//
+// Conservative on error: anything it can't determine (bad root, walk
+// error) returns true so the caller re-indexes rather than silently
+// serving a stale graph.
+func (idx *Indexer) HasChangesSinceMtimes(root string) bool {
+	absRoot, err := filepath.Abs(root)
+	if err != nil {
+		return true
+	}
+	idx.rootPath = absRoot
+
+	diskFiles := make(map[string]bool)
+	errStop := errors.New("stop-walk")
+	walkErr := filepath.WalkDir(absRoot, func(path string, d os.DirEntry, werr error) error {
+		if werr != nil {
+			return nil
+		}
+		if d.IsDir() {
+			if idx.shouldExclude(path, absRoot, true) {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if _, ok := idx.effectiveLanguage(path, nil); !ok {
+			return nil
+		}
+		if idx.shouldExclude(path, absRoot, false) {
+			return nil
+		}
+		rel := idx.relKey(path)
+		diskFiles[rel] = true
+		if idx.IsStale(rel) {
+			return errStop // a single changed/new file is enough
+		}
+		return nil
+	})
+	if errors.Is(walkErr, errStop) {
+		return true
+	}
+	if walkErr != nil {
+		return true
+	}
+
+	// Deletion check: a previously-indexed file absent from the walk and
+	// confirmed gone from disk counts as a change (its edges must drop).
+	idx.mtimeMu.RLock()
+	var candidates []string
+	for rel := range idx.fileMtimes {
+		if !diskFiles[rel] {
+			candidates = append(candidates, rel)
+		}
+	}
+	idx.mtimeMu.RUnlock()
+	for _, rel := range candidates {
+		if _, err := os.Stat(filepath.Join(absRoot, filepath.FromSlash(rel))); errors.Is(err, os.ErrNotExist) {
+			return true
+		}
+	}
+	return false
+}
+
 func (idx *Indexer) IsStale(relPath string) bool {
 	relPath = pathkey.Normalize(filepath.ToSlash(relPath))
 

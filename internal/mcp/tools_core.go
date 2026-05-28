@@ -631,20 +631,38 @@ func enrichSubGraphEdges(sg *query.SubGraph) {
 	}
 }
 
-// stripFileAndImportNodes returns a copy of sg with KindFile + KindImport
+// isNonDefinitionNode reports whether a node kind is NOT a file-level
+// definition and should be dropped from a get_file_summary view. It
+// excludes the file node itself, imports, and the function-body-internal
+// nodes (locals, params, closures, generic params, builtins) that the
+// file_path lookup pulls in but that the "symbols a file defines"
+// contract never wanted. Without this filter the summary floods with
+// hundreds of locals/params (the old defines-edge query excluded them by
+// construction; the GetFileNodes-based path does not).
+func isNonDefinitionNode(k graph.NodeKind) bool {
+	switch k {
+	case graph.KindFile, graph.KindImport, graph.KindLocal,
+		graph.KindParam, graph.KindClosure, graph.KindGenericParam,
+		graph.KindBuiltin:
+		return true
+	}
+	return false
+}
+
+// stripNonDefinitionNodes returns a copy of sg with non-definition nodes
 // nodes removed (and edges that reference them dropped). Used by
 // handleGetFileSummary to keep its output focused on the symbols a
 // file *defines* — the file node and per-statement import nodes are
 // useful internals (e.g. for the file-neighbourhood walk that drives
 // the Ladybug-side pushdown) but noise in the agent-visible payload.
-func stripFileAndImportNodes(sg *query.SubGraph) *query.SubGraph {
+func stripNonDefinitionNodes(sg *query.SubGraph) *query.SubGraph {
 	if sg == nil {
 		return nil
 	}
 	keep := make(map[string]bool, len(sg.Nodes))
 	nodes := make([]*graph.Node, 0, len(sg.Nodes))
 	for _, n := range sg.Nodes {
-		if n == nil || n.Kind == graph.KindFile || n.Kind == graph.KindImport {
+		if n == nil || isNonDefinitionNode(n.Kind) {
 			continue
 		}
 		nodes = append(nodes, n)
@@ -1688,7 +1706,7 @@ func (s *Server) handleGetFileSummary(ctx context.Context, req mcp.CallToolReque
 	// path already filtered both kinds inline; the cleaner home is
 	// here so every output format (compact, gcx, json, toon) sees the
 	// same shape.
-	sg = stripFileAndImportNodes(sg)
+	sg = stripNonDefinitionNodes(sg)
 	if len(sg.Nodes) == 0 {
 		return mcp.NewToolResultError("no symbols found for file: " + fp), nil
 	}

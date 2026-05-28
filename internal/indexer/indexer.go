@@ -1864,7 +1864,7 @@ func (idx *Indexer) IndexCtx(ctx context.Context, root string) (result *IndexRes
 			// indexer needs to know about SymbolSearcher.
 			if hasFTS && len(ftsItems) > 0 {
 				reporter.Report("building symbol fts", 0, 0)
-				if ferr := searcher.BulkUpsertSymbolFTS(ftsItems); ferr != nil {
+				if ferr := searcher.BulkUpsertSymbolFTS(idx.RepoPrefix(), ftsItems); ferr != nil {
 					idx.logger.Warn("indexer: bulk symbol FTS upsert failed",
 						zap.Error(ferr))
 				} else if ferr := searcher.BuildSymbolIndex(); ferr != nil {
@@ -2147,7 +2147,42 @@ func (idx *Indexer) IndexCtx(ctx context.Context, root string) (result *IndexRes
 			idx.fileMtimes[idx.relKey(f.path)] = f.mtimeNano
 		}
 	}
+	mtimeSnapshot := make(map[string]int64, len(idx.fileMtimes))
+	for k, v := range idx.fileMtimes {
+		mtimeSnapshot[k] = v
+	}
 	idx.mtimeMu.Unlock()
+
+	// Persist the per-file mtimes through the store's optional
+	// FileMtime sidecar table. On the ladybug backend this lets warm
+	// restarts seed ReconcileRepoCtx without having to read them back
+	// out of the gob+gzip metadata snapshot; on the in-memory
+	// backend the capability isn't implemented and the assertion
+	// short-circuits.
+	//
+	// Multi-repo bug: when the shadow-swap path is active, idx.graph
+	// is the in-memory shadow graph at this point — graph.Graph does
+	// NOT implement FileMtimeWriter, so the type assertion fails and
+	// persistence is silently skipped. The actual ladybug store is
+	// the local diskTarget variable; checking it first ensures warm-
+	// restart-skip-reindex actually works. The defer that swaps
+	// idx.graph back to diskTarget runs LATER, when IndexCtx returns,
+	// so we can't rely on it here. Falls through to idx.graph for the
+	// non-shadow path.
+	mtimeTarget := graph.Store(idx.graph)
+	if diskTarget != nil {
+		mtimeTarget = diskTarget
+	}
+	if w, ok := mtimeTarget.(graph.FileMtimeWriter); ok && len(mtimeSnapshot) > 0 {
+		if err := w.BulkSetFileMtimes(idx.repoPrefix, mtimeSnapshot); err != nil {
+			idx.logger.Warn("persist file mtimes failed",
+				zap.String("repo", idx.repoPrefix), zap.Error(err))
+		} else {
+			idx.logger.Info("persisted file mtimes",
+				zap.String("repo", idx.repoPrefix),
+				zap.Int("count", len(mtimeSnapshot)))
+		}
+	}
 
 	// Retain parse errors and record index metadata.
 	idx.parseErrors = errors
@@ -2523,9 +2558,18 @@ func (idx *Indexer) indexFile(filePath string, resolve bool) error {
 	// key (relKey applied slash + NFC), so the mtime entry lines up
 	// with the graph file-node key and with the bulk-walk mtimes.
 	if info, err := os.Stat(absPath); err == nil {
+		mtime := info.ModTime().UnixNano()
 		idx.mtimeMu.Lock()
-		idx.fileMtimes[relPath] = info.ModTime().UnixNano()
+		idx.fileMtimes[relPath] = mtime
 		idx.mtimeMu.Unlock()
+		// Also persist through the store's FileMtime sidecar so the
+		// next warm restart sees this incremental update without
+		// having to wait for the periodic gob snapshot to roll it.
+		// Per-file MERGE is ~1ms on ladybug; trivial under steady-
+		// state file-watcher load.
+		if w, ok := idx.graph.(graph.FileMtimeWriter); ok {
+			_ = w.BulkSetFileMtimes(idx.repoPrefix, map[string]int64{relPath: mtime})
+		}
 	}
 
 	return nil
@@ -3921,12 +3965,22 @@ func (idx *Indexer) commitContracts(reg *contracts.Registry) {
 			continue
 		}
 		nodes = append(nodes, &graph.Node{
-			ID:       c.ID,
-			Kind:     graph.KindContract,
-			Name:     c.ID,
-			FilePath: c.FilePath,
-			Language: "contract",
-			Meta:     map[string]any{"type": string(c.Type), "role": string(c.Role)},
+			ID:          c.ID,
+			Kind:        graph.KindContract,
+			Name:        c.ID,
+			FilePath:    c.FilePath,
+			Language:    "contract",
+			RepoPrefix:  c.RepoPrefix,
+			WorkspaceID: c.EffectiveWorkspace(),
+			ProjectID:   c.EffectiveProject(),
+			Meta: map[string]any{
+				"type":          string(c.Type),
+				"role":          string(c.Role),
+				"symbol_id":     c.SymbolID,
+				"line":          c.Line,
+				"confidence":    c.Confidence,
+				"contract_meta": c.Meta,
+			},
 		})
 
 		if c.SymbolID == "" {

@@ -34,13 +34,13 @@ var (
 	// (the function has no *cobra.Command of its own) to decide whether
 	// the flag overrides the `embedding:` config block. Set once in
 	// runDaemonStart before buildDaemonState runs.
-	daemonEmbeddingsChanged bool
-	daemonStatusWatch       bool
-	daemonStatusInterval    time.Duration
-	daemonHTTPAddr          string
-	daemonHTTPAuthToken     string
-	daemonBackend           string
-	daemonBackendPath       string
+	daemonEmbeddingsChanged   bool
+	daemonStatusWatch         bool
+	daemonStatusInterval      time.Duration
+	daemonHTTPAddr            string
+	daemonHTTPAuthToken       string
+	daemonBackend             string
+	daemonBackendPath         string
 	daemonBackendBufferPoolMB uint64
 )
 
@@ -100,8 +100,8 @@ func init() {
 		"also expose the MCP 2026 Streamable HTTP transport on this TCP address (e.g. 127.0.0.1:7411); empty disables")
 	daemonStartCmd.Flags().StringVar(&daemonHTTPAuthToken, "http-auth-token", "",
 		"bearer token required on every Streamable HTTP request (default: read $GORTEX_DAEMON_HTTP_TOKEN; empty allows unauthenticated localhost binds)")
-	daemonStartCmd.Flags().StringVar(&daemonBackend, "backend", "memory",
-		"storage backend: memory (in-process, default — fastest, no persistence) | ladybug (embedded Cypher graph DB — persists to --backend-path)")
+	daemonStartCmd.Flags().StringVar(&daemonBackend, "backend", "ladybug",
+		"storage backend: ladybug (default — embedded Cypher graph DB, persists to --backend-path so warm restarts skip re-indexing) | memory (in-process, no persistence — fastest per-op but pays the full cold-warmup cost on every restart)")
 	daemonStartCmd.Flags().StringVar(&daemonBackendPath, "backend-path", "",
 		"directory where the on-disk backend persists its store. Required when --backend != memory. Default: ~/.gortex/<backend>.store")
 	daemonStartCmd.Flags().Uint64Var(&daemonBackendBufferPoolMB, "backend-buffer-pool-mb", 0,
@@ -184,11 +184,18 @@ func runDaemonStart(cmd *cobra.Command, _ []string) error {
 			_ = mw.Stop()
 		}
 		if mg, ok := state.graph.(*graph.Graph); ok {
-			// Snapshot save is gob+gzip of the in-memory graph;
-			// only meaningful for the memory backend. On-disk
-			// backends already persist via their own engine.
+			// Memory backend — snapshot the full in-memory graph;
+			// the next warmup replays nodes/edges from the gob+gzip
+			// dump because there's no other persistence layer.
 			saveSnapshot(mg, collectSnapshotRepos(state.multiIndexer), collectSnapshotContracts(state.multiIndexer), collectSnapshotVector(state.multiIndexer), version, logger)
 		}
+		// Persistent backends (ladybug) no longer write a metadata
+		// snapshot: per-file mtimes live in the FileMtime sidecar
+		// table, contract records ride on KindContract.Meta, and the
+		// vector index is served directly by the ladybug native HNSW
+		// (`CALL QUERY_VECTOR_INDEX`). Warm restart reads everything
+		// it needs from `store.lbug` — no gob+gzip round-trip
+		// required.
 		if state.mcpServer != nil {
 			_ = state.mcpServer.FlushSavings()
 		}
@@ -323,10 +330,19 @@ func runDaemonStart(cmd *cobra.Command, _ []string) error {
 	// the GC then has to clean up. Skipping snapshots until ready cleared
 	// a stall observed in profile #5 where saveSnapshotTo was the only
 	// runnable goroutine on a daemon mid-warmup.
-	// Periodic snapshots are gob+gzip exports of the in-memory
-	// *graph.Graph; only meaningful for the memory backend.
-	// On-disk backends already persist via their own engine, so
-	// the snapshot ticker is a no-op there.
+	// Periodic snapshots. For the memory backend this is the full
+	// gob+gzip export of the in-memory graph. For persistent backends
+	// (ladybug) it's metadata-only — repos + contracts + vector —
+	// since the backend already persists the graph itself. Both
+	// shapes feed the warm-restart path that uses ReconcileRepoCtx
+	// instead of full TrackRepoCtx; without the metadata save, warm
+	// restart had no FileMtimes and crashed in BulkUpsertSymbolFTS.
+	// Periodic snapshots fire only for the memory backend — that's
+	// the path that has no other persistence layer for the graph
+	// itself. Ladybug-backed daemons rely on the backend's own
+	// durability (graph → store.lbug, FileMtimes → FileMtime sidecar
+	// table, contracts → KindContract.Meta, vectors → SymbolVec) so
+	// the gob+gzip snapshot is dead weight in that mode.
 	stopSnapshotter := func() {}
 	if mg, ok := state.graph.(*graph.Graph); ok {
 		stopSnapshotter = startPeriodicSnapshots(mg, state.multiIndexer, version, 10*time.Minute, controller.IsReady, logger)
@@ -461,6 +477,34 @@ func startReconcileJanitor(mi *indexer.MultiIndexer, interval time.Duration, log
 						zap.Int("count", len(gced)))
 				}
 				mi.ReconcileAll()
+			case <-stop:
+				return
+			}
+		}
+	}()
+	return func() { close(stop) }
+}
+
+// startPeriodicMetadataSnapshots is the persistent-backend counterpart
+// to startPeriodicSnapshots. It skips the graph walk entirely (the
+// backend persists nodes/edges itself) and writes a metadata-only
+// snapshot — repos + contracts + vector — on every tick. The
+// metadata is what makes warm restart cheap: without an up-to-date
+// FileMtimes map on disk, every restart falls back to a full
+// TrackRepoCtx walk.
+func startPeriodicMetadataSnapshots(mi *indexer.MultiIndexer, version string, interval time.Duration, isReady func() bool, logger *zap.Logger) func() {
+	stop := make(chan struct{})
+	go func() {
+		t := time.NewTicker(interval)
+		defer t.Stop()
+		for {
+			select {
+			case <-t.C:
+				if isReady != nil && !isReady() {
+					logger.Debug("snapshot: skipped tick — daemon still warming up")
+					continue
+				}
+				saveSnapshotMetadata(collectSnapshotRepos(mi), collectSnapshotContracts(mi), collectSnapshotVector(mi), version, logger)
 			case <-stop:
 				return
 			}
@@ -842,8 +886,10 @@ func renderDaemonHeader(w io.Writer, st daemon.StatusResponse) {
 	t.AppendRow(table.Row{"socket", st.SocketPath})
 	t.AppendRow(table.Row{"uptime", formatDuration(time.Duration(st.UptimeSeconds) * time.Second)})
 	if st.Ready {
-		t.AppendRow(table.Row{"state",
-			fmt.Sprintf("ready (warmup %s)", formatDuration(time.Duration(st.WarmupSeconds)*time.Second))})
+		t.AppendRow(table.Row{
+			"state",
+			fmt.Sprintf("ready (warmup %s)", formatDuration(time.Duration(st.WarmupSeconds)*time.Second)),
+		})
 	} else {
 		t.AppendRow(table.Row{"state", "warming up (socket reachable, background re-index in progress)"})
 	}

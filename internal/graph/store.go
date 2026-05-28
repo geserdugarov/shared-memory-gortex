@@ -374,6 +374,12 @@ type SymbolFTSItem struct {
 //     Idempotent on NodeID like UpsertSymbolFTS — re-running with
 //     an overlapping set replaces in place.
 //
+//     repoPrefix is the per-repo namespace; the store wipes only
+//     rows owned by that prefix before COPYing the new items, so
+//     multiple repos sharing one store don't clobber each other's
+//     FTS corpus. Empty prefix means "single-repo mode" — the
+//     store wipes everything (the legacy behaviour).
+//
 //   - BuildSymbolIndex finalises the index after the bulk parse
 //     phase. For backends whose FTS index updates automatically on
 //     row writes (Ladybug), this is a one-shot cold-start call;
@@ -390,7 +396,7 @@ type SymbolFTSItem struct {
 //     teardown method here.
 type SymbolSearcher interface {
 	UpsertSymbolFTS(nodeID, tokens string) error
-	BulkUpsertSymbolFTS(items []SymbolFTSItem) error
+	BulkUpsertSymbolFTS(repoPrefix string, items []SymbolFTSItem) error
 	BuildSymbolIndex() error
 	SearchSymbols(query string, limit int) ([]SymbolHit, error)
 }
@@ -891,6 +897,29 @@ type InEdgeCounter interface {
 // backend doesn't implement it.
 type NodesInFilesByKindFinder interface {
 	NodesInFilesByKind(files []string, kinds []NodeKind) []*Node
+}
+
+// FileMtimeWriter is an optional capability backends MAY implement to
+// persist the per-file modification time the indexer uses for its
+// incremental-reindex decisions. Lifting this state off the daemon's
+// gob+gzip snapshot makes warm restarts read it through the same
+// backend the graph already lives in (no second persistence surface
+// to keep coherent).
+//
+// repoPrefix is the indexer's own prefix tag; mtimes is keyed on the
+// repo-relative file path (the same key the in-memory Indexer's
+// fileMtimes map uses). Empty input is a no-op; empty repoPrefix is
+// allowed for single-repo daemons.
+type FileMtimeWriter interface {
+	BulkSetFileMtimes(repoPrefix string, mtimes map[string]int64) error
+}
+
+// FileMtimeReader is the read side of FileMtimeWriter. Returns the
+// recorded mtimes for one repo prefix as a fresh map (nil for "no
+// data"). Used by warmup to seed ReconcileRepoCtx with the per-file
+// mtimes it would otherwise have read from the gob snapshot.
+type FileMtimeReader interface {
+	LoadFileMtimes(repoPrefix string) map[string]int64
 }
 
 // EdgesByKindsScanner is an optional capability backends MAY

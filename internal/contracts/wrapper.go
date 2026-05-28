@@ -201,13 +201,22 @@ func commitInlinedContractToGraph(g graph.Store, c Contract) {
 	}
 	if g.GetNode(c.ID) == nil {
 		g.AddNode(&graph.Node{
-			ID:         c.ID,
-			Kind:       graph.KindContract,
-			Name:       c.ID,
-			FilePath:   c.FilePath,
-			Language:   "contract",
-			RepoPrefix: c.RepoPrefix,
-			Meta:       map[string]any{"type": string(c.Type), "role": string(c.Role)},
+			ID:          c.ID,
+			Kind:        graph.KindContract,
+			Name:        c.ID,
+			FilePath:    c.FilePath,
+			Language:    "contract",
+			RepoPrefix:  c.RepoPrefix,
+			WorkspaceID: c.EffectiveWorkspace(),
+			ProjectID:   c.EffectiveProject(),
+			Meta: map[string]any{
+				"type":          string(c.Type),
+				"role":          string(c.Role),
+				"symbol_id":     c.SymbolID,
+				"line":          c.Line,
+				"confidence":    c.Confidence,
+				"contract_meta": c.Meta,
+			},
 		})
 	}
 	if c.SymbolID == "" {

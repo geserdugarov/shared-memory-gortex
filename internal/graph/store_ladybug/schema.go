@@ -77,4 +77,22 @@ var schemaDDL = []string{
         tokens STRING,
         PRIMARY KEY(id)
     )`,
+	// FileMtime persists the per-file modification time the indexer
+	// uses for incremental re-index decisions. Moving this off the
+	// daemon's gob+gzip snapshot and into the store makes warm
+	// restarts read it through the same backend the graph already
+	// lives in (no second persistence surface to keep coherent), and
+	// is the first step toward dropping the metadata-only snapshot
+	// altogether for the ladybug backend.
+	//
+	// repo_prefix is column-stamped (not derived from the file_id
+	// prefix) so a single Cypher SELECT can slice mtimes by repo
+	// without parsing the id string. PRIMARY KEY on file_id makes
+	// the per-file upsert idempotent under MERGE.
+	`CREATE NODE TABLE IF NOT EXISTS FileMtime(
+        file_id     STRING,
+        repo_prefix STRING,
+        mtime_ns    INT64,
+        PRIMARY KEY(file_id)
+    )`,
 }

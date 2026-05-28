@@ -93,8 +93,12 @@ func LogFilePath() string {
 	return filepath.Join(os.TempDir(), "gortex-daemon.log")
 }
 
-// SnapshotPath returns the path the daemon saves graph snapshots to on
-// periodic saves and clean shutdown. Loaded on startup for fast cold starts.
+// SnapshotPath returns the legacy backend-agnostic snapshot path —
+// `daemon.gob.gz` under the state dir. Kept for callers that haven't
+// moved to backend-tagged storage yet (cloud indexer worker, ad-hoc
+// `gortex index --snapshot` runs). The daemon itself routes through
+// BackendSnapshotPath so a memory ↔ ladybug switch can't read the
+// other backend's snapshot — see that function's doc.
 func SnapshotPath() string {
 	if override := os.Getenv("GORTEX_DAEMON_SNAPSHOT"); override != "" {
 		return override
@@ -103,6 +107,51 @@ func SnapshotPath() string {
 		return filepath.Join(dir, "daemon.gob.gz")
 	}
 	return filepath.Join(os.TempDir(), "gortex-daemon.gob.gz")
+}
+
+// BackendSnapshotPath returns a backend-tagged snapshot path so the
+// memory and ladybug backends use distinct files. The memory backend
+// snapshot is a full gob+gzip of the in-memory graph; the ladybug
+// backend snapshot is metadata-only (FileMtimes, contracts, vector
+// index) because the graph itself lives in `store.lbug`. Loading the
+// memory backend's snapshot into a ladybug daemon (or vice versa)
+// silently produced wrong state — empty graph after ladybug→memory
+// switch, decode-and-discard nodes after memory→ladybug — so a fresh
+// daemon now picks the right file by backend tag.
+//
+// Empty backend tag falls back to SnapshotPath() so embedded callers
+// that don't know the backend (the cloud indexer worker) keep working.
+//
+// GORTEX_DAEMON_SNAPSHOT overrides every backend tag — the override
+// is an explicit "use exactly this path" signal.
+func BackendSnapshotPath(backend string) string {
+	if override := os.Getenv("GORTEX_DAEMON_SNAPSHOT"); override != "" {
+		return override
+	}
+	tag := normalizeBackendTag(backend)
+	if tag == "" {
+		return SnapshotPath()
+	}
+	filename := "daemon-" + tag + ".gob.gz"
+	if dir, ok := stateDir(); ok {
+		return filepath.Join(dir, filename)
+	}
+	return filepath.Join(os.TempDir(), "gortex-"+filename)
+}
+
+// normalizeBackendTag canonicalizes a backend identifier into the
+// short tag used in the snapshot filename — "memory" / "ladybug" /
+// etc. Empty / unknown input returns the empty string so the caller
+// can fall back to the legacy unsuffixed path.
+func normalizeBackendTag(backend string) string {
+	switch backend {
+	case "memory", "mem", "in-memory":
+		return "memory"
+	case "ladybug", "lbug":
+		return "ladybug"
+	default:
+		return ""
+	}
 }
 
 // EnsureParentDir creates the parent directory of path with permissions

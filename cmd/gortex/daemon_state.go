@@ -202,21 +202,37 @@ func buildDaemonState(logger *zap.Logger) (*daemonState, error) {
 	// make that incremental path viable — without them, warmup would
 	// have no signal to distinguish "indexed and unchanged" from "new
 	// on disk", treat everything as stale, and produce duplicate
-	// nodes/edges on every restart (bug B1). For the ladybug
-	// persistent backend the on-disk store IS the snapshot —
-	// snapshot load is skipped to avoid replaying gob-encoded state
-	// over the already-populated disk store.
+	// nodes/edges on every restart (bug B1).
+	//
+	// Two snapshot shapes:
+	//
+	//   - Memory backend: full graph replay (loadSnapshot). The
+	//     gob+gzip dump IS the persistence layer; nodes + edges are
+	//     replayed into the empty *graph.Graph.
+	//
+	//   - Persistent backend (ladybug): metadata-only load
+	//     (loadSnapshotMetadata). The graph already lives in the
+	//     backend's own on-disk store, so the snapshot only needs to
+	//     carry the data the backend doesn't track — per-repo
+	//     FileMtimes, contract registries, vector index. Skipping the
+	//     load entirely (the previous behaviour) left priorMtimes
+	//     empty and routed every warm restart through a full
+	//     TrackRepoCtx → BulkUpsertSymbolFTS path that crashes on an
+	//     already-populated store.
 	var loadResult snapshotLoadResult
 	if mg, ok := g.(*graph.Graph); ok {
-		// Snapshot replay (gob+gzip → per-row AddNode) only makes
-		// sense for the in-memory backend. On-disk backends already
-		// persist across restarts — re-running snapshot load would
-		// just rewrite their existing rows.
 		loadResult, err = loadSnapshot(mg, logger)
 		if err != nil {
 			logger.Warn("daemon: snapshot load failed", zap.Error(err))
 		}
 	}
+	// Ladybug-backed daemons don't read a metadata snapshot: per-
+	// repo FileMtimes live in the FileMtime sidecar table (loaded
+	// per-repo by priorMtimesFromStore in the parallel_parse loop
+	// below), KindContract nodes carry the rich contract record on
+	// Node.Meta (rehydrated via contracts.LoadRegistryFromGraph),
+	// and vector queries route to ladybug's native HNSW. The legacy
+	// gob round-trip is now memory-backend-only.
 
 	idx := indexer.New(g, reg, cfg.Index, logger)
 
@@ -680,6 +696,20 @@ func warmupDaemonState(state *daemonState, logger *zap.Logger) *indexer.MultiWat
 		go func() {
 			defer wg.Done()
 			for entry := range jobs {
+				// Per-entry panic guard so one repo's CGo / liblbug
+				// crash (e.g. the "mutex lock failed: Invalid
+				// argument" the resolver's stub-merge path surfaces
+				// on certain warm-restart shapes) doesn't kill the
+				// worker — the bad repo logs and skips, the worker
+				// proceeds to the next job, and warmup completes.
+				func(entry config.RepoEntry) {
+					defer func() {
+						if r := recover(); r != nil {
+							logger.Error("daemon: warmup repo panic recovered",
+								zap.String("path", entry.Path),
+								zap.Any("panic", r))
+						}
+					}()
 				// Route repos whose nodes came from the snapshot through
 				// ReconcileRepoCtx — it calls IncrementalReindex, which
 				// evicts files deleted while the daemon was down and
@@ -700,7 +730,17 @@ func warmupDaemonState(state *daemonState, logger *zap.Logger) *indexer.MultiWat
 				// erodes the graph until exported methods show zero
 				// callers despite having dozens of real call sites.
 				repoStart := time.Now()
-				priorMtimes := priorMtimesForEntry(state.snapshotRepos, entry)
+				// Prefer mtimes stored in the backend's FileMtime
+				// sidecar table — that lifts the persistence off the
+				// gob snapshot for the ladybug backend, which is the
+				// path that actually rebuilds across restarts. Falls
+				// back to the snapshot's per-repo FileMtimes when the
+				// backend doesn't implement the reader (memory) or
+				// hasn't seen this repo yet.
+				priorMtimes := priorMtimesFromStore(state.graph, entry, logger)
+				if len(priorMtimes) == 0 {
+					priorMtimes = priorMtimesForEntry(state.snapshotRepos, entry)
+				}
 				if state.snapshotPartial {
 					priorMtimes = nil
 				}
@@ -722,6 +762,7 @@ func warmupDaemonState(state *daemonState, logger *zap.Logger) *indexer.MultiWat
 						zap.String("path_fn", pathFn),
 						zap.Duration("elapsed", elapsed))
 				}
+				}(entry)
 			}
 		}()
 	}
@@ -760,7 +801,7 @@ func warmupDaemonState(state *daemonState, logger *zap.Logger) *indexer.MultiWat
 	// MergedContractRegistry skips them, so `contracts` returns only
 	// the contracts of repos whose files happened to change since the
 	// last shutdown.
-	if len(state.snapshotContracts) > 0 {
+	{
 		phaseStart = time.Now()
 		injectedRepos, injectedCount := 0, 0
 		for prefix := range state.multiIndexer.AllMetadata() {
@@ -768,20 +809,32 @@ func warmupDaemonState(state *daemonState, logger *zap.Logger) *indexer.MultiWat
 			if idx == nil || idx.ContractRegistry() != nil {
 				continue
 			}
-			cs, ok := state.snapshotContracts[prefix]
-			if !ok || len(cs) == 0 {
-				continue
-			}
-			reg := contracts.NewRegistry()
-			for _, c := range cs {
-				reg.Add(c)
+			// Primary path: rebuild the per-repo registry from
+			// KindContract nodes already in the backend's graph.
+			// The indexer stamps every contract record onto
+			// Node.Meta at commit time, so the graph is the
+			// authoritative source — no gob round-trip needed.
+			reg := contracts.LoadRegistryFromGraph(state.graph, prefix)
+			if reg == nil {
+				// Fallback to the legacy gob-snapshot path for
+				// daemons upgrading across this change. The
+				// snapshot copy is read-only by this point so the
+				// two sources can't drift mid-flight.
+				cs, ok := state.snapshotContracts[prefix]
+				if !ok || len(cs) == 0 {
+					continue
+				}
+				reg = contracts.NewRegistry()
+				for _, c := range cs {
+					reg.Add(c)
+				}
 			}
 			idx.SetContractRegistry(reg)
 			injectedRepos++
-			injectedCount += len(cs)
+			injectedCount += len(reg.All())
 		}
 		if injectedRepos > 0 {
-			logger.Info("daemon: rehydrated contract registries from snapshot",
+			logger.Info("daemon: rehydrated contract registries from graph/snapshot",
 				zap.Int("repos", injectedRepos),
 				zap.Int("contracts", injectedCount),
 				zap.Duration("elapsed", time.Since(phaseStart)))
@@ -886,6 +939,38 @@ func publishReadinessPhase(state *daemonState, phase string, ready bool, extra m
 		return
 	}
 	state.mcpServer.PublishReadiness(phase, ready, extra)
+}
+
+// priorMtimesFromStore asks the backend for its persisted FileMtime
+// rows for the repo described by entry. Returns nil when the backend
+// doesn't implement the reader (in-memory backend) or has no recorded
+// mtimes for the repo (fresh cold start). When non-nil it short-
+// circuits the gob-snapshot lookup so the warm path is driven by
+// data the backend persisted itself.
+func priorMtimesFromStore(g graph.Store, entry config.RepoEntry, logger *zap.Logger) map[string]int64 {
+	reader, ok := g.(graph.FileMtimeReader)
+	if !ok {
+		if logger != nil {
+			logger.Info("daemon: priorMtimesFromStore: store does not implement FileMtimeReader")
+		}
+		return nil
+	}
+	prefix := strings.TrimPrefix(config.ResolvePrefix(entry), "/")
+	if prefix == "" {
+		if logger != nil {
+			logger.Info("daemon: priorMtimesFromStore: empty prefix",
+				zap.String("entry_path", entry.Path),
+				zap.String("entry_name", entry.Name))
+		}
+		return nil
+	}
+	mtimes := reader.LoadFileMtimes(prefix)
+	if logger != nil {
+		logger.Info("daemon: priorMtimesFromStore loaded",
+			zap.String("prefix", prefix),
+			zap.Int("count", len(mtimes)))
+	}
+	return mtimes
 }
 
 // priorMtimesForEntry finds the snapshotted FileMtimes map for a

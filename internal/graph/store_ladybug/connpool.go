@@ -84,6 +84,44 @@ func (p *connPool) put(conn *lbug.Connection) {
 	p.available <- conn
 }
 
+// discard removes a connection from circulation instead of returning
+// it to the pool, then opens a fresh replacement so the pool stays at
+// its configured size. Call this — never put — for any connection
+// whose last operation ERRORED.
+//
+// Rationale: a liblbug connection that errored mid-statement (most
+// notably a COPY that hit a duplicated-primary-key Runtime/Copy
+// exception during warmup) can be left with poisoned internal
+// transaction / pthread-mutex state. Recycling it via put() means the
+// next goroutine to check it out and call Prepare dies with
+// "prepare: mutex lock failed: Invalid argument" — a panic on a
+// completely unrelated goroutine (e.g. the resolver's reconcile
+// ReindexEdges pass). Same hazard class as a parse cancelled
+// mid-balancing poisoning a tree-sitter parser: a broken handle must
+// be closed and replaced, never pooled.
+func (p *connPool) discard(conn *lbug.Connection) {
+	if conn == nil {
+		return
+	}
+	// Drop any extension-load bookkeeping keyed on the dead handle so
+	// the loadedExt map doesn't leak entries for closed connections.
+	p.extMu.Lock()
+	delete(p.loadedExt, conn)
+	p.extMu.Unlock()
+	conn.Close()
+	if p.available == nil || p.db == nil {
+		return
+	}
+	// Open a replacement so the pool doesn't shrink by one on every
+	// error. If reopening fails the pool runs one connection lighter,
+	// which is still strictly better than handing out a dead handle.
+	fresh, err := lbug.OpenConnection(p.db)
+	if err != nil {
+		return
+	}
+	p.put(fresh)
+}
+
 // ensureExtensionsLocked loads any registered extensions onto
 // the given connection that haven't been loaded there yet.
 // Idempotent per (conn, ext) pair.

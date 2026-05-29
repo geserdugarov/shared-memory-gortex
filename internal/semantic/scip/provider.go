@@ -272,6 +272,11 @@ func (p *Provider) enrichFromIndex(g graph.Store, index *SCIPIndex, repoRoot str
 	}
 
 	// Phase 4: Enrich node metadata from symbol documentation.
+	// Collect stamped nodes and round-trip them through the store at the
+	// end — EnrichNodeMeta mutates Node.Meta in place, which does not
+	// persist on disk backends (GetNode returns a per-call copy). See
+	// semantic.EnrichNodeMeta.
+	var stampedNodes []*graph.Node
 	for _, doc := range index.Documents {
 		for _, sym := range doc.Symbols {
 			nodeID, ok := symMap.GortexID(sym.Symbol)
@@ -289,9 +294,13 @@ func (p *Provider) enrichFromIndex(g graph.Store, index *SCIPIndex, repoRoot str
 				if typeInfo != "" {
 					semantic.EnrichNodeMeta(node, "semantic_type", typeInfo, p.Name())
 					result.NodesEnriched++
+					stampedNodes = append(stampedNodes, node)
 				}
 			}
 		}
+	}
+	if len(stampedNodes) > 0 {
+		g.AddBatch(stampedNodes, nil)
 	}
 
 	return result

@@ -268,6 +268,11 @@ func (p *Provider) Enrich(g graph.Store, repoRoot string) (*semantic.EnrichResul
 
 	// Query hover info for nodes to enrich metadata.
 	enrichedNodes := make(map[string]bool)
+	// EnrichNodeMeta mutates Node.Meta in place; on disk backends n is a
+	// per-call AllNodes reconstruction, so collect stamped nodes and
+	// round-trip them through the store at the end or the semantic_type
+	// stamp is discarded on Ladybug. See semantic.EnrichNodeMeta.
+	var stampedNodes []*graph.Node
 	for _, n := range g.AllNodes() {
 		if n.Kind == graph.KindFile || n.Kind == graph.KindImport {
 			continue
@@ -300,12 +305,16 @@ func (p *Provider) Enrich(g graph.Store, repoRoot string) (*semantic.EnrichResul
 		typeInfo := extractTypeFromHover(hoverResult.Contents.Value)
 		if typeInfo != "" {
 			semantic.EnrichNodeMeta(n, "semantic_type", typeInfo, p.Name())
+			stampedNodes = append(stampedNodes, n)
 			if !enrichedNodes[n.ID] {
 				result.NodesEnriched++
 				result.SymbolsCovered++
 				enrichedNodes[n.ID] = true
 			}
 		}
+	}
+	if len(stampedNodes) > 0 {
+		g.AddBatch(stampedNodes, nil)
 	}
 
 	// Query implementations for interface nodes.

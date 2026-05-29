@@ -245,6 +245,12 @@ func (p *Provider) Enrich(g graph.Store, repoRoot string) (*semantic.EnrichResul
 	result.EdgesAdded += p.addMissingImplements(g, pkgs, objToNode, absRoot)
 
 	// Phase 4: Enrich node metadata with type info.
+	// EnrichNodeMeta mutates Node.Meta in place; on disk backends the
+	// node is a per-call GetNode reconstruction, so collect every stamped
+	// node and round-trip it through the store at the end (one AddBatch)
+	// or the semantic_type / return_type stamps are silently discarded on
+	// Ladybug. See semantic.EnrichNodeMeta.
+	var stampedNodes []*graph.Node
 	for _, pkg := range pkgs {
 		if pkg.TypesInfo == nil {
 			continue
@@ -262,10 +268,12 @@ func (p *Provider) Enrich(g graph.Store, repoRoot string) (*semantic.EnrichResul
 				continue
 			}
 
+			didStamp := false
 			typeStr := types.TypeString(obj.Type(), nil)
 			if typeStr != "" && typeStr != "invalid type" {
 				semantic.EnrichNodeMeta(node, "semantic_type", typeStr, p.Name())
 				result.NodesEnriched++
+				didStamp = true
 			}
 
 			// Add return type for functions.
@@ -274,11 +282,18 @@ func (p *Provider) Enrich(g graph.Store, repoRoot string) (*semantic.EnrichResul
 				if ok && sig.Results().Len() > 0 {
 					retType := types.TypeString(sig.Results(), nil)
 					semantic.EnrichNodeMeta(node, "return_type", retType, p.Name())
+					didStamp = true
 				}
+			}
+			if didStamp {
+				stampedNodes = append(stampedNodes, node)
 			}
 
 			_ = ident // used in range
 		}
+	}
+	if len(stampedNodes) > 0 {
+		g.AddBatch(stampedNodes, nil)
 	}
 
 	result.DurationMs = time.Since(start).Milliseconds()

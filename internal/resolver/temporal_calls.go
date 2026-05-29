@@ -256,7 +256,7 @@ func buildTemporalIndex(g graph.Store) *temporalIndex {
 		if target == nil {
 			continue
 		}
-		stampTemporalRole(target, r.kind, r.name)
+		stampTemporalRole(g, target, r.kind, r.name)
 		idx.byKindName[r.kind+"::"+r.name] = append(idx.byKindName[r.kind+"::"+r.name], target)
 	}
 
@@ -300,14 +300,14 @@ func buildTemporalIndex(g graph.Store) *temporalIndex {
 		}
 		// Method-level annotation: stamp directly.
 		if a.methodRole != "" && (from.Kind == graph.KindMethod || from.Kind == graph.KindFunction) {
-			stampTemporalRole(from, a.methodRole, from.Name)
+			stampTemporalRole(g, from, a.methodRole, from.Name)
 			idx.byKindName[normaliseTemporalKind(a.methodRole)+"::"+from.Name] = append(
 				idx.byKindName[normaliseTemporalKind(a.methodRole)+"::"+from.Name], from)
 			continue
 		}
 		// Interface-level annotation: queue for the propagation pass.
 		if a.ifaceRole != "" && from.Kind == graph.KindInterface {
-			stampTemporalRole(from, a.ifaceRole, from.Name)
+			stampTemporalRole(g, from, a.ifaceRole, from.Name)
 			javaIfaces = append(javaIfaces, javaIfaceTag{ifaceID: from.ID, role: a.ifaceRole})
 		}
 	}
@@ -366,7 +366,7 @@ func buildTemporalIndex(g graph.Store) *temporalIndex {
 		}
 		ifaceMethods := collectJavaInterfaceMethodsFromIndex(iface, javaMethodsByFile)
 		for _, m := range ifaceMethods {
-			stampTemporalRole(m, methodRole, m.Name)
+			stampTemporalRole(g, m, methodRole, m.Name)
 			idx.byKindName[methodRole+"::"+m.Name] = append(idx.byKindName[methodRole+"::"+m.Name], m)
 		}
 		// Propagate to implementing classes' methods.
@@ -383,7 +383,7 @@ func buildTemporalIndex(g graph.Store) *temporalIndex {
 				if _, ok := implMethodNames[m.Name]; !ok {
 					continue
 				}
-				stampTemporalRole(m, methodRole, m.Name)
+				stampTemporalRole(g, m, methodRole, m.Name)
 				idx.byKindName[methodRole+"::"+m.Name] = append(idx.byKindName[methodRole+"::"+m.Name], m)
 			}
 		}
@@ -432,7 +432,7 @@ func normaliseTemporalKind(role string) string {
 // a previously-stamped node is re-stamped with a different role the
 // new role wins (the resolver runs as a full recompute, so this lets
 // the latest registration take precedence).
-func stampTemporalRole(n *graph.Node, role, name string) {
+func stampTemporalRole(g graph.Store, n *graph.Node, role, name string) {
 	if n == nil || role == "" {
 		return
 	}
@@ -443,6 +443,15 @@ func stampTemporalRole(n *graph.Node, role, name string) {
 	if name != "" {
 		n.Meta["temporal_name"] = name
 	}
+	// Round-trip the stamp back through the store. On the in-memory
+	// backend n is canonical so this is an idempotent re-insert; on disk
+	// backends (Ladybug) n is a per-call GetNode/AllNodes reconstruction,
+	// so without the write-back temporal_role/temporal_name would be
+	// discarded the moment this pass returns. ResolveTemporalCalls runs
+	// from RunGlobalGraphPasses, which can execute after the bulk-load
+	// buffer is flushed, so the in-place mutation is not otherwise
+	// captured. Matches reach / coverage / blame / releases / churn.
+	g.AddNode(n)
 }
 
 // pickGoTemporalTarget selects the Go function or method that a

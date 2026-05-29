@@ -69,7 +69,10 @@ func (s *Store) ensureSymbolVecSchemaLocked(dim int) error {
 	if cur != 0 {
 		// Dim changed (e.g. different embedding model on this
 		// fresh daemon process). Drop the existing table so the
-		// FLOAT[N] column gets re-declared at the right width.
+		// FLOAT[N] column gets re-declared at the right width. Drop the
+		// HNSW index first — DROP TABLE is rejected while an index still
+		// references the table.
+		_ = runCypherSafe(s, fmt.Sprintf(`CALL DROP_VECTOR_INDEX('SymbolVec', '%s')`, vecIndexName))
 		_ = runCypherSafe(s, `DROP TABLE IF EXISTS SymbolVec`)
 		s.vec.indexBuilt.Store(false)
 	}
@@ -198,8 +201,21 @@ func (s *Store) BulkUpsertEmbeddings(items []graph.VectorItem) error {
 	// the embedding pass.
 	_ = runCypherSafe(s, fmt.Sprintf(`CALL DROP_VECTOR_INDEX('SymbolVec', '%s')`, vecIndexName))
 	s.vec.indexBuilt.Store(false)
-	if err := runCypherSafe(s, `MATCH (v:SymbolVec) DELETE v`); err != nil {
-		return fmt.Errorf("clear SymbolVec before bulk upsert: %w", err)
+	// Drop + recreate rather than DELETE: `MATCH (v:SymbolVec) DELETE v`
+	// empties the rows logically, but the engine still classes the table
+	// "non-empty" for COPY and rejects it ("COPY into a non-empty
+	// primary-key node table without a hash index is not supported")
+	// whenever the PK hash index isn't currently materialised — a state
+	// that depends on auto-checkpoint timing, so the failure is
+	// non-deterministic. A freshly recreated table is unconditionally a
+	// valid COPY target. The DROP_VECTOR_INDEX above must run first: DROP
+	// TABLE is rejected while the HNSW index still references the table.
+	if err := runCypherSafe(s, `DROP TABLE IF EXISTS SymbolVec`); err != nil {
+		return fmt.Errorf("drop SymbolVec before bulk upsert: %w", err)
+	}
+	s.vec.dim.Store(0) // force ensureSymbolVecSchemaLocked to recreate, not short-circuit
+	if err := s.ensureSymbolVecSchemaLocked(dim); err != nil {
+		return err
 	}
 
 	dir, err := os.MkdirTemp("", "lbug-vec-bulk-")

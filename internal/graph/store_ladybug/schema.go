@@ -95,4 +95,17 @@ var schemaDDL = []string{
         mtime_ns    INT64,
         PRIMARY KEY(file_id)
     )`,
+	// SchemaMeta is the single source of truth for the on-disk schema
+	// version (and any future single-scalar store metadata). The
+	// migration ladder in migrate.go reads `schema_version` from here at
+	// Open and stamps it after applying any pending step. KuzuDB has no
+	// PRAGMA user_version, so the version lives in a normal node table,
+	// the same way FileMtime / SymbolFTS persist their sidecar state. The
+	// k STRING primary key means one table covers every scalar without
+	// per-key DDL. See migrate.go for the read/upsert Cypher.
+	`CREATE NODE TABLE IF NOT EXISTS SchemaMeta(
+        k STRING,
+        v INT64,
+        PRIMARY KEY(k)
+    )`,
 }

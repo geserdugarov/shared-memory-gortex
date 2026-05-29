@@ -101,6 +101,14 @@ type Store struct {
 	// every Node write. Identifier-shape queries skip the FTS
 	// round-trip when this hits. See name_index.go.
 	nameIdx *nameIndex
+
+	// needsRebuild is set at Open when the migration ladder crossed a
+	// rung that ALTER could not satisfy (a Meta-payload reshape, a table
+	// restructure). The caller surfaces it via NeedsRebuild() and treats
+	// the on-disk graph as stale — a full re-index into the fresh schema.
+	// Always false on a fresh open and after purely additive migrations.
+	// See migrate.go.
+	needsRebuild bool
 }
 
 // Compile-time assertion: *Store satisfies graph.Store.
@@ -172,13 +180,23 @@ func OpenWithOptions(path string, opts Options) (*Store, error) {
 		}
 		res.Close()
 	}
+	// Bring the on-disk schema up to currentSchemaVersion before any
+	// query traffic. Runs on the raw setup conn (no pool yet, no
+	// writeMu) — see migrate.go. needsRebuild is true only if a ladder
+	// step required a full re-index (ALTER could not express it).
+	needsRebuild, err := applyLadybugMigrations(conn)
+	if err != nil {
+		conn.Close()
+		db.Close()
+		return nil, fmt.Errorf("store_ladybug: migrate schema: %w", err)
+	}
 	pool, err := newConnPool(db, connPoolSize)
 	if err != nil {
 		conn.Close()
 		db.Close()
 		return nil, fmt.Errorf("store_ladybug: init conn pool: %w", err)
 	}
-	st := &Store{db: db, conn: conn, pool: pool, fileIDs: newFileIDIndex(), nameIdx: newNameIndex()}
+	st := &Store{db: db, conn: conn, pool: pool, needsRebuild: needsRebuild, fileIDs: newFileIDIndex(), nameIdx: newNameIndex()}
 	// Populate the file→id accelerator from any data already on disk
 	// (daemon restart, ladybug snapshot reload). A fresh DB returns 0
 	// rows and this is a cheap no-op; an existing DB pays one

@@ -319,14 +319,20 @@ func (s *Store) NodesByKind(kind graph.NodeKind) iter.Seq[*graph.Node] {
 	}
 }
 
-// EdgesWithUnresolvedTarget yields every edge whose To begins with
-// "unresolved::". The COPY-time rewrite in copyBulkLocked preserves
-// this prefix in the multi-repo form (`unresolved::<repoPrefix>::<name>`),
-// so a single STARTS WITH still catches every form without paying
-// for an index-killing CONTAINS scan.
+// EdgesWithUnresolvedTarget yields every edge whose To names an
+// unresolved extractor stub. Two encodings exist: the bare
+// `unresolved::<name>` form and the multi-repo `<repoPrefix>::unresolved::<name>`
+// form that copyBulkLocked rewrites stubs into so per-repo stubs can't
+// collide on the COPY primary key. The predicate MUST match both — a
+// bare `STARTS WITH 'unresolved::'` silently dropped every prefixed
+// stub, so the Go worker-pool resolver (resolver.ResolveAll, which
+// drains this iterator) never got a second pass at multi-repo edges and
+// every cross-/same-repo callee left unresolved by the bulk pass looked
+// dead. This mirrors the frontier queries (frontierOutQuery / frontierInQuery)
+// and graph.IsUnresolvedTarget, which already normalise over both forms.
 func (s *Store) EdgesWithUnresolvedTarget() iter.Seq[*graph.Edge] {
 	return func(yield func(*graph.Edge) bool) {
-		const q = `MATCH (a:Node)-[e:Edge]->(b:Node) WHERE b.id STARTS WITH 'unresolved::' RETURN ` + edgeReturnCols
+		const q = `MATCH (a:Node)-[e:Edge]->(b:Node) WHERE b.id STARTS WITH 'unresolved::' OR b.id CONTAINS '::unresolved::' RETURN ` + edgeReturnCols
 		rows := s.querySelect(q, nil)
 		for _, r := range rows {
 			e := rowToEdge(r)

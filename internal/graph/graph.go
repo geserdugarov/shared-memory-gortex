@@ -629,7 +629,12 @@ func (g *Graph) EdgesWithUnresolvedTarget() iter.Seq[*Edge] {
 			if e == nil {
 				continue
 			}
-			if !strings.HasPrefix(e.To, "unresolved::") {
+			// IsUnresolvedTarget matches both the bare `unresolved::<name>`
+			// form and the multi-repo `<repoPrefix>::unresolved::<name>`
+			// form that the ladybug COPY rewrite produces. A bare
+			// HasPrefix check silently skipped every prefixed stub, so the
+			// Go resolver never got a second pass at multi-repo edges.
+			if !IsUnresolvedTarget(e.To) {
 				continue
 			}
 			if !yield(e) {

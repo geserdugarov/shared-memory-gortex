@@ -13,7 +13,6 @@ package storetest
 import (
 	"fmt"
 	"sort"
-	"strings"
 	"sync"
 	"testing"
 
@@ -927,22 +926,39 @@ func testEdgesWithUnresolvedTarget(t *testing.T, factory Factory) {
 	e3.Line = 3
 	e4 := mkEdge("a", "resolved", graph.EdgeCalls)
 	e4.Line = 4
+	// Multi-repo COPY rewrite form: copyBulkLocked rewrites a bare
+	// `unresolved::<name>` stub to `<repoPrefix>::unresolved::<name>`
+	// so per-repo stubs can't collide on the COPY primary key. The
+	// pending-edge scan MUST yield this form too, or the Go resolver
+	// never gets a second pass at multi-repo stubs (the whole-repo
+	// "every function looks dead" bug). graph.IsUnresolvedTarget is
+	// the canonical matcher for both encodings.
+	e5 := mkEdge("a", "gortex::unresolved::Baz", graph.EdgeCalls)
+	e5.Line = 5
 	s.AddEdge(e1)
 	s.AddEdge(e2)
 	s.AddEdge(e3)
 	s.AddEdge(e4)
+	s.AddEdge(e5)
 
 	var unres []*graph.Edge
 	for e := range s.EdgesWithUnresolvedTarget() {
 		unres = append(unres, e)
 	}
-	if len(unres) != 2 {
-		t.Fatalf("EdgesWithUnresolvedTarget yielded %d, want 2", len(unres))
+	if len(unres) != 3 {
+		t.Fatalf("EdgesWithUnresolvedTarget yielded %d, want 3 (unresolved::Foo, unresolved::Bar, gortex::unresolved::Baz)", len(unres))
 	}
+	gotPrefixed := false
 	for _, e := range unres {
-		if !strings.HasPrefix(e.To, "unresolved::") {
+		if !graph.IsUnresolvedTarget(e.To) {
 			t.Fatalf("yielded edge has non-unresolved To: %s", e.To)
 		}
+		if e.To == "gortex::unresolved::Baz" {
+			gotPrefixed = true
+		}
+	}
+	if !gotPrefixed {
+		t.Fatalf("EdgesWithUnresolvedTarget did not yield the multi-repo prefixed stub gortex::unresolved::Baz")
 	}
 }
 

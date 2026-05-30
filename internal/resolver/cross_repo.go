@@ -2,6 +2,7 @@ package resolver
 
 import (
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -244,15 +245,68 @@ func (cr *CrossRepoResolver) ResolveAll() *CrossRepoStats {
 		}
 	}()
 
-	var reindexBatch []graph.EdgeReindex
-	for _, e := range pending {
-		cr.resolveEdge(e, stats, &reindexBatch)
-		processed.Add(1)
+	// Resolve concurrently across NumCPU workers, mirroring the master
+	// Resolver's pool. Each edge is touched by exactly one worker (disjoint
+	// chunks); the per-pass caches/indexes are read-only here; each worker
+	// accumulates into its OWN batch + stats — so no shared mutable state is
+	// written concurrently. Batches are concatenated and applied once after
+	// the barrier (cr never reindexes per-edge mid-loop, so unlike the
+	// master pool no edge clone is needed); stats are summed.
+	workers := runtime.NumCPU()
+	if workers < 1 {
+		workers = 1
 	}
+	if workers > len(pending) {
+		workers = len(pending)
+	}
+	perWorkerBatch := make([][]graph.EdgeReindex, workers)
+	perWorkerStats := make([]*CrossRepoStats, workers)
+	var wg sync.WaitGroup
+	chunk := (len(pending) + workers - 1) / workers
+	for w := 0; w < workers; w++ {
+		start := w * chunk
+		end := start + chunk
+		if end > len(pending) {
+			end = len(pending)
+		}
+		if start >= end {
+			continue
+		}
+		wg.Add(1)
+		go func(idx int, slice []*graph.Edge) {
+			defer wg.Done()
+			ws := &CrossRepoStats{ByRepo: make(map[string]int)}
+			var batch []graph.EdgeReindex
+			for _, e := range slice {
+				cr.resolveEdge(e, ws, &batch)
+				processed.Add(1)
+			}
+			perWorkerStats[idx] = ws
+			perWorkerBatch[idx] = batch
+		}(w, pending[start:end])
+	}
+	wg.Wait()
 	close(progressDone)
+
+	var reindexBatch []graph.EdgeReindex
+	for i := range perWorkerBatch {
+		reindexBatch = append(reindexBatch, perWorkerBatch[i]...)
+	}
+	for _, ws := range perWorkerStats {
+		if ws == nil {
+			continue
+		}
+		stats.Resolved += ws.Resolved
+		stats.Unresolved += ws.Unresolved
+		stats.CrossRepoEdges += ws.CrossRepoEdges
+		for repo, n := range ws.ByRepo {
+			stats.ByRepo[repo] += n
+		}
+	}
 	cr.logger.Info("cross-repo resolve: compute done",
 		zap.Int("pending", len(pending)),
 		zap.Int("reindex_batch", len(reindexBatch)),
+		zap.Int("workers", workers),
 		zap.Duration("elapsed", time.Since(passStart)))
 	if len(reindexBatch) > 0 {
 		applyStart := time.Now()
@@ -432,26 +486,26 @@ func (cr *CrossRepoResolver) clearReachableReposIndex() {
 	cr.reachableReposByFile = nil
 }
 
-// repoReachable reports whether the caller of edge e is allowed to
-// resolve to a candidate in targetRepo. Empty targetRepo (synthetic /
-// stdlib node) is never a repo boundary. A candidate in the caller's
-// own repo is always reachable. A candidate in a *different* repo is
-// reachable only when the caller's file has a resolved import edge into
-// that repo — the import-reachability evidence gate that stops
-// name-only matches from crossing a repo line on a coincidence.
-func (cr *CrossRepoResolver) repoReachable(e *graph.Edge, targetRepo string) bool {
-	if targetRepo == "" {
-		return true
+// reachabilityChecker returns a per-edge closure that reports whether the
+// caller of e may reach a candidate in targetRepo. It captures the caller's
+// repo + import-reachability set ONCE; the per-call repoReachable re-derived
+// both via cachedGetNode on every candidate, so a common cross-repo name
+// with thousands of candidates paid O(candidates) redundant cache lookups
+// per edge — the bulk of cr's compute wall time. Same semantics as
+// repoReachable; only the per-candidate cost differs.
+func (cr *CrossRepoResolver) reachabilityChecker(e *graph.Edge) func(targetRepo string) bool {
+	callerRepo := cr.callerRepoPrefix(e)
+	reachableRepos := cr.reachableReposByFile[cr.callerFileID(e)]
+	return func(targetRepo string) bool {
+		if targetRepo == "" || targetRepo == callerRepo {
+			return true
+		}
+		if reachableRepos == nil {
+			return false
+		}
+		_, ok := reachableRepos[targetRepo]
+		return ok
 	}
-	if targetRepo == cr.callerRepoPrefix(e) {
-		return true
-	}
-	repos := cr.reachableReposByFile[cr.callerFileID(e)]
-	if repos == nil {
-		return false
-	}
-	_, ok := repos[targetRepo]
-	return ok
 }
 
 // callerFileID returns the graph ID of the file that owns the edge's
@@ -497,8 +551,22 @@ func (cr *CrossRepoResolver) warmLookupCache(pending []*graph.Edge) {
 		if e.From != "" {
 			idSet[e.From] = struct{}{}
 		}
-		if name := identifierFromTarget(graph.UnresolvedName(e.To)); name != "" {
+		bare := graph.UnresolvedName(e.To)
+		if name := identifierFromTarget(bare); name != "" {
 			nameSet[name] = struct{}{}
+		}
+		// Seed the RAW unresolved name too. This is pure scan-avoidance and
+		// changes no resolution outcome: the legit cross-repo matches use the
+		// bare identifier (seeded above) and resolve fine. The problem is the
+		// EXTERNAL / unresolvable residual that dominates this pass (stdlib +
+		// out-of-tree "calls" that never match a node): resolveFunctionCall
+		// looks them up by their full target (e.g. "extern::pkg::Foo"), which
+		// the stripped pre-warm key ("Foo") didn't cover, so they missed the
+		// cache and fell through to a per-edge FindNodesByName scan — the
+		// parallel cross-repo storm. Seeding the raw form lets them hit the
+		// authoritative negative instead of scanning.
+		if bare != "" {
+			nameSet[bare] = struct{}{}
 		}
 		// Import targets: mirror resolveEdge's dispatch (TrimPrefix of the
 		// bare unresolved:: form) so the seeded qual-name matches what
@@ -670,6 +738,7 @@ func (cr *CrossRepoResolver) resolveFunctionCall(e *graph.Edge, funcName string,
 
 	callerRepo := cr.callerRepoPrefix(e)
 	callerWS := cr.callerWorkspaceID(e)
+	reachable := cr.reachabilityChecker(e)
 
 	// 1. Prefer same-repo match.
 	for _, c := range candidates {
@@ -693,7 +762,7 @@ func (cr *CrossRepoResolver) resolveFunctionCall(e *graph.Edge, funcName string,
 		if c.Kind != graph.KindFunction && c.Kind != graph.KindMethod {
 			continue
 		}
-		if !cr.repoReachable(e, c.RepoPrefix) {
+		if !reachable(c.RepoPrefix) {
 			continue
 		}
 		if !cr.crossWorkspaceEligible(callerWS, candidateWorkspaceID(c), "") {
@@ -880,6 +949,7 @@ func (cr *CrossRepoResolver) resolveMethodCall(e *graph.Edge, methodName string,
 	callerRepo := cr.callerRepoPrefix(e)
 	callerWS := cr.callerWorkspaceID(e)
 	receiverType := edgeReceiverType(e)
+	reachable := cr.reachabilityChecker(e)
 
 	// If we have a type hint, try exact type match first.
 	if receiverType != "" {
@@ -900,7 +970,7 @@ func (cr *CrossRepoResolver) resolveMethodCall(e *graph.Edge, methodName string,
 			if c.Kind != graph.KindMethod || nodeReceiverType(c) != receiverType {
 				continue
 			}
-			if !cr.repoReachable(e, c.RepoPrefix) {
+			if !reachable(c.RepoPrefix) {
 				continue
 			}
 			if !cr.crossWorkspaceEligible(callerWS, candidateWorkspaceID(c), "") {
@@ -928,7 +998,7 @@ func (cr *CrossRepoResolver) resolveMethodCall(e *graph.Edge, methodName string,
 		if c.Kind != graph.KindMethod {
 			continue
 		}
-		if !cr.repoReachable(e, c.RepoPrefix) {
+		if !reachable(c.RepoPrefix) {
 			continue
 		}
 		if !cr.crossWorkspaceEligible(callerWS, candidateWorkspaceID(c), "") {
@@ -952,7 +1022,7 @@ func (cr *CrossRepoResolver) resolveMethodCall(e *graph.Edge, methodName string,
 		if c.Kind != graph.KindFunction {
 			continue
 		}
-		if !cr.repoReachable(e, c.RepoPrefix) {
+		if !reachable(c.RepoPrefix) {
 			continue
 		}
 		if !cr.crossWorkspaceEligible(callerWS, candidateWorkspaceID(c), "") {

@@ -29,6 +29,12 @@ import (
 // per-pass set so a second invocation in the same ResolveAll burst
 // emits no duplicate EdgeDependsOnModule edges.
 func (r *Resolver) attributeNonGoModuleImports() {
+	// Python/Dart-only attribution (nonGoImportToModuleID handles exactly
+	// those two ecosystems). Skip the EdgeImports scan when the graph has
+	// neither language.
+	if !r.graphHasLanguage("python") && !r.graphHasLanguage("dart") {
+		return
+	}
 	fileLang := r.collectFileLanguages()
 	type pendingEdge struct {
 		edge     *graph.Edge

@@ -21,6 +21,11 @@ import (
 // target file is not in the graph stay as `external::*` so the
 // module-attribution pass can decide what to do with them.
 func (r *Resolver) resolveRelativeImports() {
+	// Python/Dart relative-import resolution only; skip the File-node +
+	// edge walk when the graph has neither language.
+	if !r.graphHasLanguage("python") && !r.graphHasLanguage("dart") {
+		return
+	}
 	fileLang := r.collectFileLanguages()
 	var reindexBatch []graph.EdgeReindex
 

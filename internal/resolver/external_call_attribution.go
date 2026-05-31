@@ -38,6 +38,11 @@ import (
 // All AddNode / AddEdge calls are idempotent on ID, so a second run
 // of this pass (incremental ResolveFile re-invocation) is a no-op.
 func (r *Resolver) attributeGoExternalCalls() {
+	// Go-only pass: skip the external-prefix edge scan when the graph has
+	// no Go nodes.
+	if !r.graphHasLanguage("go") {
+		return
+	}
 	// Scan every edge whose target sits in one of the three external
 	// prefixes. Collect unique (repoPrefix, prefix, importPath, symbol)
 	// tuples so we materialise each one once even when many edges

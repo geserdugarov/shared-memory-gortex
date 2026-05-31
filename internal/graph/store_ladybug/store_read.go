@@ -348,6 +348,43 @@ func (s *Store) NodesByKind(kind graph.NodeKind) iter.Seq[*graph.Node] {
 	}
 }
 
+// HasLanguage reports whether any node carries the given language. A
+// LIMIT-1 probe — no rows are materialised, and on a graph that has the
+// language the scan stops at the first match. Used to gate language-
+// specific resolver passes so they don't walk a graph that has none of
+// their language (a TS-only repo paid ~160s in the Go/Python attribution
+// passes before this gate).
+func (s *Store) HasLanguage(lang string) bool {
+	if lang == "" {
+		return false
+	}
+	const q = `MATCH (n:Node) WHERE n.language = $lang RETURN 1 LIMIT 1`
+	rows := s.querySelect(q, map[string]any{"lang": lang})
+	return len(rows) > 0
+}
+
+// NodesByKindLang yields every node whose Kind AND Language match — the
+// server-side language-scoped form of NodesByKind. A language-specific
+// pass (e.g. rebindGoMethodReceivers) uses it so only its own language's
+// nodes cross the cgo boundary, instead of marshaling every node of the
+// kind and discarding the wrong-language majority in Go (the ~105s
+// rebind_go cost on a 660k-node TS graph was that wasted marshal/decode).
+func (s *Store) NodesByKindLang(kind graph.NodeKind, lang string) iter.Seq[*graph.Node] {
+	return func(yield func(*graph.Node) bool) {
+		const q = `MATCH (n:Node) WHERE n.kind = $kind AND n.language = $lang RETURN ` + nodeReturnCols
+		rows := s.querySelect(q, map[string]any{"kind": string(kind), "lang": lang})
+		for _, r := range rows {
+			n := rowToNode(r)
+			if n == nil {
+				continue
+			}
+			if !yield(n) {
+				return
+			}
+		}
+	}
+}
+
 // EdgesWithUnresolvedTarget yields every edge whose To names an
 // unresolved extractor stub. Two encodings exist: the bare
 // `unresolved::<name>` form and the multi-repo `<repoPrefix>::unresolved::<name>`

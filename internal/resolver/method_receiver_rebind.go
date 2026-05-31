@@ -39,8 +39,13 @@ func (r *Resolver) rebindGoMethodReceivers() {
 	type pkgKey struct{ pkg, name string }
 	typesIdx := make(map[pkgKey]string)
 	for _, kind := range []graph.NodeKind{graph.KindType, graph.KindInterface} {
-		for n := range r.graph.NodesByKind(kind) {
-			if n.Language != "go" || n.Name == "" || n.FilePath == "" {
+		// Server-side language scope: only Go type/interface nodes cross
+		// the cgo boundary. On a graph with few/no Go types (e.g. a TS
+		// repo) this avoids marshaling + meta-decoding every type node
+		// just to discard the non-Go majority — the bulk of this pass's
+		// cost on a large single-language graph.
+		for n := range r.nodesByKindLang(kind, "go") {
+			if n.Name == "" || n.FilePath == "" {
 				continue
 			}
 			k := pkgKey{filepath.Dir(n.FilePath), n.Name}

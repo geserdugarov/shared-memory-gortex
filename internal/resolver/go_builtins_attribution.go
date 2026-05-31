@@ -58,6 +58,11 @@ var goBuiltinConsts = map[string]struct{}{
 // biggest and the shorter ID is what most downstream `find_usages`
 // queries will type.
 func (r *Resolver) attributeGoBuiltins() {
+	// Go-only pass: skip the multi-kind edge scan entirely when the graph
+	// has no Go nodes (e.g. a TS/Python repo).
+	if !r.graphHasLanguage("go") {
+		return
+	}
 	materialised := map[string]struct{}{}
 	var batch []graph.EdgeReindex
 

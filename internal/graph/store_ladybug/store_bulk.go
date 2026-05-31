@@ -499,6 +499,52 @@ func writeEdgesTSV(path string, edges []*graph.Edge) error {
 // loop; a partial bulk apply is safe to re-drive per-edge because the
 // per-edge upsert MERGEs idempotently over any COPY-inserted rows and the
 // DELETE is keyed on the stub's exact identity.
+// syntheticEndpointPrefixes are the "::"-delimited keyword prefixes the
+// resolver / indexer use for target ids that may NOT be backed by a real
+// node: graph stubs (stdlib / builtin / external_call / module) plus the
+// resolver's own conventions (unresolved / external / extern / dep /
+// import / grpc / pyrel). A real parsed-symbol id always begins with a
+// file path, never one of these bare keywords, so an endpoint matching one
+// is the only kind the stub-merge must MERGE before the COPY. Keep in sync
+// with the target forms the resolver emits (grep `e.To = "…::"`); a missed
+// prefix is not a correctness bug — the COPY FK fails and ReindexEdges
+// falls back to the per-edge path — only a lost optimisation for that batch.
+var syntheticEndpointPrefixes = []string{
+	"unresolved", "external", "extern", "dep", "module",
+	"stdlib", "builtin", "external_call", "import", "grpc", "pyrel",
+}
+
+func hasSyntheticPrefix(s string) bool {
+	for _, p := range syntheticEndpointPrefixes {
+		if strings.HasPrefix(s, p+"::") {
+			return true
+		}
+	}
+	return false
+}
+
+// endpointNeedsStub reports whether an edge endpoint id must be MERGE-
+// stubbed before the COPY into the Edge rel table — i.e. it may not
+// already be a node. Real parsed-symbol ids (the caller From, a resolved
+// real To, a KindLocal/KindParam bind target) are present from the parse
+// phase; only the synthetic target forms can be absent. Restricting the
+// stub-merge to these shrinks its MERGE from every endpoint (~1.2M on a
+// large resolve apply, which thrashes the buffer pool into a multi-minute
+// cliff) to the synthetic few. Handles both the bare `keyword::…` form and
+// the multi-repo `<repoPrefix>::keyword::…` form.
+func endpointNeedsStub(id string) bool {
+	if id == "" {
+		return false
+	}
+	if hasSyntheticPrefix(id) {
+		return true
+	}
+	if i := strings.Index(id, "::"); i >= 0 {
+		return hasSyntheticPrefix(id[i+2:])
+	}
+	return false
+}
+
 func (s *Store) reindexEdgesBulk(changed []graph.EdgeReindex) (ok bool) {
 	dir, err := os.MkdirTemp("", "gortex-reindex-*")
 	if err != nil {
@@ -514,10 +560,19 @@ func (s *Store) reindexEdgesBulk(changed []graph.EdgeReindex) (ok bool) {
 	// site to the same target emitting a duplicate rel.
 	seen := make(map[string]struct{}, len(changed))
 	for _, r := range changed {
-		if r.Edge.From != "" {
+		// Only MERGE-stub endpoints that may be ABSENT — synthetic stub
+		// targets (external::/dep::/stdlib::/builtin::) and leftover
+		// unresolved:: residual. The caller From and a resolved real To are
+		// parsed nodes already present from the parse phase, so stubbing
+		// them is wasted work; on a large resolve apply that wasted MERGE
+		// over ~1.2M endpoints thrashes the buffer pool into a multi-minute
+		// cliff (stub-merge 27m49s vs 1.5s with pool headroom). A wrongly-
+		// skipped id surfaces as a COPY FK failure and ReindexEdges falls
+		// back to the per-edge path, so correctness is preserved.
+		if endpointNeedsStub(r.Edge.From) {
 			endpoints[r.Edge.From] = struct{}{}
 		}
-		if r.Edge.To != "" {
+		if endpointNeedsStub(r.Edge.To) {
 			endpoints[r.Edge.To] = struct{}{}
 		}
 		key := r.Edge.From + "\x00" + r.Edge.To + "\x00" + string(r.Edge.Kind) + "\x00" + r.Edge.FilePath + "\x00" + strconv.Itoa(r.Edge.Line)
@@ -570,14 +625,21 @@ func (s *Store) reindexEdgesBulk(changed []graph.EdgeReindex) (ok bool) {
 	// distinct from the deleted one (different To) at every step. Each
 	// step is timed + logged independently so a slow or failing step is
 	// visible (no `||` short-circuit hiding which ran).
-	steps := [...]struct {
+	type bulkStep struct {
 		label string
 		query string
-	}{
-		{"stub-merge", stubQ},
-		{"copy-insert", copyQ},
-		{"delete", delQ},
 	}
+	var steps []bulkStep
+	// Skip the stub-merge entirely when no endpoint needs one — the common
+	// resolve apply, where every endpoint is an existing parsed node.
+	// Beyond dodging the wasted MERGE that thrashes the buffer pool, an
+	// empty endpoints file makes `LOAD FROM <empty> ... MERGE` bind-fail
+	// ("Variable column0 is not in scope"), which would force the per-edge
+	// fallback and reinstate the cliff.
+	if len(endpoints) > 0 {
+		steps = append(steps, bulkStep{"stub-merge", stubQ})
+	}
+	steps = append(steps, bulkStep{"copy-insert", copyQ}, bulkStep{"delete", delQ})
 	for _, st := range steps {
 		t0 := time.Now()
 		res, release, err := s.executeOrQuery(st.query, nil)

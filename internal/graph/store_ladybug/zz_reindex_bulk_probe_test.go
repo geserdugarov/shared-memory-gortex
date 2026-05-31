@@ -210,6 +210,15 @@ func TestReindexEdges_BulkPath_Scale(t *testing.T) {
 	if testing.Short() {
 		t.Skip("80k-edge scale test; skipped under -short")
 	}
+	if raceModeEnabled {
+		// The 80k-edge bulk apply allocates a ~160k-entry map in
+		// copyBulkLocked; under -race the shadow-memory bookkeeping
+		// overflows the address space ("too many address space
+		// collisions for -race mode") and aborts the process. This is a
+		// throughput/correctness-at-scale test, not a concurrency test,
+		// so it runs without the race detector.
+		t.Skip("80k-edge scale test exhausts -race shadow memory; runs without -race")
+	}
 	s, err := Open(filepath.Join(t.TempDir(), "x.kuzu"))
 	if err != nil {
 		t.Fatalf("open: %v", err)

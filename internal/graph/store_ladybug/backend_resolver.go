@@ -493,11 +493,11 @@ MATCH (caller:Node)-[e:Edge]->(stub:Node)
 WHERE stub.kind = 'unresolved'
 WITH e, caller, stub, stub.name AS name
 OPTIONAL MATCH (cnd:Node {name: name})
-WHERE (NOT e.kind IN ['returns', 'typed_as', 'extends', 'implements', 'composes'] OR cnd.kind IN ['type', 'interface'])
+WHERE cnd.id <> stub.id AND (NOT e.kind IN ['returns', 'typed_as', 'extends', 'implements', 'composes'] OR cnd.kind IN ['type', 'interface'])
 WITH e, caller, stub, name, count(cnd) AS cnt
 WHERE cnt = 1
 MATCH (target:Node {name: name})
-WHERE (NOT e.kind IN ['returns', 'typed_as', 'extends', 'implements', 'composes'] OR target.kind IN ['type', 'interface'])
+WHERE target.id <> stub.id AND (NOT e.kind IN ['returns', 'typed_as', 'extends', 'implements', 'composes'] OR target.kind IN ['type', 'interface'])
 DELETE e
 CREATE (caller)-[newE:Edge {
     kind: e.kind,

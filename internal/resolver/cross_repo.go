@@ -331,7 +331,60 @@ func (cr *CrossRepoResolver) ResolveAll() *CrossRepoStats {
 func (cr *CrossRepoResolver) ResolveForRepo(repoPrefix string) *CrossRepoStats {
 	cr.mu.Lock()
 	defer cr.mu.Unlock()
+	// One backend query for every out-edge from this repo's nodes,
+	// instead of GetRepoNodes followed by GetOutEdges per node. On
+	// disk backends (Ladybug, SQLite, DuckDB) the per-node loop
+	// was O(repo_nodes) round-trips per pass — single-digit minutes
+	// of warmup on a multi-repo workspace where this method runs
+	// once per tracked repo.
+	return cr.resolveScopedLocked(cr.graph.GetRepoEdges(repoPrefix))
+}
 
+// ResolveForFile is the watcher fast path: it re-resolves only the
+// out-edges of the changed file, not the whole repo. The watcher fires
+// after every single-file save, and the old ResolveForRepo path
+// materialised the repo's ENTIRE edge set (hundreds of thousands of
+// edges, each with its meta blob) on every keystroke-save — the
+// dominant per-edit allocation flood and the cause of the
+// "buffer pool is full" crash on a small resident pool. Scoping to the
+// changed file's edges turns that into a GetFileNodes lookup plus one
+// batched GetOutEdgesByNodeIDs, bounded by the file's size.
+//
+// relPath must be the repo-relative graph key — callers convert an
+// absolute watcher path via Indexer.RelKey first. A path matching no
+// nodes is a no-op.
+//
+// Scope note: this resolves edges the changed file OWNS. A new
+// definition in this file that would resolve some OTHER file's pending
+// unresolved edge (inbound resolution) is not re-checked here — that
+// case is rare, self-heals when the referencing file is next touched,
+// and is swept up by the periodic full ResolveAll. ResolveForRepo
+// remains for warmup / global recompute.
+func (cr *CrossRepoResolver) ResolveForFile(repoPrefix, relPath string) *CrossRepoStats {
+	cr.mu.Lock()
+	defer cr.mu.Unlock()
+	nodes := cr.graph.GetFileNodes(relPath)
+	if len(nodes) == 0 {
+		return &CrossRepoStats{ByRepo: make(map[string]int)}
+	}
+	ids := make([]string, 0, len(nodes))
+	for _, n := range nodes {
+		if n != nil {
+			ids = append(ids, n.ID)
+		}
+	}
+	var edges []*graph.Edge
+	for _, es := range cr.graph.GetOutEdgesByNodeIDs(ids) {
+		edges = append(edges, es...)
+	}
+	return cr.resolveScopedLocked(edges)
+}
+
+// resolveScopedLocked lifts every unresolved target among edges to its
+// real cross-repo node, then materialises the cross_repo_* parallel-edge
+// layer. Shared by ResolveForRepo (whole-repo edge set) and
+// ResolveForFile (one changed file's out-edges). Caller holds cr.mu.
+func (cr *CrossRepoResolver) resolveScopedLocked(edges []*graph.Edge) *CrossRepoStats {
 	cr.buildDirIndexes()
 	defer cr.clearDirIndexes()
 	cr.buildDepModuleIndex()
@@ -340,16 +393,9 @@ func (cr *CrossRepoResolver) ResolveForRepo(repoPrefix string) *CrossRepoStats {
 	defer cr.clearReachableReposIndex()
 
 	stats := &CrossRepoStats{ByRepo: make(map[string]int)}
-
 	var reindexBatch []graph.EdgeReindex
-	// One backend query for every out-edge from this repo's nodes,
-	// instead of GetRepoNodes followed by GetOutEdges per node. On
-	// disk backends (Ladybug, SQLite, DuckDB) the per-node loop
-	// was O(repo_nodes) round-trips per pass — single-digit minutes
-	// of warmup on a multi-repo workspace where this method runs
-	// once per tracked repo.
-	for _, e := range cr.graph.GetRepoEdges(repoPrefix) {
-		if !strings.HasPrefix(e.To, unresolvedPrefix) {
+	for _, e := range edges {
+		if e == nil || !strings.HasPrefix(e.To, unresolvedPrefix) {
 			continue
 		}
 		cr.resolveEdge(e, stats, &reindexBatch)

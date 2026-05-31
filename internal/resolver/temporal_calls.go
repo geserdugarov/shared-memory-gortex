@@ -264,8 +264,8 @@ func buildTemporalIndex(g graph.Store) *temporalIndex {
 	// temporal-tagged interfaces and methods. As with Phase 1, collect
 	// every annotation edge and batch the From-side GetNode calls.
 	type javaAnno struct {
-		fromID                 string
-		ifaceRole, methodRole  string
+		fromID                string
+		ifaceRole, methodRole string
 	}
 	var javaAnnos []javaAnno
 	annoFromIDs := map[string]struct{}{}

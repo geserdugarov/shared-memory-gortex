@@ -16,11 +16,36 @@ import (
 func (s *Store) runWriteLocked(query string, args map[string]any) {
 	res, release, err := s.executeOrQuery(query, args)
 	if err != nil {
+		// A buffer-pool-exhaustion error is resource pressure, not graph
+		// corruption: the allocation failed BEFORE any mutation, so the
+		// write simply didn't apply (the edge/node will be re-derived on
+		// the next resolve/reindex). Degrade like the read path instead
+		// of panicking — a transient OOM during an oversized pass (e.g.
+		// cross-repo full recompute on a small resident buffer pool) must
+		// never take the whole daemon down.
+		if isRecoverableEngineError(err) {
+			readPathLogf("write degraded: %v (query=%q)", err, firstLine(query))
+			return
+		}
 		panicOnFatal(err)
 		return
 	}
 	res.Close()
 	release()
+}
+
+// isRecoverableEngineError reports whether err is transient resource
+// exhaustion (buffer-pool full / out-of-memory) rather than a fatal
+// consistency failure. Recoverable errors are logged and skipped; only
+// genuine corruption / schema / closed-connection faults panic.
+func isRecoverableEngineError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "Buffer manager exception") ||
+		strings.Contains(msg, "buffer pool is full") ||
+		strings.Contains(msg, "Unable to allocate memory")
 }
 
 // querySelect runs a read-shaped Cypher statement and materialises
@@ -137,6 +162,26 @@ func (s *Store) executeOrQuery(query string, args map[string]any) (*lbug.QueryRe
 	}
 	if len(args) == 0 {
 		res, err := conn.Query(query)
+		if err != nil {
+			discard()
+			return nil, func() {}, err
+		}
+		return res, release, nil
+	}
+	// With the prepared-statement cache enabled, reuse the connection's
+	// compiled statement instead of re-`Prepare`ing every call — this
+	// kills both the per-edge parse/plan cost and the parse/bind AST
+	// liblbug orphans on each prepared-statement destroy. The cached
+	// statement is owned by the pool, so we must NOT Close it here; a
+	// failed Execute routes through discard(), which closes the conn
+	// and all its cached statements (the poisoned one included).
+	if s.pool != nil && s.pool.prepCacheEnabled {
+		stmt, perr := s.pool.prepared(conn, query)
+		if perr != nil {
+			discard()
+			return nil, func() {}, fmt.Errorf("prepare (cached): %w", perr)
+		}
+		res, err := conn.Execute(stmt, args)
 		if err != nil {
 			discard()
 			return nil, func() {}, err

@@ -41,6 +41,7 @@ func openBackend(name, path string, bufferPoolMB uint64, logger *zap.Logger) (gr
 		logger.Info("opening ladybug backend",
 			zap.String("path", resolved),
 			zap.Uint64("buffer_pool_mb", bufferPoolMB),
+			zap.Bool("prepared_stmt_cache", ladybugStmtCacheEnabled()),
 		)
 		return openLadybugBackend(resolved, bufferPoolMB)
 	default:

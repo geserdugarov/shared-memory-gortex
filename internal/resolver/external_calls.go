@@ -87,7 +87,7 @@ func SynthesizeExternalCalls(g graph.Store, enabled bool) int {
 	// server-side via EdgesByKinds — AllEdges scanned the whole bucket
 	// just to filter Kind Go-side.
 	type candidate struct {
-		edge                 *graph.Edge
+		edge                  *graph.Edge
 		ecosystem, importPath string
 	}
 	var candidates []candidate

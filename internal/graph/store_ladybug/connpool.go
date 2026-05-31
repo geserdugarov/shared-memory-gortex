@@ -34,8 +34,26 @@ type connPool struct {
 	closeOnce sync.Once
 
 	extMu      sync.RWMutex
-	extensions []string                       // ordered list of extension names
+	extensions []string // ordered list of extension names
 	loadedExt  map[*lbug.Connection]map[string]bool
+
+	// prepCacheEnabled turns on the per-connection prepared-statement
+	// cache (see prepared). Off by default — gated because reusing
+	// prepared statements on the resolver's hot per-edge path has
+	// historically destabilised liblbug under load; the cache is only
+	// safe because each connection is checked out exclusively, so a
+	// cached statement is never touched by two goroutines at once.
+	prepCacheEnabled bool
+
+	// stmtCache holds, per pooled connection, the prepared statements
+	// already compiled against it keyed by query string. Reusing them
+	// avoids re-`Prepare`ing the same Cypher on every call — which both
+	// eliminates the per-edge parse/plan CPU and stops liblbug leaking
+	// the parse/bind AST it orphans on every prepared-statement destroy.
+	// Guarded by stmtMu; the inner per-conn map is only ever mutated by
+	// the goroutine currently holding that (exclusive) connection.
+	stmtMu    sync.RWMutex
+	stmtCache map[*lbug.Connection]map[string]*lbug.PreparedStatement
 }
 
 // newConnPool opens `size` connections on db and returns the
@@ -49,6 +67,7 @@ func newConnPool(db *lbug.Database, size int) (*connPool, error) {
 		db:        db,
 		available: make(chan *lbug.Connection, size),
 		loadedExt: make(map[*lbug.Connection]map[string]bool),
+		stmtCache: make(map[*lbug.Connection]map[string]*lbug.PreparedStatement),
 	}
 	for i := 0; i < size; i++ {
 		conn, err := lbug.OpenConnection(db)
@@ -108,6 +127,9 @@ func (p *connPool) discard(conn *lbug.Connection) {
 	p.extMu.Lock()
 	delete(p.loadedExt, conn)
 	p.extMu.Unlock()
+	// Close the dead handle's cached prepared statements before closing
+	// the handle itself — they're bound to it and would otherwise leak.
+	p.dropStmtsLocked(conn)
 	conn.Close()
 	if p.available == nil || p.db == nil {
 		return
@@ -120,6 +142,63 @@ func (p *connPool) discard(conn *lbug.Connection) {
 		return
 	}
 	p.put(fresh)
+}
+
+// prepared returns the cached prepared statement for query on conn,
+// compiling and caching it on first use. The caller MUST currently
+// hold conn (checked out from the pool) so the per-connection cache is
+// touched by a single goroutine; cross-connection access to the outer
+// map is guarded by stmtMu. The returned statement is owned by the
+// cache — callers must NOT Close it (discard/close do that when the
+// connection is retired).
+func (p *connPool) prepared(conn *lbug.Connection, query string) (*lbug.PreparedStatement, error) {
+	// Fast path: concurrent readers across distinct connections.
+	p.stmtMu.RLock()
+	if inner := p.stmtCache[conn]; inner != nil {
+		if st := inner[query]; st != nil {
+			p.stmtMu.RUnlock()
+			return st, nil
+		}
+	}
+	p.stmtMu.RUnlock()
+
+	// Miss: compile under the write lock. Prepares only happen once per
+	// (conn, query); after warmup this is hit-only.
+	p.stmtMu.Lock()
+	defer p.stmtMu.Unlock()
+	if p.stmtCache == nil { // pool closed underneath us
+		return conn.Prepare(query)
+	}
+	inner := p.stmtCache[conn]
+	if inner == nil {
+		inner = make(map[string]*lbug.PreparedStatement)
+		p.stmtCache[conn] = inner
+	}
+	if st := inner[query]; st != nil {
+		return st, nil
+	}
+	st, err := conn.Prepare(query)
+	if err != nil {
+		return nil, err
+	}
+	inner[query] = st
+	return st, nil
+}
+
+// dropStmtsLocked closes and forgets every prepared statement cached
+// for conn. Called when a connection is retired (discard/close) so the
+// statements don't outlive their connection.
+func (p *connPool) dropStmtsLocked(conn *lbug.Connection) {
+	p.stmtMu.Lock()
+	defer p.stmtMu.Unlock()
+	if inner := p.stmtCache[conn]; inner != nil {
+		for _, st := range inner {
+			if st != nil {
+				st.Close()
+			}
+		}
+		delete(p.stmtCache, conn)
+	}
 }
 
 // ensureExtensionsLocked loads any registered extensions onto
@@ -160,6 +239,17 @@ func (p *connPool) ensureExtensionsLocked(conn *lbug.Connection) {
 func (p *connPool) close() {
 	p.closeOnce.Do(func() {
 		close(p.available)
+		// Close every cached prepared statement before its connection.
+		p.stmtMu.Lock()
+		for _, inner := range p.stmtCache {
+			for _, st := range inner {
+				if st != nil {
+					st.Close()
+				}
+			}
+		}
+		p.stmtCache = nil
+		p.stmtMu.Unlock()
 		for conn := range p.available {
 			if conn != nil {
 				conn.Close()

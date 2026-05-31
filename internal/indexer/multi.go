@@ -1206,7 +1206,14 @@ func (mi *MultiIndexer) ReconcileAll() map[string]*IndexResult {
 	// don't suppress it. With ~100 repos that's ~100× the work for the
 	// hourly janitor.
 	mi.BeginBatch()
-	defer mi.EndBatch()
+	// Always restore batch flags on exit (incl. panic) WITHOUT running the
+	// graph-wide derivation passes — those are run explicitly below, and
+	// only when a repo actually reindexed. The hourly janitor used to run
+	// EndBatch unconditionally, walking the full graph (InferImplements /
+	// InferOverrides / clone detection over hundreds of thousands of
+	// edges) every cycle even when nothing changed — wasted CPU and, on a
+	// small resident buffer pool, needless memory churn.
+	defer mi.ResetBatch()
 
 	results := make(map[string]*IndexResult, len(prefixes))
 	reindexed := 0
@@ -1244,6 +1251,10 @@ func (mi *MultiIndexer) ReconcileAll() map[string]*IndexResult {
 
 	if reindexed > 0 {
 		mi.ReconcileContractEdges()
+		// Only now — when at least one repo actually reindexed — is it
+		// worth the full-graph derivation pass. Nothing changed → skip it
+		// (the deferred ResetBatch still clears the batch flags).
+		mi.RunGlobalGraphPasses(context.Background())
 	}
 	return results
 }

@@ -108,6 +108,15 @@ type Watcher struct {
 	reconcileMu      sync.Mutex
 	reconcilePending bool
 	reconcileFn      func()
+
+	// pendingScanDirs coalesces newly-created directories awaiting a
+	// scoped subtree re-index — the new-subdir race (see enqueueDirScan).
+	// dirScanActive guards a single in-flight drainer goroutine; scanFn
+	// is a test seam, nil in production (the real IncrementalReindexPaths
+	// runs). All three are guarded by reconcileMu.
+	pendingScanDirs map[string]struct{}
+	dirScanActive   bool
+	scanFn          func(map[string]struct{})
 }
 
 const maxHistory = 1000
@@ -457,13 +466,100 @@ func (w *Watcher) triggerOverflowReconcile(reason string) {
 	}()
 }
 
+// dirScanEscalateCap bounds the scoped new-directory scan: a burst that
+// creates more than this many directories (a large checkout or unpack)
+// escalates to a single full-tree reconcile instead of fanning out into
+// that many scoped subtree walks.
+const dirScanEscalateCap = 64
+
+// enqueueDirScan schedules a scoped re-index of a newly-created
+// directory's subtree, closing the new-subdir race: on Linux inotify a
+// file written into a directory before its watch attaches fires no
+// event. A burst of directory creates coalesces into a single in-flight
+// drainer (mirrors triggerOverflowReconcile) — the first caller starts
+// the goroutine, concurrent callers add their directory to
+// pendingScanDirs and return. The drainer loops until the set is empty,
+// so a directory enqueued while a scan is in flight is still picked up;
+// nothing is lost and there is no debounce-timing race.
+func (w *Watcher) enqueueDirScan(dir string) {
+	w.reconcileMu.Lock()
+	if w.pendingScanDirs == nil {
+		w.pendingScanDirs = make(map[string]struct{})
+	}
+	w.pendingScanDirs[dir] = struct{}{}
+	if w.dirScanActive {
+		w.reconcileMu.Unlock()
+		return
+	}
+	w.dirScanActive = true
+	w.reconcileMu.Unlock()
+
+	go func() {
+		for {
+			w.reconcileMu.Lock()
+			dirs := w.pendingScanDirs
+			w.pendingScanDirs = nil
+			if len(dirs) == 0 {
+				w.dirScanActive = false
+				w.reconcileMu.Unlock()
+				return
+			}
+			fn := w.scanFn
+			w.reconcileMu.Unlock()
+			w.runDirScan(dirs, fn)
+		}
+	}()
+}
+
+// runDirScan re-indexes the accumulated new directories. A large burst
+// escalates to one full-tree reconcile (dirScanEscalateCap); otherwise
+// the scoped subtrees are walked in a single IncrementalReindexPaths
+// call, which IsStale-gates each file so already-current files cost only
+// a stat. fn is the test seam.
+func (w *Watcher) runDirScan(dirs map[string]struct{}, fn func(map[string]struct{})) {
+	if fn != nil {
+		fn(dirs)
+		return
+	}
+	if len(dirs) > dirScanEscalateCap {
+		if w.logger != nil {
+			w.logger.Info("watcher: large new-directory burst — full-tree reconcile",
+				zap.Int("dirs", len(dirs)), zap.String("root", w.indexer.rootPath))
+		}
+		if _, err := w.indexer.IncrementalReindex(w.indexer.rootPath); err != nil && w.logger != nil {
+			w.logger.Warn("watcher: new-directory reconcile failed", zap.Error(err))
+		}
+		return
+	}
+	paths := make([]string, 0, len(dirs))
+	for d := range dirs {
+		paths = append(paths, d)
+	}
+	if _, err := w.indexer.IncrementalReindexPaths(w.indexer.rootPath, paths); err != nil && w.logger != nil {
+		w.logger.Warn("watcher: new-directory scan failed",
+			zap.Strings("dirs", paths), zap.Error(err))
+	}
+}
+
+// hasEventType reports whether the aggregated event-type set contains want.
+func hasEventType(types []fswatcher.EventType, want fswatcher.EventType) bool {
+	for _, t := range types {
+		if t == want {
+			return true
+		}
+	}
+	return false
+}
+
 func (w *Watcher) handleEvent(event fswatcher.WatchEvent) {
-	// Kernel inotify queue overflow arrives as a pathless EventOverflow
-	// on the Events channel (the Linux backend cannot tell us which
-	// events it lost). macOS routes its UserDropped/KernelDropped flags
-	// through the same event type. There's no path to re-index, so
-	// trigger a coalesced full-tree reconcile and stop — every
-	// path-based step below would misfire on the empty path.
+	// Kernel queue overflow arrives as a pathless EventOverflow on the
+	// Events channel: the Linux inotify and Windows backends emit it when
+	// the kernel drops events and cannot tell us which paths were lost.
+	// macOS FSEvents never emits it — the darwin backend absorbs
+	// UserDropped/KernelDropped by re-scanning the affected subtree
+	// internally — so this branch is effectively Linux/Windows-only. With
+	// no path to re-index, trigger a coalesced full-tree reconcile and
+	// stop; every path-based step below would misfire on the empty path.
 	for _, t := range event.Types {
 		if t == fswatcher.EventOverflow {
 			w.triggerOverflowReconcile("queue-overflow")
@@ -498,11 +594,24 @@ func (w *Watcher) handleEvent(event fswatcher.WatchEvent) {
 		return
 	}
 
-	// fswatcher with WatchNested is recursive on every backend, so we
-	// don't need to manually re-attach watches on directory creates;
-	// drop dir events before they reach indexer logic.
+	// Directory events. fswatcher with WatchNested attaches the watch
+	// for a new directory itself, so we never re-attach. But on Linux
+	// inotify that watch lands only AFTER the directory's create event is
+	// read, so a file written into the directory in that gap fires no
+	// event and would stay invisible until the hourly janitor. When the
+	// event carries a Create, scan the new directory's subtree on disk so
+	// those pre-watch files are picked up regardless of whether an event
+	// ever fired ("watch first, then scan": files created after the watch
+	// fire normal events, files created before are caught by the scan,
+	// and the overlap is at worst a redundant idempotent re-index). A dir
+	// event without a Create — a bare mtime bump on an existing dir —
+	// needs no scan: entry changes inside it fire their own file events.
+	// Either way the directory event itself reaches no indexer logic.
 	if kind == ChangeCreated || kind == ChangeModified {
 		if info, err := os.Stat(path); err == nil && info.IsDir() {
+			if hasEventType(event.Types, fswatcher.EventCreate) {
+				w.enqueueDirScan(path)
+			}
 			return
 		}
 	}

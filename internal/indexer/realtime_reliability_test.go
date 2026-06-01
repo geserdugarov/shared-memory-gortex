@@ -2,6 +2,7 @@ package indexer
 
 import (
 	"errors"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"sync"
@@ -411,4 +412,97 @@ func TestWatcher_OverflowReconcileIndexesMissedFile(t *testing.T) {
 
 	assert.NotEmpty(t, g.GetFileNodes("missed.fk"),
 		"the overflow-driven reconcile must index the previously-missed file")
+}
+
+// TestWatcher_NewSubdirScanIndexesPreWatchFile proves the new-subdir
+// race is closed: a file written into a freshly-created directory before
+// its watch attaches (so its own create event is never delivered) is
+// still indexed, because the directory's create event triggers a scoped
+// subtree scan. We drive the real path — handleEvent -> enqueueDirScan
+// -> runDirScan -> IncrementalReindexPaths, no seam — and assert the
+// pre-watch file lands in the graph.
+func TestWatcher_NewSubdirScanIndexesPreWatchFile(t *testing.T) {
+	dir := t.TempDir()
+	ext := &toggleExtractor{}
+	reg := parser.NewRegistry()
+	reg.Register(ext)
+	g := graph.New()
+	idx := New(g, reg, config.IndexConfig{Workers: 1}, zap.NewNop())
+	idx.search = search.NewBM25()
+	idx.SetRootPath(dir)
+
+	ext.setFail(false)
+	ext.setFuncs("Seed")
+	writeFile(t, filepath.Join(dir, "seed.fk"), "seed body")
+	_, err := idx.IndexCtx(testCtx(), dir)
+	require.NoError(t, err)
+	require.NotEmpty(t, g.GetFileNodes("seed.fk"))
+
+	w, err := NewWatcher(idx, config.WatchConfig{Enabled: true, DebounceMs: 10}, zap.NewNop())
+	require.NoError(t, err)
+
+	// A new subdirectory appears with a file already inside it; the
+	// file's own create event was lost (it landed before the watch on
+	// the new directory attached), so only the directory create arrives.
+	subdir := filepath.Join(dir, "pkg")
+	require.NoError(t, os.MkdirAll(subdir, 0o755))
+	ext.setFuncs("Buried")
+	writeFile(t, filepath.Join(subdir, "buried.fk"), "buried body")
+	require.Empty(t, g.GetFileNodes("pkg/buried.fk"),
+		"the pre-watch file must be absent before the directory scan")
+
+	w.handleEvent(fswatcher.WatchEvent{
+		Path:  subdir,
+		Types: []fswatcher.EventType{fswatcher.EventCreate},
+	})
+
+	require.Eventually(t, func() bool {
+		return len(g.GetFileNodes("pkg/buried.fk")) > 0
+	}, 5*time.Second, 10*time.Millisecond,
+		"the new-directory create must trigger a scoped scan that indexes the pre-watch file")
+}
+
+// TestWatcher_DirEventScanGating proves the scan trigger is gated on a
+// Create: a directory create enqueues a scoped scan, while a bare
+// directory modify (an mtime bump with no Create) does not — entry
+// changes inside an existing directory fire their own file events. Uses
+// the scanFn seam.
+func TestWatcher_DirEventScanGating(t *testing.T) {
+	idx, _ := newToggleIndexer(t)
+	dir := t.TempDir()
+	idx.SetRootPath(dir)
+	subdir := filepath.Join(dir, "sub")
+	require.NoError(t, os.MkdirAll(subdir, 0o755))
+
+	w, err := NewWatcher(idx, config.WatchConfig{Enabled: true, DebounceMs: 10}, zap.NewNop())
+	require.NoError(t, err)
+
+	scanned := make(chan map[string]struct{}, 4)
+	w.reconcileMu.Lock()
+	w.scanFn = func(dirs map[string]struct{}) { scanned <- dirs }
+	w.reconcileMu.Unlock()
+
+	// A bare modify on the directory must NOT enqueue a scan.
+	w.handleEvent(fswatcher.WatchEvent{
+		Path:  subdir,
+		Types: []fswatcher.EventType{fswatcher.EventMod},
+	})
+	select {
+	case <-scanned:
+		t.Fatal("a directory modify without a Create must not trigger a scan")
+	case <-time.After(150 * time.Millisecond):
+	}
+
+	// A create on the directory must enqueue a scoped scan of it.
+	w.handleEvent(fswatcher.WatchEvent{
+		Path:  subdir,
+		Types: []fswatcher.EventType{fswatcher.EventCreate},
+	})
+	select {
+	case dirs := <-scanned:
+		_, ok := dirs[subdir]
+		assert.True(t, ok, "the scan set must contain the newly-created directory")
+	case <-time.After(2 * time.Second):
+		t.Fatal("a directory create must trigger a scoped scan")
+	}
 }

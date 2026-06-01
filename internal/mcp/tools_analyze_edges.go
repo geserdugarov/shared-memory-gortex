@@ -972,7 +972,7 @@ func (s *Server) handleAnalyzeErrorSurface(ctx context.Context, req mcp.CallTool
 	}
 	rows := make([]*throwerRow, 0)
 	if surfacer, ok := s.graph.(graph.ThrowerErrorSurfacer); ok {
-		// Server-side path: one Cypher GROUP BY for the per-thrower
+		// Server-side path: one server-side aggregate for the per-thrower
 		// throws+targets dedup, one for the per-thrower error-msg
 		// attachment. No per-thrower GetOutEdges fanout.
 		for _, r := range surfacer.ThrowerErrorSurface(pathPrefix) {
@@ -1264,8 +1264,8 @@ func (s *Server) handleAnalyzeCrossRepo(ctx context.Context, req mcp.CallToolReq
 
 // edgesByKinds streams every edge whose Kind is in the supplied set
 // using the EdgesByKindsScanner capability when the backend
-// implements it (one Cypher round-trip with a `kind IN $kinds` IN-
-// list), or falls back to per-kind EdgesByKind iteration otherwise.
+// implements it (one round-trip with a `kind IN (…)` filter), or
+// falls back to per-kind EdgesByKind iteration otherwise.
 //
 // The edge-driven analyzers below use it instead of `for _, e := range
 // s.graph.AllEdges() { switch e.Kind … }` so the disk backends stop

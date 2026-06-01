@@ -38,16 +38,16 @@ func (s *Server) registerExtractionCandidatesTool() {
 }
 
 type extractCandidateRow struct {
-	ID           string  `json:"symbol_id"`
-	Name         string  `json:"name"`
-	File         string  `json:"file"`
-	StartLine    int     `json:"start_line"`
-	EndLine      int     `json:"end_line"`
-	LineCount    int     `json:"line_count"`
-	CallerCount  int     `json:"caller_count"`
-	FanOut       int     `json:"fan_out"`
-	Score        float64 `json:"score"`
-	Rationale    string  `json:"rationale"`
+	ID          string  `json:"symbol_id"`
+	Name        string  `json:"name"`
+	File        string  `json:"file"`
+	StartLine   int     `json:"start_line"`
+	EndLine     int     `json:"end_line"`
+	LineCount   int     `json:"line_count"`
+	CallerCount int     `json:"caller_count"`
+	FanOut      int     `json:"fan_out"`
+	Score       float64 `json:"score"`
+	Rationale   string  `json:"rationale"`
 }
 
 func (s *Server) handleGetExtractionCandidates(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -72,9 +72,9 @@ func (s *Server) handleGetExtractionCandidates(ctx context.Context, req mcp.Call
 	}
 
 	return s.respondJSONOrTOON(ctx, req, map[string]any{
-		"candidates":  rows,
-		"total":       len(rows),
-		"truncated":   truncated,
+		"candidates": rows,
+		"total":      len(rows),
+		"truncated":  truncated,
 		"thresholds": map[string]any{
 			"min_lines":   minLines,
 			"min_callers": minCallers,
@@ -89,9 +89,9 @@ func (s *Server) handleGetExtractionCandidates(ctx context.Context, req mcp.Call
 //
 // Picks ExtractCandidatesScanner when the backend implements it: that
 // path runs the caller-count + fan-out aggregations server-side in
-// one Cypher per direction instead of the AllNodes + per-node
-// GetInEdges + GetOutEdges loop the fallback runs. On Ladybug the
-// fallback fires 2N cgo round-trips per call and materialises every
+// one query per direction instead of the AllNodes + per-node
+// GetInEdges + GetOutEdges loop the fallback runs. On a disk backend the
+// fallback fires 2N round-trips per call and materialises every
 // edge bucket just to count distinct endpoints. The pushdown drops
 // the call to two aggregations the planner can index.
 //

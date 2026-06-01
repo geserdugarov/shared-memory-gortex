@@ -126,7 +126,7 @@ type Context struct {
 	// fetched in one batched round-trip from Graph at prepare() time.
 	// FanInSignal / FanOutSignal / MinHashSignal read from these
 	// instead of calling Graph.GetIn/OutEdges per-candidate, which on
-	// the Ladybug backend collapses ~6N per-search cgo round-trips
+	// a disk backend collapses ~6N per-search round-trips
 	// (~150 calls × 14ms ≈ 2 s) into 2. Empty when Graph is nil.
 	// Callers must use the inEdges / outEdges accessors so signals
 	// stay graph-agnostic.
@@ -260,9 +260,9 @@ func (c *Context) now() int64 {
 // Idempotent — safe to call again after mutating the candidate slice.
 //
 // Edge fetches happen in two batched round-trips (one inbound, one
-// outbound) collected from every candidate's ID up front. On the
-// Ladybug backend each per-candidate GetInEdges / GetOutEdges call
-// costs ~14ms cgo; batching collapses ~150 round-trips per Rerank
+// outbound) collected from every candidate's ID up front. On a disk
+// backend each per-candidate GetInEdges / GetOutEdges call
+// costs ~14ms; batching collapses ~150 round-trips per Rerank
 // into 2.
 //
 // Bundle pre-seed fast path: when the caller has set cachePreSeeded

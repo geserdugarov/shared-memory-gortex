@@ -249,7 +249,7 @@ func (p *Provider) Enrich(g graph.Store, repoRoot string) (*semantic.EnrichResul
 	// node is a per-call GetNode reconstruction, so collect every stamped
 	// node and round-trip it through the store at the end (one AddBatch)
 	// or the semantic_type / return_type stamps are silently discarded on
-	// Ladybug. See semantic.EnrichNodeMeta.
+	// the disk backend. See semantic.EnrichNodeMeta.
 	var stampedNodes []*graph.Node
 	for _, pkg := range pkgs {
 		if pkg.TypesInfo == nil {

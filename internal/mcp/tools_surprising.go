@@ -32,16 +32,16 @@ func (s *Server) registerSurprisingConnectionsTool() {
 // decide whether the anomaly is real or expected without an extra
 // get_symbol_source round-trip.
 type surprisingEdgeRow struct {
-	From        string             `json:"from"`
-	FromName    string             `json:"from_name,omitempty"`
-	FromFile    string             `json:"from_file,omitempty"`
-	To          string             `json:"to"`
-	ToName      string             `json:"to_name,omitempty"`
-	ToFile      string             `json:"to_file,omitempty"`
-	Kind        string             `json:"kind"`
-	Score       float64            `json:"score"`
-	Signals     map[string]float64 `json:"signals"`
-	Reasons     []string           `json:"reasons"`
+	From     string             `json:"from"`
+	FromName string             `json:"from_name,omitempty"`
+	FromFile string             `json:"from_file,omitempty"`
+	To       string             `json:"to"`
+	ToName   string             `json:"to_name,omitempty"`
+	ToFile   string             `json:"to_file,omitempty"`
+	Kind     string             `json:"kind"`
+	Score    float64            `json:"score"`
+	Signals  map[string]float64 `json:"signals"`
+	Reasons  []string           `json:"reasons"`
 }
 
 func (s *Server) handleGetSurprisingConnections(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -73,7 +73,7 @@ func (s *Server) handleGetSurprisingConnections(ctx context.Context, req mcp.Cal
 	// Kind tally — short-circuit the AllEdges scan when the backend
 	// implements EdgeKindCounter (returns one row per distinct kind,
 	// not one per edge — a few-dozen-row response replaces a ~286k
-	// edge round-trip on Ladybug). The total edge count then comes
+	// edge round-trip on a disk backend). The total edge count then comes
 	// from the per-kind sum so we don't need a second backend call.
 	kindCounts := make(map[graph.EdgeKind]int, 16)
 	totalEdges := 0

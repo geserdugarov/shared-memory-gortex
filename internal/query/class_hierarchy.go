@@ -54,8 +54,8 @@ var methodHierarchyEdgeKinds = map[graph.EdgeKind]bool{
 // Picks ClassHierarchyTraverser when the backend implements it: that
 // path runs the BFS as one variable-length traversal per direction
 // inside the engine, replacing the per-node GetNode + GetIn/OutEdges
-// loop the fallback runs. On Ladybug a deep walk over a wide
-// implementer set previously fired hundreds of cgo round-trips per
+// loop the fallback runs. On a disk backend a deep walk over a wide
+// implementer set previously fired hundreds of round-trips per
 // call — the pushdown drops to one or two queries.
 func (e *Engine) ClassHierarchy(seedID string, direction HierarchyDirection, depth int, includeMethods bool, opts QueryOptions) *SubGraph {
 	if direction == "" {
@@ -197,8 +197,8 @@ func (e *Engine) classHierarchyPushdown(
 	}
 
 	// Resolve every visited node + collect the edge pointers in one
-	// place. The capability doesn't carry edge pointers (Ladybug edges
-	// aren't first-class objects), so we re-resolve them via
+	// place. The capability doesn't carry edge pointers (on-disk
+	// backend edges aren't first-class objects), so we re-resolve them via
 	// GetOutEdgesByNodeIDs / GetInEdgesByNodeIDs once per direction.
 	allIDs := make([]string, 0, len(visited))
 	for id := range visited {

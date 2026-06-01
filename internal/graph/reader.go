@@ -23,15 +23,15 @@ type Reader interface {
 	FindNodesByName(name string) []*Node
 	// FindNodesByNameContaining returns nodes whose Name (case-
 	// insensitive) contains substr. The filter is pushed into the
-	// backend so only matching rows cross cgo on disk backends;
+	// backend so only matching rows cross the boundary on a disk backend;
 	// the search hot path's substring fallback uses this instead of
 	// the old AllNodes()-then-filter pattern (which materialised the
 	// whole node set per call and didn't scale). limit caps the
 	// result; 0 means "no limit".
 	FindNodesByNameContaining(substr string, limit int) []*Node
 
-	// GetNodesByIDs is the batched sibling of GetNode. Disk-backed
-	// stores (Ladybug) collapse N individual point lookups into a
+	// GetNodesByIDs is the batched sibling of GetNode. The disk-backed
+	// store collapses N individual point lookups into a
 	// single bulk query — critical on the search hot path where one
 	// query materialises 60+ candidate IDs. The in-memory backend
 	// forwards to per-id GetNode, so the cost matches an inline loop
@@ -48,11 +48,11 @@ type Reader interface {
 	GetInEdges(nodeID string) []*Edge
 
 	// GetInEdgesByNodeIDs / GetOutEdgesByNodeIDs are the batched
-	// siblings of GetInEdges / GetOutEdges. Disk-backed stores collapse
-	// N per-id Cypher queries into one bulk MATCH over `WHERE id IN
-	// $ids`; the in-memory backend forwards to per-id walks (no
+	// siblings of GetInEdges / GetOutEdges. The disk-backed store collapses
+	// N per-id queries into one bulk query over an `id IN $ids`
+	// filter; the in-memory backend forwards to per-id walks (no
 	// concurrency win — same algorithmic cost as an inline loop). On
-	// the rerank hot path this drops ~150 cgo round-trips per
+	// the rerank hot path this drops ~150 round-trips per
 	// search_symbols call down to ~4 (prepare collects every
 	// candidate's ids and fans them out in one inbound + one outbound
 	// batch). Missing nodes get nil slices in the returned map so

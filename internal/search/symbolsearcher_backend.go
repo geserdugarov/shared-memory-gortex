@@ -14,8 +14,8 @@ import (
 // see a plain search.Backend and call Search on it.
 //
 // Production wiring: when the indexer detects that the backing
-// graph.Store also implements graph.SymbolSearcher (today only
-// store_ladybug), it constructs this adapter as the initial
+// graph.Store also implements graph.SymbolSearcher, it constructs
+// this adapter as the initial
 // search.Backend wrapped by search.NewSwappable. The in-process
 // Bleve / BM25 build path is then bypassed entirely.
 //

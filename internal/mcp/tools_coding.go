@@ -308,7 +308,7 @@ func (s *Server) handleGetEditingContext(ctx context.Context, req mcp.CallToolRe
 	calleeCap := 20
 
 	// Fast path: when the backend implements FileEditingContext we
-	// take all five projections in a small fixed number of Cypher
+	// take all five projections in a small fixed number of
 	// round-trips instead of the per-symbol GetCallers / GetCallChain
 	// loop. The fallback retains the previous engine-based shape so
 	// the in-memory backend is unaffected.

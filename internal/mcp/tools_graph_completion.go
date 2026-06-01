@@ -85,12 +85,12 @@ func (s *Server) handleGraphCompletionSearch(ctx context.Context, req mcp.CallTo
 	}
 
 	return s.respondJSONOrTOON(ctx, req, map[string]any{
-		"results":      rows,
-		"total":        len(rows),
-		"retriever":    retriever.Name(),
-		"seed_count":   countSeeds(cands),
-		"expanded":     len(cands) - countSeeds(cands),
-		"edge_kinds":   edgeKindStrings(edgeKinds),
+		"results":    rows,
+		"total":      len(rows),
+		"retriever":  retriever.Name(),
+		"seed_count": countSeeds(cands),
+		"expanded":   len(cands) - countSeeds(cands),
+		"edge_kinds": edgeKindStrings(edgeKinds),
 	})
 }
 
@@ -102,9 +102,9 @@ func (s *Server) handleGraphCompletionSearch(ctx context.Context, req mcp.CallTo
 // interface.
 func (s *Server) nameMatchSeeder(ctx context.Context, g graph.Store, query string, limit int) ([]*rerank.Candidate, error) {
 	// FindNodesByNameContaining pushes the case-insensitive substring
-	// filter into the backend — on Ladybug that's a Cypher
-	// WHERE LOWER(n.name) CONTAINS $q against the indexed name column,
-	// so only matching rows cross cgo instead of the legacy AllNodes()
+	// filter into the backend — on a disk backend that's an indexed
+	// substring filter against the name column, so only matching rows
+	// cross the storage boundary instead of the legacy AllNodes()
 	// materialisation + per-row Go string check. The in-memory backend
 	// already had a tight implementation behind the same surface, so
 	// this is a strict win on disk backends and matches today's cost

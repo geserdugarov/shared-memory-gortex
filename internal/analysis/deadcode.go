@@ -22,14 +22,14 @@ type DeadCodeEntry struct {
 
 // HotspotEntry represents a symbol with disproportionately high complexity metrics.
 type HotspotEntry struct {
-	ID                 string  `json:"id"`
-	Name               string  `json:"name"`
-	Kind               string  `json:"kind"`
-	FilePath           string  `json:"file_path"`
-	Line               int     `json:"start_line"`
-	FanIn              int     `json:"fan_in"`
-	FanOut             int     `json:"fan_out"`
-	CommunityCrossings int     `json:"community_crossings"`
+	ID                 string `json:"id"`
+	Name               string `json:"name"`
+	Kind               string `json:"kind"`
+	FilePath           string `json:"file_path"`
+	Line               int    `json:"start_line"`
+	FanIn              int    `json:"fan_in"`
+	FanOut             int    `json:"fan_out"`
+	CommunityCrossings int    `json:"community_crossings"`
 	// Betweenness is the node's betweenness-centrality score
 	// normalized to 0-100 — how often it sits on a shortest path
 	// between other symbols. A bottleneck the call graph routes
@@ -241,17 +241,17 @@ func FindDeadCode(g graph.Store, processes *ProcessResult, excludePatterns []str
 	// requires are alive even if never called directly (they satisfy the
 	// contract).  We index: typeID → set of required method names.
 	// Backends that implement graph.IfaceImplementsScanner serve this
-	// from one Cypher join; the fallback walks NodesByKind + EdgesByKind
+	// from one join; the fallback walks NodesByKind + EdgesByKind
 	// just like before.
 	ifaceRequiredMethods := buildIfaceRequiredMethods(g)
 
 	// Pick the candidate-set source. When the backend implements
-	// DeadCodeCandidator, the WHERE-NOT-EXISTS filter runs server-side
-	// and only the surviving ~hundreds of true candidates cross the
-	// cgo boundary — see graph.DeadCodeCandidator's doc-comment for the
-	// 1.3M-row-vs-hundreds rationale. Otherwise the legacy
-	// AllNodes + GetInEdgesByNodeIDs fallback runs, identical to the
-	// pre-capability path.
+	// DeadCodeCandidator, the "no incoming usage edge" filter runs
+	// inside the store and only the surviving ~hundreds of true
+	// candidates are materialized — see graph.DeadCodeCandidator's
+	// doc-comment for the 1.3M-row-vs-hundreds rationale. Otherwise
+	// the legacy AllNodes + GetInEdgesByNodeIDs fallback runs,
+	// identical to the pre-capability path.
 	candidates, incomingByID := collectDeadCodeCandidates(g, opt)
 
 	// Build set of entry point node IDs from processes
@@ -517,7 +517,7 @@ func collectDeadCodeCandidates(g graph.Store, opt FindDeadCodeOptions) (candidat
 //  3. For each type that implements an interface, merging all required method names.
 //
 // On backends that implement graph.IfaceImplementsScanner this is a
-// single Cypher join; otherwise the fallback iterates
+// single join; otherwise the fallback iterates
 // NodesByKind(KindInterface) + EdgesByKind(EdgeImplements). Both paths
 // produce the same map.
 func buildIfaceRequiredMethods(g graph.Store) map[string]map[string]bool {
@@ -527,7 +527,7 @@ func buildIfaceRequiredMethods(g graph.Store) map[string]map[string]bool {
 
 	// Fallback: walk interfaces + EdgeImplements edges Go-side. Uses
 	// NodesByKind(KindInterface) so disk backends still issue one
-	// MATCH per kind instead of pulling AllNodes.
+	// scan per kind instead of pulling AllNodes.
 	ifaceMethods := make(map[string]map[string]bool)
 	for n := range g.NodesByKind(graph.KindInterface) {
 		if n == nil || n.Meta == nil {
@@ -607,8 +607,8 @@ func buildIfaceRequiredMethodsFromRows(rows []graph.IfaceImplementsRow) map[stri
 
 // decodeMethodNames normalises a Node.Meta["methods"] value into a
 // set of method names. Accepts []string (in-memory backend) and
-// []any (gob-decoded payload from Ladybug); anything else is treated
-// as "no methods declared".
+// []any (decoded payload from the disk backend); anything else is
+// treated as "no methods declared".
 func decodeMethodNames(raw any) map[string]bool {
 	methods := make(map[string]bool)
 	switch v := raw.(type) {
@@ -645,7 +645,7 @@ func FindHotspots(g graph.Store, communities *CommunityResult, threshold float64
 	// Pull only function/method node IDs — the hotspots ranking is
 	// callable-only, and the scoring math doesn't touch any column
 	// beyond the id. NodeIDsByKinds returns the projection from a
-	// single Cypher query (one C string per row instead of the ~10
+	// single query (one id per row instead of the ~10
 	// columns NodesByKinds would ship). The full *Node rows are
 	// fetched in one batched GetNodesByIDs call AFTER the threshold
 	// filter, so a typical run materialises ~100 survivors rather
@@ -1030,8 +1030,8 @@ func matchesExcludePattern(filePath, nodeID string, patterns []string) bool {
 
 // CollectFanCounts returns per-id fan-in / fan-out counts filtered by
 // edge kind. Backends that implement graph.NodeFanAggregator serve
-// both counts from one bulk Cypher per direction (~candidateCount
-// rows over cgo instead of the full edge set); the fallback path
+// both counts from one bulk pass per direction (~candidateCount
+// rows instead of the full edge set); the fallback path
 // streams the requested kinds via EdgesByKind, accumulating into the
 // fan maps Go-side -- still no AllEdges materialisation, just an
 // in-memory walk of the per-kind edge buckets.

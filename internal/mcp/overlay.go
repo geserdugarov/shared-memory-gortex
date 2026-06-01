@@ -76,18 +76,14 @@ func (s *Server) wrapToolHandler(h mcpserver.ToolHandlerFunc) mcpserver.ToolHand
 	h = s.sanitizeToolHandler(h)
 	return func(ctx context.Context, req mcp.CallToolRequest) (res *mcp.CallToolResult, retErr error) {
 		// Last-resort panic firewall around EVERY tool handler. A Go
-		// panic in any handler (e.g. panicOnFatal when the ladybug
-		// store surfaces a fatal engine error such as "prepare: mutex
-		// lock failed: Invalid argument") would otherwise unwind past
-		// the mcp-go server loop and crash the whole daemon — dropping
-		// every session's MCP transport, not just the offending call.
-		// Convert it to a structured tool error so the panicking tool
-		// fails in isolation and the daemon survives. (A CGo-level
-		// *fatal error* like "semasleep on Darwin signal stack" is not
-		// a Go panic and cannot be recovered here — those must be
-		// fixed at the source by avoiding concurrent liblbug access.)
-		// This supersedes the per-handler recover that get_file_summary
-		// carried; every tool now gets the same protection.
+		// panic in any handler (e.g. when the store surfaces a fatal
+		// engine error) would otherwise unwind past the mcp-go server
+		// loop and crash the whole daemon — dropping every session's
+		// MCP transport, not just the offending call. Convert it to a
+		// structured tool error so the panicking tool fails in
+		// isolation and the daemon survives. This supersedes the
+		// per-handler recover that get_file_summary carried; every
+		// tool now gets the same protection.
 		defer func() {
 			if r := recover(); r != nil {
 				if s.logger != nil {

@@ -11,11 +11,11 @@ const (
 	// does not semantically *define* an import; it *contains* the
 	// import statement. Splitting the kinds lets walkers that want
 	// "real definitions" follow EdgeDefines and walkers that want the
-	// full file neighbourhood union both. The Ladybug-backed
+	// full file neighbourhood union both. The disk-backed
 	// GetFileSubGraph relies on this union to fetch every file
-	// neighbour via the rel-table FROM index in one pass.
-	EdgeContains EdgeKind = "contains"
-	EdgeDefines  EdgeKind = "defines"
+	// neighbour in one pass.
+	EdgeContains     EdgeKind = "contains"
+	EdgeDefines      EdgeKind = "defines"
 	EdgeCalls        EdgeKind = "calls"
 	EdgeInstantiates EdgeKind = "instantiates"
 	EdgeImplements   EdgeKind = "implements"

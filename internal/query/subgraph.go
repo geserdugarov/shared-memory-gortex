@@ -109,7 +109,7 @@ type QueryOptions struct {
 	// fetchAndMergeBM25 fan-out's combined-OR call is the canonical
 	// case: a concatenated bag of expansion terms ("NewServer
 	// StartServer Server.Init …") can't be the literal Name of any
-	// node, so the FindNodesByName Cypher round-trip is wasted work.
+	// node, so the FindNodesByName query round-trip is wasted work.
 	// The primary query still runs the splice.
 	SkipExactNameSplice bool `json:"-"`
 }
@@ -132,7 +132,7 @@ type SearchTimings struct {
 	VectorSearchMS int64 // inside vector.Search ANN call (vector path only)
 	EngineRerankMS int64 // inside rerank.Pipeline.Rerank in SearchSymbolsRanked
 	// BundleMS accumulates the wall-clock spent inside
-	// SymbolBundleSearcherBackend.SearchSymbolBundles (one Cypher per
+	// SymbolBundleSearcherBackend.SearchSymbolBundles (one query per
 	// BM25 fan-out that returns Node + in/out edges in one bundle).
 	// When the backend supports bundles, the bundle path replaces the
 	// (TextBackend + GetNodes) sub-buckets; the bm25_backend_ms

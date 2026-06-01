@@ -62,9 +62,9 @@ func (r *recordingBulkGraph) AddBatch(nodes []*graph.Node, edges []*graph.Edge) 
 // edges through a single AddBatch call and does NOT engage the
 // BulkLoader COPY bracket. Contract IDs frequently coincide with
 // existing source-symbol IDs (a handler appears as both a Go
-// function and an HTTP-contract anchor), and Ladybug's COPY FROM
-// is INSERT-only on the node table — wrapping the contracts pass
-// in BeginBulkLoad/FlushBulk would crash on the first collision.
+// function and an HTTP-contract anchor), and the on-disk backend's
+// bulk load is INSERT-only on the node table — wrapping the contracts
+// pass in BeginBulkLoad/FlushBulk would crash on the first collision.
 // AddBatch's per-call MERGE path absorbs duplicates safely.
 func TestCommitContracts_BatchesViaAddBatch(t *testing.T) {
 	g := newRecordingBulkGraph()
@@ -181,7 +181,7 @@ func TestCommitContracts_NoBulkLoader_FallsBackToAddBatch(t *testing.T) {
 // dependency-contract emission goes through a single AddBatch
 // call (with the bulk path engaged when the backend supports it)
 // instead of the per-row AddNode loop that previously did one
-// cgo round-trip per dependency on the Ladybug backend.
+// round-trip per dependency on the on-disk backend.
 func TestExtractGoModContracts_UsesAddBatch(t *testing.T) {
 	dir := t.TempDir()
 	goMod := []byte(`module example.com/test
@@ -206,4 +206,3 @@ require (
 		"extractGoModContracts must emit dep nodes via a single AddBatch")
 	require.Zero(t, g.addNode.Load(), "no per-row AddNode calls expected")
 }
-

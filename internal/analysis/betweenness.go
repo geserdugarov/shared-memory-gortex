@@ -82,7 +82,7 @@ func ComputeBetweenness(g graph.Store) *BetweennessResult {
 	// the unfiltered AllNodes() pull was wasted on the other 90% of
 	// the node table AND on the 9 unused columns of every retained
 	// row. NodeIDsByKinds returns just the id column from a single
-	// Cypher query; NodesByKindsScanner is the legacy fallback for
+	// query; NodesByKindsScanner is the legacy fallback for
 	// backends that haven't shipped the id projection yet.
 	betweennessKinds := []graph.EdgeKind{graph.EdgeCalls, graph.EdgeReferences}
 	bcNodeKinds := []graph.NodeKind{graph.KindFunction, graph.KindMethod}
@@ -118,10 +118,11 @@ func ComputeBetweenness(g graph.Store) *BetweennessResult {
 	// Forward adjacency over the call / reference subgraph.
 	// EdgeAdjacencyForKinds returns only the (from, to) projection of
 	// function/method endpoints — the disk path collapses to one
-	// Cypher join with both endpoint kinds enforced server-side, so
-	// neither the cross-kind edges nor the ~10 unused columns ever
-	// cross cgo. Falls back to EdgesByKinds (and then EdgesByKind per
-	// kind) on backends that don't implement the adjacency capability.
+	// join with both endpoint kinds enforced in the store, so
+	// neither the cross-kind edges nor the ~10 unused columns are
+	// ever materialized. Falls back to EdgesByKinds (and then
+	// EdgesByKind per kind) on backends that don't implement the
+	// adjacency capability.
 	adj := make(map[string][]string, n)
 	if adjScan, ok := g.(graph.EdgeAdjacencyForKinds); ok {
 		for pair := range adjScan.EdgeAdjacencyForKinds(betweennessKinds, bcNodeKinds) {

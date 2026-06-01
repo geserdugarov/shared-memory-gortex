@@ -11,7 +11,7 @@
 // Routing:
 //
 //   - When the backing graph.Store implements graph.KCorer (today
-//     only store_ladybug), the analyzer delegates to the engine-
+//     only store_sqlite), the analyzer delegates to the engine-
 //     native parallel implementation.
 //
 //   - Otherwise analysis.ComputeKCore runs in-process. The

@@ -158,8 +158,8 @@ func expandSearchTerms(ctx context.Context, s *Server, query string) []string {
 // expansion hits append in their own BM25 order with duplicates
 // skipped.
 //
-// Both BM25 backends (BM25Backend and Ladybug's FTS via
-// QUERY_FTS_INDEX) treat a multi-token query as an OR-style union
+// Both BM25 backends (BM25Backend and the on-disk backend's FTS)
+// treat a multi-token query as an OR-style union
 // with a single global BM25 score, so one combined call replaces
 // the prior N per-term fan-out (the N+1 round-trip pattern dominated
 // the search hot path on disk backends).
@@ -191,7 +191,7 @@ func fetchAndMergeBM25Timed(eng *query.Engine, original string, expanded []strin
 	// SearchSymbolsRanked would be wasted work whose output the
 	// merge discards. SkipInnerRerank collapses the N+1 engine
 	// rerank invocations to zero — drops ~150-300ms per call on
-	// Ladybug (each inner rerank's Context.prepare costs at minimum
+	// a disk backend (each inner rerank's Context.prepare costs at minimum
 	// two batched edge fetches when the bundle cache misses).
 	scope.SkipInnerRerank = true
 	primaryStart := time.Now()
@@ -230,7 +230,7 @@ func fetchAndMergeBM25Timed(eng *query.Engine, original string, expanded []strin
 	//
 	// The concatenated bag of terms is never going to match any
 	// node's literal Name, so the engine's exact-name splice would
-	// pay a guaranteed-empty FindNodesByName Cypher round-trip every
+	// pay a guaranteed-empty FindNodesByName round-trip every
 	// fan-out. SkipExactNameSplice tells gatherBackendCandidates to
 	// skip it — the per-fragment exact-name rescue below covers the
 	// load-bearing PascalCase-fragment case the splice was insuring
@@ -252,8 +252,8 @@ func fetchAndMergeBM25Timed(eng *query.Engine, original string, expanded []strin
 	}
 
 	// Per-fragment exact-name union — cheap (one name-bucket lookup
-	// per term on in-memory, a single `WHERE name IN $names` Cypher
-	// round-trip on Ladybug via FindNodesByNames). Preserves the
+	// per term on in-memory, a single batched name-IN query on a
+	// disk backend via FindNodesByNames). Preserves the
 	// per-term behaviour where a fragment like "BillingInvoice"
 	// finds its exact-name node even when BM25 tokenisation misses
 	// the PascalCase concatenated token. Without this rescue,
@@ -283,7 +283,7 @@ func fetchAndMergeBM25Timed(eng *query.Engine, original string, expanded []strin
 
 // graphReaderFromEngine returns the engine's underlying graph reader
 // if it also exposes the batched FindNodesByNames method (every
-// production backend does — in-memory, Ladybug, and OverlaidView via
+// production backend does — in-memory, the on-disk backend, and OverlaidView via
 // the layered base). Falls back to (nil, false) when an embedded
 // test engine wires a stripped-down reader — the rescue step is then
 // skipped, matching the contract that callers without a names-batch

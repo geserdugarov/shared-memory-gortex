@@ -9,9 +9,9 @@ import (
 	"github.com/zzet/gortex/internal/graph"
 )
 
-// seedComponentTestGraph builds the same hub-and-spoke graph the
-// ladybug probe / conformance tests use: two SCC triangles + one
-// hub every node points at. Gives predictable WCC + SCC answers.
+// seedComponentTestGraph builds a hub-and-spoke graph: two SCC
+// triangles + one hub every node points at. Gives predictable
+// WCC + SCC answers.
 func seedComponentTestGraph() *graph.Graph {
 	g := graph.New()
 	for _, id := range []string{"a", "b", "c", "d", "e", "f", "hub"} {
@@ -20,7 +20,7 @@ func seedComponentTestGraph() *graph.Graph {
 	edges := [][2]string{
 		{"a", "b"}, {"b", "c"}, {"c", "a"}, // triangle 1
 		{"d", "e"}, {"e", "f"}, {"f", "d"}, // triangle 2
-		{"c", "d"},                         // bridge
+		{"c", "d"}, // bridge
 		{"a", "hub"}, {"b", "hub"}, {"c", "hub"},
 		{"d", "hub"}, {"e", "hub"}, {"f", "hub"},
 	}

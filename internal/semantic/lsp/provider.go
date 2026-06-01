@@ -271,7 +271,7 @@ func (p *Provider) Enrich(g graph.Store, repoRoot string) (*semantic.EnrichResul
 	// EnrichNodeMeta mutates Node.Meta in place; on disk backends n is a
 	// per-call AllNodes reconstruction, so collect stamped nodes and
 	// round-trip them through the store at the end or the semantic_type
-	// stamp is discarded on Ladybug. See semantic.EnrichNodeMeta.
+	// stamp is discarded on the disk backend. See semantic.EnrichNodeMeta.
 	var stampedNodes []*graph.Node
 	for _, n := range g.AllNodes() {
 		if n.Kind == graph.KindFile || n.Kind == graph.KindImport {

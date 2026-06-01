@@ -40,7 +40,7 @@ func (idx *Indexer) extractDIContracts(reg *contracts.Registry) {
 		// single backend query. The previous GetRepoNodes ×
 		// GetOutEdges nested walk was O(repo_nodes) per-node round-
 		// trips on disk backends — at ~68k repo nodes that meant
-		// 68k Cypher queries per pass on Ladybug.
+		// 68k backend queries per pass on a disk backend.
 		for _, e := range idx.graph.GetRepoEdges(idx.repoPrefix) {
 			c, ok := diContractFromEdge(e)
 			if !ok {

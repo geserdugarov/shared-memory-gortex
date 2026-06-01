@@ -101,11 +101,11 @@ type Controller interface {
 	// EnrichChurn runs the per-symbol / per-file churn enricher against
 	// the daemon's in-process graph. Exposed over the control surface so
 	// CLI invocations (and the post-commit / post-merge git hook) can
-	// trigger it without taking the LadyBug write lock the daemon owns.
+	// trigger it without taking the on-disk store's write lock the daemon owns.
 	EnrichChurn(ctx context.Context, params EnrichChurnParams) (EnrichChurnResult, error)
 	// EnrichReleases runs the per-file release enricher against the
 	// daemon's in-process graph. Same routing rationale as
-	// EnrichChurn — keeps the LadyBug write lock with the daemon.
+	// EnrichChurn — keeps the on-disk store's write lock with the daemon.
 	EnrichReleases(ctx context.Context, params EnrichReleasesParams) (EnrichReleasesResult, error)
 	// Shutdown is invoked via the control surface and should return
 	// quickly; the daemon's actual shutdown work happens after the

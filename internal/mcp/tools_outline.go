@@ -204,7 +204,7 @@ func topCommunitiesSummary(comms []analysis.Community) []map[string]any {
 // node is inside the session's workspace.
 //
 // Picks the FileImportAggregator capability when the backend
-// implements it (one Cypher GROUP BY ships back the per-file count
+// implements it (one server-side aggregate ships back the per-file count
 // instead of materialising every edge over cgo just to bucket).
 // Falls back to the AllEdges-driven loop on backends that don't.
 func mostImportedFiles(g graph.Store, inScope map[string]bool, topN int) []map[string]any {
@@ -222,7 +222,7 @@ func mostImportedFiles(g graph.Store, inScope map[string]bool, topN int) []map[s
 			}
 			// An empty inScope means "nothing matches" — the
 			// aggregator contract maps that to nil so we never
-			// fire a whole-graph Cypher scan on a bound session.
+			// fire a whole-graph scan on a bound session.
 			if len(scope) == 0 {
 				scope = []string{}
 			}

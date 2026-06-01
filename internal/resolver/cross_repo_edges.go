@@ -70,7 +70,7 @@ func DetectCrossRepoEdges(g graph.Store) int {
 // cross_repo_* kind AND whose endpoints carry two distinct, non-empty
 // RepoPrefix values. Routed through the storage layer's
 // CrossRepoCandidates capability when the backend implements it (one
-// Cypher join with the kind + repo-prefix filters in WHERE); falls
+// query — a join with the kind + repo-prefix filters in WHERE); falls
 // back to the AllEdges + per-edge GetNode walk otherwise.
 //
 // The base-kind set is derived from graph.CrossRepoKindFor by

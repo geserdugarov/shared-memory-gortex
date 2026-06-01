@@ -1135,7 +1135,7 @@ func testGetEdgesByNodeIDs(t *testing.T, factory Factory) {
 
 // testSymbolBundleSearcher exercises the optional
 // graph.SymbolBundleSearcher capability. The interface is opt-in
-// (today only the Ladybug backend implements it; the in-memory
+// (today only the disk backend implements it; the in-memory
 // *Graph deliberately leaves it unimplemented so the engine's
 // fallback path stays exercised) — backends without the capability
 // skip the subtest cleanly.
@@ -1287,8 +1287,8 @@ func edgeKeys(es []*graph.Edge) []string {
 //   - in-edges of allowed kind (alive).
 //   - mixed kinds across the candidate set (per-row allowlist must apply).
 //
-// The in-memory *graph.Graph implements this; Ladybug overrides with
-// a server-side Cypher query. Both must return the same candidate set.
+// The in-memory *graph.Graph implements this; the disk backend overrides
+// with a server-side query. Both must return the same candidate set.
 func testDeadCodeCandidator(t *testing.T, factory Factory) {
 	t.Helper()
 	s := factory(t)
@@ -1950,7 +1950,7 @@ func testNodesByKindsScanner(t *testing.T, factory Factory) {
 	// table. Mix of meta-bearing and meta-bare nodes so the
 	// round-trip assertion covers both shapes. Meta values stay
 	// scalar — testMetaPreserved already covers flat round-trip, and
-	// the ladybug backend's gob encoder needs gob.Register for nested
+	// the disk backend's gob encoder needs gob.Register for nested
 	// map shapes (out of scope for a kind-pushdown capability test).
 	fn1 := mkNode("pkg/a.go::Fn1", "Fn1", "pkg/a.go", graph.KindFunction)
 	fn1.Meta = map[string]any{

@@ -141,7 +141,7 @@ func (s *Server) handleAnalyzeImpactComposite(ctx context.Context, req mcp.CallT
 	// the kinds / path / ids the caller actually asked for. Without
 	// this, the analyzer paid for an unfiltered AllEdges()
 	// materialisation per call -- ~500k edges over cgo on the gortex
-	// workspace, the bulk of the wall-clock cost on Ladybug.
+	// workspace, the bulk of the wall-clock cost on a disk backend.
 	scoped := s.scopedNodes(ctx)
 	candidateIDs := make([]string, 0, len(scoped))
 	candidateSet := make(map[string]struct{}, len(scoped))
@@ -167,7 +167,7 @@ func (s *Server) handleAnalyzeImpactComposite(ctx context.Context, req mcp.CallT
 	}
 
 	// fan-in: uses the NodeFanAggregator capability when the
-	// backend supports it (one bulk Cypher per direction over the
+	// backend supports it (one bulk query per direction over the
 	// candidate id set) and falls back to a per-kind EdgesByKind
 	// stream otherwise. fanOutKinds is empty -- impact only reads
 	// fan-in.

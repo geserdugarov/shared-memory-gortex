@@ -631,7 +631,7 @@ func (g *Graph) EdgesWithUnresolvedTarget() iter.Seq[*Edge] {
 			}
 			// IsUnresolvedTarget matches both the bare `unresolved::<name>`
 			// form and the multi-repo `<repoPrefix>::unresolved::<name>`
-			// form that the ladybug COPY rewrite produces. A bare
+			// form that the disk backend's bulk-load rewrite produces. A bare
 			// HasPrefix check silently skipped every prefixed stub, so the
 			// Go resolver never got a second pass at multi-repo edges.
 			if !IsUnresolvedTarget(e.To) {
@@ -648,10 +648,10 @@ func (g *Graph) EdgesWithUnresolvedTarget() iter.Seq[*Edge] {
 // DeadCodeCandidator. Iterates the requested node kinds and filters
 // out anything whose incoming-edge bucket contains an allowlist match
 // — same algorithm the analysis.FindDeadCode loop runs, just exposed
-// as a single capability the disk backends can short-circuit with
-// one Cypher per kind. Pure map / slice walks here; the win lives
-// in disk backends where the equivalent path materialises the full
-// in-edge map over cgo.
+// as a single capability the disk backend can short-circuit with
+// one query per kind. Pure map / slice walks here; the win lives
+// in the disk backend where the equivalent path materialises the full
+// in-edge map.
 func (g *Graph) DeadCodeCandidates(allowedNodeKinds []NodeKind, allowedInEdgeKinds map[NodeKind][]EdgeKind) []*Node {
 	if len(allowedNodeKinds) == 0 {
 		return nil
@@ -792,7 +792,7 @@ func (g *Graph) NodeDegreeCounts(ids []string, usageKinds []EdgeKind) []NodeDegr
 // FileImporters capability. Iterates EdgeImports via the byKind
 // bucket — same cost as the legacy AllEdges()+filter loop in
 // handleCheckReferences, but exposes the predicate as a single call
-// the disk backends can short-circuit with one Cypher.
+// the disk backend can short-circuit with one query.
 //
 // Matches edges whose To node satisfies filePath == n.FilePath OR
 // filePath == n.ID. The dual match keeps parity with the indexer's
@@ -832,7 +832,7 @@ func (g *Graph) FileImporters(filePath string) []FileImporterRow {
 // NodeFanCounts is the in-memory reference implementation of
 // NodeFanAggregator. Two passes over the per-node in/out edge buckets
 // the in-memory backend already maintains, filtered by the caller's
-// kind sets. Disk backends override with one Cypher per direction
+// kind sets. The disk backend overrides with one query per direction
 // to drop the AllEdges() materialisation FindHotspots / health_score
 // were running every call.
 func (g *Graph) NodeFanCounts(ids []string, fanInKinds []EdgeKind, fanOutKinds []EdgeKind) []NodeFanRow {
@@ -890,11 +890,11 @@ func (g *Graph) NodeFanCounts(ids []string, fanInKinds []EdgeKind, fanOutKinds [
 // the InEdgeCounter capability. Walks each requested EdgeKind via
 // the byKind bucket and increments a per-To counter. Same algorithm
 // the AllEdges-bucketing fallback in handleGetUntestedSymbols runs;
-// the win lives in disk backends where AllEdges() materialises every
-// edge over cgo just to bucket by target.
+// the win lives in the disk backend where AllEdges() materialises every
+// edge just to bucket by target.
 //
 // Dedupes the kind set up front so a sloppy caller passing the same
-// kind twice doesn't double-count — matches the Cypher backend's
+// kind twice doesn't double-count — matches the disk backend's
 // IN-list dedup.
 func (g *Graph) InEdgeCountsByKind(kinds []EdgeKind) map[string]int {
 	if len(kinds) == 0 {
@@ -963,10 +963,10 @@ func (g *Graph) NodesInFilesByKind(files []string, kinds []NodeKind) []*Node {
 // iterator per requested kind — algorithmic cost identical to the
 // hand-written `for _, n := range AllNodes() if n.Kind == K` pattern
 // the metadata analyzers used before. The win lives in the disk
-// backends, where one IN-list Cypher replaces the AllNodes() pull.
+// backend, where one IN-list query replaces the AllNodes() pull.
 //
 // Dedupes the kind set up front so a sloppy caller passing the same
-// kind twice doesn't double-yield — matches the Cypher backend's
+// kind twice doesn't double-yield — matches the disk backend's
 // IN-list dedup. Empty kinds returns nil without touching the store.
 func (g *Graph) NodesByKinds(kinds []NodeKind) []*Node {
 	if len(kinds) == 0 {
@@ -993,7 +993,7 @@ func (g *Graph) NodesByKinds(kinds []NodeKind) []*Node {
 // the EdgeAdjacencyForKinds capability. One AllEdges scan that yields
 // (from, to) pairs whose Kind is in the supplied edge-kind set AND
 // whose endpoints both have a Kind in the node-kind set — identical
-// shape to the Cypher join the disk backends fold into a single
+// shape to the join the disk backend folds into a single
 // query.
 //
 // Empty edgeKinds or empty nodeKinds yields nothing — matches the
@@ -1125,7 +1125,7 @@ func (g *Graph) NodeIDsByKinds(kinds []NodeKind) []string {
 // EdgeKindCounter capability. One AllEdges scan with a per-kind
 // tally — the exact loop the get_surprising_connections Go fallback
 // already runs today, just exposed as a single method call so the
-// disk backends can short-circuit with a Cypher GROUP BY.
+// the disk backend can short-circuit with a server-side GROUP BY.
 //
 // Empty graph returns nil so callers can short-circuit a downstream
 // "kindCounts != nil" gate.
@@ -1147,8 +1147,8 @@ func (g *Graph) EdgeKindCounts() map[EdgeKind]int {
 // CrossRepoEdgeAggregator. Iterates the four cross_repo_* byKind
 // buckets and groups by (kind, fromRepoPrefix, toRepoPrefix). Same
 // algorithm as the architecture handler's AllEdges loop but exposes
-// it as a single capability so disk backends can fold the join into
-// one Cypher.
+// it as a single capability so the disk backend can fold the join into
+// one query.
 //
 // Returns nil when the graph carries no cross-repo edges (single-
 // repo mode) so the caller's empty-list rendering kicks in without
@@ -1754,7 +1754,7 @@ func (g *Graph) GetNodeByQualName(qualName string) *Node {
 // GetNodesByQualNames is the batch form of GetNodeByQualName — returns
 // only the qual_names that have a node (an absent key means "no node").
 // The in-memory byQual index makes each lookup O(1); the method exists
-// for Store-interface parity with the ladybug backend, where it collapses
+// for Store-interface parity with the disk backend, where it collapses
 // N per-edge qual_name scans into a single IN-scan.
 func (g *Graph) GetNodesByQualNames(qualNames []string) map[string]*Node {
 	out := make(map[string]*Node, len(qualNames))
@@ -1921,8 +1921,8 @@ func (g *Graph) GetInEdges(nodeID string) []*Edge {
 // GetOutEdgesByNodeIDs returns a map id→outgoing edges for every input
 // id. The in-memory backend loops the existing GetOutEdges — cost
 // matches a hand-written loop in the caller. The value of the batched
-// API lives in disk backends, where it collapses N point lookups into
-// one bulk Cypher query. Empty input returns nil; duplicate ids are
+// API lives in the disk backend, where it collapses N point lookups into
+// one bulk query. Empty input returns nil; duplicate ids are
 // deduped naturally. Missing ids are absent from the returned map.
 func (g *Graph) GetOutEdgesByNodeIDs(ids []string) map[string][]*Edge {
 	if len(ids) == 0 {
@@ -2597,8 +2597,8 @@ func (g *Graph) RepoPrefixes() []string {
 
 // InDegreeForNodes is the in-memory reference implementation of the
 // InDegreeForNodes capability. Walks the per-target in-edge buckets
-// directly — the same arithmetic the disk backends push into a single
-// Cypher COUNT.
+// directly — the same arithmetic the disk backend pushes into a single
+// server-side COUNT.
 func (g *Graph) InDegreeForNodes(ids []string) map[string]int {
 	if len(ids) == 0 {
 		return nil
@@ -2621,7 +2621,7 @@ func (g *Graph) InDegreeForNodes(ids []string) map[string]int {
 // of the ReachableForwardByKinds capability. Layer-by-layer BFS from
 // the seed frontier, following only edges whose Kind is in the
 // supplied set. Pure map / slice walks here — the win is the disk
-// backends fold the BFS into one variable-length Cypher match.
+// backend folds the BFS into one variable-length match.
 func (g *Graph) ReachableForwardByKinds(seeds []string, kinds []EdgeKind) map[string]bool {
 	if len(seeds) == 0 {
 		return nil
@@ -2667,7 +2667,7 @@ func (g *Graph) ReachableForwardByKinds(seeds []string, kinds []EdgeKind) map[st
 // the ThrowerErrorSurfacer capability. Walks EdgeThrows once for the
 // per-thrower target dedup, then walks each thrower's out-edges for
 // the EdgeEmits → KindString(context=error_msg) attachment. The disk
-// backends collapse both passes into two Cypher GROUP BYs.
+// backend collapses both passes into two server-side GROUP BYs.
 func (g *Graph) ThrowerErrorSurface(pathPrefix string) []ThrowerErrorRow {
 	byThrower := map[string]*ThrowerErrorRow{}
 	addUnique := func(set []string, v string) []string {
@@ -2730,7 +2730,7 @@ func (g *Graph) ThrowerErrorSurface(pathPrefix string) []ThrowerErrorRow {
 // joined with the in-memory node table to filter Kind == KindMethod
 // and project the four columns the resolver consumes — the exact
 // loop the resolver runs today, just exposed as a single method call
-// so disk backends can fold the join into one Cypher.
+// so the disk backend can fold the join into one query.
 //
 // Empty graph returns nil. Per-type method lists are deduplicated by
 // MethodID so a method that appears twice in the EdgeMemberOf bucket
@@ -2985,7 +2985,7 @@ func (g *Graph) FileSymbolNamesByPaths(paths []string, kinds []NodeKind) []FileS
 // ClassHierarchyTraverser. Performs the same BFS as
 // query.ClassHierarchy, but stops at the kind/depth gates and returns
 // the full Path + EdgeKinds for each terminal node reached so the
-// disk backend's Cypher variable-length match can be a drop-in
+// disk backend's variable-length match can be a drop-in
 // replacement. Direction "up" follows out-edges; "down" follows
 // in-edges.
 func (g *Graph) ClassHierarchyTraverse(
@@ -3176,8 +3176,8 @@ func (g *Graph) FileEditingContext(filePath string, kinds []NodeKind) *FileEditi
 // FileSubGraphReader capability. Iterates the existing per-file
 // byFile bucket and the per-node outEdges / inEdges shards — the
 // same lookups Engine.GetFileSymbols' fallback path already runs,
-// just collapsed behind one method so the disk backends can push the
-// whole walk into a single Cypher pattern match.
+// just collapsed behind one method so the disk backend can push the
+// whole walk into a single query.
 func (g *Graph) GetFileSubGraph(filePath string) ([]*Node, []*Edge) {
 	if filePath == "" {
 		return nil, nil

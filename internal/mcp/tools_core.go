@@ -654,7 +654,7 @@ func isNonDefinitionNode(k graph.NodeKind) bool {
 // handleGetFileSummary to keep its output focused on the symbols a
 // file *defines* — the file node and per-statement import nodes are
 // useful internals (e.g. for the file-neighbourhood walk that drives
-// the Ladybug-side pushdown) but noise in the agent-visible payload.
+// the disk-backend pushdown) but noise in the agent-visible payload.
 func stripNonDefinitionNodes(sg *query.SubGraph) *query.SubGraph {
 	if sg == nil {
 		return nil
@@ -1246,7 +1246,7 @@ func (s *Server) handleSearchSymbols(ctx context.Context, req mcp.CallToolReques
 	// Identifier-shape queries skip every expansion channel — the
 	// rerank's classWeightTable shows BM25 is near-perfect for these
 	// classes; expansion would only add the combined-OR fan-out's
-	// extra Cypher call without lifting recall on a literal-token
+	// extra backend call without lifting recall on a literal-token
 	// query. The explicit arg pin still wins for soup / concept.
 	if identifierFastPath {
 		expand = expandOff

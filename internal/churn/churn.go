@@ -3,7 +3,7 @@
 // persists the result on graph nodes. Once enriched, the MCP tool
 // get_churn_rate is a pure graph scan — no `git` subprocess at read
 // time. The graph store is the source of truth; the disk-backed
-// LadyBug backend keeps the data across daemon restarts, while
+// SQLite backend keeps the data across daemon restarts, while
 // in-memory backends recompute on demand.
 //
 // Design notes:
@@ -20,9 +20,9 @@
 //
 //   - After mutating n.Meta we re-call g.AddNode(n). The in-memory
 //     store treats this as a no-op (the pointer is already in the
-//     graph); the LadyBug backend treats it as an UPSERT that
+//     graph); the disk backend treats it as an UPSERT that
 //     re-serialises Meta to its on-disk row. This is the only path
-//     that persists Meta mutations into LadyBug — without it the
+//     that persists Meta mutations to disk — without it the
 //     enrichment would be invisible on the next daemon restart.
 package churn
 
@@ -68,7 +68,7 @@ type Result struct {
 // at all; per-file failures are best-effort and skip that file.
 //
 // Persistence: every mutated node is re-upserted via g.AddNode(n).
-// On LadyBug-backed stores this round-trips through the Cypher MERGE
+// On disk-backed stores this round-trips through the store's upsert
 // path; on the in-memory store the pointer was already mutated in
 // place, but the redundant AddNode call keeps the semantics uniform
 // between backends and lets the enricher run against either.

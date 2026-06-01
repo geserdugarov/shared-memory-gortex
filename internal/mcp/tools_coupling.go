@@ -14,9 +14,9 @@ import (
 // classic Robert C. Martin metrics computed per package or
 // community.
 //
-//   Ca (afferent coupling)  — how many external units depend on us
-//   Ce (efferent coupling)  — how many external units we depend on
-//   I  (instability)        — Ce / (Ca + Ce). 0 = max stable, 1 = max unstable
+//	Ca (afferent coupling)  — how many external units depend on us
+//	Ce (efferent coupling)  — how many external units we depend on
+//	I  (instability)        — Ce / (Ca + Ce). 0 = max stable, 1 = max unstable
 //
 // The painful packages are the ones with **high Ca + high I** —
 // load-bearing and changing all the time. The tool returns rows
@@ -98,11 +98,11 @@ func (s *Server) handleGetCouplingMetrics(ctx context.Context, req mcp.CallToolR
 	}
 
 	// Iterate the coupling-edge buckets directly via EdgesByKind
-	// instead of AllEdges() + a Go-side filter — Ladybug's
-	// EdgesByKind runs one indexed Cypher per kind and ships only
+	// instead of AllEdges() + a Go-side filter — the disk backend's
+	// EdgesByKind runs one indexed query per kind and ships only
 	// the matching rows. Structural edges (defines / member_of /
 	// contains-file-of-symbol) which dominate edge counts on large
-	// repos drop out before they cross cgo. Order is fixed so the
+	// repos drop out before they cross the storage boundary. Order is fixed so the
 	// loop body stays trivially identical to the legacy AllEdges
 	// branch.
 	for _, k := range []graph.EdgeKind{
@@ -198,11 +198,11 @@ func (s *Server) handleGetCouplingMetrics(ctx context.Context, req mcp.CallToolR
 	}
 
 	return s.respondJSONOrTOON(ctx, req, map[string]any{
-		"units":       rows,
-		"total":       len(rows),
-		"truncated":   truncated,
-		"unit_kind":   unitKind,
-		"sort_by":     sortBy,
+		"units":     rows,
+		"total":     len(rows),
+		"truncated": truncated,
+		"unit_kind": unitKind,
+		"sort_by":   sortBy,
 	})
 }
 
@@ -232,4 +232,3 @@ func packageOfPath(path string, depth int) string {
 	}
 	return strings.Join(parts[:depth], "/")
 }
-

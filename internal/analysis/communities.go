@@ -783,8 +783,8 @@ func finaliseCommunityPartition(
 }
 
 // DetectCommunitiesLouvainBackend runs Louvain via the backend's
-// engine-native implementation (graph.CommunityDetector — today
-// only store_ladybug) and threads the resulting partition through
+// engine-native implementation (graph.CommunityDetector) and threads
+// the resulting partition through
 // the same post-processing the in-process DetectCommunitiesLouvain
 // uses. The output is shape-identical: every Community label,
 // hub, cohesion, parent, and modularity field is populated from

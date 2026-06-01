@@ -105,8 +105,8 @@ func (gc *GraphCompletion) Retrieve(ctx context.Context, g graph.Store, query st
 	}
 
 	// One batched out-edge round-trip across every seed instead of
-	// one cgo call per seed. On Ladybug this drops ~30 round-trips
-	// into 1 for a typical search_symbols completion pass.
+	// one query per seed. On the disk backend this drops ~30
+	// round-trips into 1 for a typical search_symbols completion pass.
 	outEdges := g.GetOutEdgesByNodeIDs(seedIDs)
 
 	// Collect every distinct target id, then materialise the target

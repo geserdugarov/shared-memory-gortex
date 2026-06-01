@@ -16,7 +16,7 @@ import (
 // enrich churn`) can refresh per-symbol churn data without going
 // through the daemon control socket. The handler runs the enricher
 // in-process against s.graph, so it inherits whatever backend the
-// daemon was launched with — LadyBug for persistence, in-memory for
+// daemon was launched with — the on-disk backend for persistence, in-memory for
 // CI / one-off invocations.
 //
 // The accompanying `get_churn_rate` tool reads from the same

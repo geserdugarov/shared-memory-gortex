@@ -34,8 +34,8 @@ func (s *Server) handleGetUntestedSymbols(ctx context.Context, req mcp.CallToolR
 	// Fan-in map for ranking — incoming calls/references only; imports and
 	// defines would flood every exported symbol with meaningless coverage.
 	// Backends that implement graph.InEdgeCounter serve this from one
-	// Cypher count(*) join — on Ladybug the legacy AllEdges() loop
-	// materialised every edge over cgo just to bucket two kinds. The
+	// count(*) join — on a disk backend the legacy AllEdges() loop
+	// materialised every edge over the storage boundary just to bucket two kinds. The
 	// fallback walks AllEdges() as before.
 	fanIn := collectFanInByKind(s.graph, []graph.EdgeKind{graph.EdgeCalls, graph.EdgeReferences})
 
@@ -121,8 +121,8 @@ func (s *Server) handleGetUntestedSymbols(ctx context.Context, req mcp.CallToolR
 // no equivalent — so it stays in the post-filter.
 //
 // The BFS itself runs through graph.ReachableForwardByKinds when the
-// backend implements it (one Cypher query per layer over the frontier
-// IN-list instead of N+1 GetOutEdges cgo round-trips). Falls back to
+// backend implements it (one query per layer over the frontier
+// IN-list instead of N+1 GetOutEdges round-trips). Falls back to
 // the per-id GetOutEdges loop on backends that don't.
 func reachableFromTests(g graph.Store) map[string]bool {
 	// Seed: every function/method defined in a test file. NodesByKind
@@ -178,7 +178,7 @@ func reachableFromTests(g graph.Store) map[string]bool {
 // collectFanInByKind returns the per-target incoming-edge count for
 // every edge whose kind is in the allowlist. Prefers the
 // graph.InEdgeCounter capability — backends that ship it run one
-// Cypher count(*) per request instead of an AllEdges() materialisation
+// count(*) per request instead of an AllEdges() materialisation
 // + Go-side bucketing.
 func collectFanInByKind(g graph.Store, kinds []graph.EdgeKind) map[string]int {
 	if len(kinds) == 0 {

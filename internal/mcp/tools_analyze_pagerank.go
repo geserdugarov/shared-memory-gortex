@@ -10,7 +10,7 @@
 // Routing:
 //
 //   - When the backing graph.Store implements graph.PageRanker
-//     (today only store_ladybug), the analyzer delegates to the
+//     (today only store_sqlite), the analyzer delegates to the
 //     engine-native parallel implementation (Ligra-based). Saves
 //     the per-call cost of a fresh Go-side power iteration.
 //
@@ -73,9 +73,9 @@ func (s *Server) handleAnalyzePageRank(ctx context.Context, req mcp.CallToolRequ
 	})
 
 	// Batch-materialise hit nodes in one backend round-trip instead
-	// of per-id GetNode. On Ladybug each GetNode is a cgo Cypher
-	// call; on the default limit (20) the per-id path issued 20
-	// cgo round-trips per pagerank invocation. Single GetNodesByIDs
+	// of per-id GetNode. On a disk backend each GetNode is a
+	// round-trip; on the default limit (20) the per-id path issued 20
+	// round-trips per pagerank invocation. Single GetNodesByIDs
 	// collapses that into one bulk query while preserving rank order
 	// (the local map lookup is keyed by NodeID).
 	ids := make([]string, 0, len(hits))
@@ -185,7 +185,7 @@ func parseKindFilter(in string) []graph.NodeKind {
 
 // handleAnalyzeLouvain returns the Louvain partitioning of the
 // graph. When the backing store implements graph.CommunityDetector
-// (today only store_ladybug), the partitioning is delegated to the
+// (today only store_sqlite), the partitioning is delegated to the
 // engine-native implementation and threaded through the existing
 // label / hub / cohesion / parent post-processing
 // (analysis.DetectCommunitiesLouvainBackend) so the response is

@@ -12,10 +12,10 @@ import (
 // schema.go (symbol_fts). It is the on-disk replacement for the
 // multi-GB in-heap Bleve/BM25 index: the FTS5 inverted index lives in
 // the same .sqlite file as the graph, and a tier-0 exact-name boost
-// (mirroring the Ladybug backend) short-circuits identifier queries so
+// short-circuits identifier queries so
 // search quality holds or improves while the heap shrinks.
 //
-// Semantics mirror internal/graph/store_ladybug/fts.go:
+// Semantics:
 //
 //   - BulkUpsertSymbolFTS wipes only the rows owned by repoPrefix
 //     before re-inserting, so sibling repos sharing one store don't
@@ -88,8 +88,8 @@ func (s *Store) UpsertSymbolFTS(nodeID, tokens string) error {
 // whole thing runs in one transaction under writeMu so a concurrent
 // reader never observes the table mid-wipe.
 //
-// repoPrefix scopes the pre-insert wipe exactly like the Ladybug
-// backend: a non-empty prefix deletes only rows owned by that repo,
+// repoPrefix scopes the pre-insert wipe: a non-empty prefix deletes
+// only rows owned by that repo,
 // leaving siblings untouched; an empty prefix wipes the whole table
 // (single-repo / conformance behaviour — the conformance suite calls
 // this with ""). Items are deduped by NodeID with last-write-wins,
@@ -184,7 +184,7 @@ func (s *Store) BuildSymbolIndex() error {
 // SearchSymbols runs a symbol query and returns hits ordered by
 // descending relevance (higher Score = more relevant).
 //
-// Tier 0 (exact-name boost, mirroring the Ladybug backend): when the
+// Tier 0 (exact-name boost): when the
 // query looks like a literal identifier and resolves to one or more
 // nodes by exact name, return those directly with a fixed dominant
 // score (100.0) — an O(1)-ish index seek that beats FTS ranking for
@@ -355,8 +355,6 @@ func (s *Store) SearchSymbolBundles(query string, limit int) ([]graph.SymbolBund
 // name (no whitespace, no path separators, no dots, no colons, no
 // commas). The tier-0 exact-name fast path engages only on such
 // queries; multi-token / path / qualified queries always go to FTS.
-// Copied from the Ladybug backend's name_index.go so the two backends
-// share the identical tier-0 gate.
 func isIdentifierQuery(q string) bool {
 	if q == "" {
 		return false

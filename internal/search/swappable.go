@@ -103,7 +103,7 @@ func (s *Swappable) SearchChannelsTimed(query string, limit int) ([]SearchResult
 
 // SearchSymbolBundles forwards to the inner backend when it implements
 // SymbolBundleSearcherBackend (production wiring: a
-// SymbolSearcherBackend whose store is the Ladybug Store, or a
+// SymbolSearcherBackend whose store is the disk Store, or a
 // HybridBackend whose text backend is the same). Returns nil when the
 // inner backend doesn't expose bundles — the engine treats nil as
 // "no bundle support" and falls back to the per-call Search +

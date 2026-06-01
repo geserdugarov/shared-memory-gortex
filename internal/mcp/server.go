@@ -123,7 +123,7 @@ type Server struct {
 	// handleAnalyzeClusters reads this before calling the incremental
 	// detector: if the token still matches the live graph, the cached
 	// communities are reused without scanning AllNodes / AllEdges to
-	// fingerprint packages. On Ladybug the fingerprint scan alone is
+	// fingerprint packages. On a disk backend the fingerprint scan alone is
 	// ~140s; the cache check is three scalar reads.
 	communitiesToken communityCacheToken
 	// hotspots is the default-threshold (mean + 2*stddev) hotspot
@@ -132,8 +132,8 @@ type Server struct {
 	// gortex_wakeup / the analyze(hotspots) resource — caching it
 	// once per RunAnalysis turn turns repeat calls into a map lookup.
 	// Rebuilt each RunAnalysis pass; guarded by analysisMu.
-	hotspots []analysis.HotspotEntry
-	analysisMu  sync.RWMutex
+	hotspots   []analysis.HotspotEntry
+	analysisMu sync.RWMutex
 
 	// cochange caches the git-history co-change graph. cochangeByFile
 	// maps a file path to its co-changing file paths and association
@@ -1163,7 +1163,7 @@ func (s *Server) scopedNodes(ctx context.Context) []*graph.Node {
 // scopedNodesByKinds is the kind-pushdown sibling of scopedNodes for
 // handlers that only need a specific kind set. When the backend
 // implements graph.NodesByKindsScanner the kind predicate runs server-
-// side (one Cypher MATCH (n:Node) WHERE n.kind IN $kinds) instead of
+// side (one kind-filtered scan over the node table) instead of
 // the legacy AllNodes()-then-Go-side filter. The metadata analyzers
 // (todos, stale_code, stale_flags, ownership, coverage_gaps,
 // coverage_summary, cgo_users, wasm_users, orphan_tables,
@@ -1539,7 +1539,7 @@ func (s *Server) getCommunities() *analysis.CommunityResult {
 // Short-circuits when the cached communities are still valid for the
 // live graph: the (NodeCount, EdgeCount, EdgeIdentityRevisions) token
 // captured by the last detector run is compared against the current
-// graph identity in three scalar reads. On Ladybug a match skips the
+// graph identity in three scalar reads. On a disk backend a match skips the
 // AllNodes / AllEdges fingerprint scan that otherwise dominates the
 // call (~140s on a fresh daemon) and serves the existing partition
 // straight from the cache. The reported stats describe a no-op

@@ -142,7 +142,7 @@ func EnrichGraphWithRepoPrefix(g graph.Store, repoRoot, repoPrefix string) (int,
 // EnrichGraphForBranch is EnrichGraphWithRepoPrefix scoped to tags
 // reachable from `branch`. Empty branch means "every tag", matching
 // the legacy behaviour. Mutations round-trip through g.AddNode so
-// LadyBug-backed stores persist the result.
+// disk-backed stores persist the result.
 func EnrichGraphForBranch(g graph.Store, repoRoot, repoPrefix, branch string) (int, error) {
 	if g == nil || repoRoot == "" {
 		return 0, nil
@@ -220,7 +220,7 @@ func EnrichGraphForBranch(g graph.Store, repoRoot, repoPrefix, branch string) (i
 			n.Meta = map[string]any{}
 		}
 		n.Meta["added_in"] = tag
-		// Re-upsert so LadyBug-backed stores persist the Meta change.
+		// Re-upsert so disk-backed stores persist the Meta change.
 		// In-memory stores treat this as a no-op (the pointer is
 		// already in the graph); the disk-backed implementations need
 		// the AddNode call to round-trip Meta through their write

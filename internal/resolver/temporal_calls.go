@@ -445,7 +445,7 @@ func stampTemporalRole(g graph.Store, n *graph.Node, role, name string) {
 	}
 	// Round-trip the stamp back through the store. On the in-memory
 	// backend n is canonical so this is an idempotent re-insert; on disk
-	// backends (Ladybug) n is a per-call GetNode/AllNodes reconstruction,
+	// backends n is a per-call GetNode/AllNodes reconstruction,
 	// so without the write-back temporal_role/temporal_name would be
 	// discarded the moment this pass returns. ResolveTemporalCalls runs
 	// from RunGlobalGraphPasses, which can execute after the bulk-load

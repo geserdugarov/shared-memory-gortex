@@ -68,7 +68,7 @@ func (s *Server) handleFindCoChangingSymbols(ctx context.Context, req mcp.CallTo
 	// limit, then batch-resolve the per-file symbol names. The Symbols
 	// lookup is the only graph-touching work in this handler — pulling
 	// it through one capability call instead of N GetFileNodes round-
-	// trips is the entire ladybug win.
+	// trips is the entire disk-backend win.
 	type pending struct {
 		file  string
 		score float64
@@ -120,7 +120,7 @@ func (s *Server) handleFindCoChangingSymbols(ctx context.Context, req mcp.CallTo
 	// yet, surface an in-progress marker so the caller can distinguish
 	// "this file has no co-change data" from "the daemon hasn't built
 	// the data yet". The mine is fired at daemon-ready by RunAnalysis;
-	// a fresh Ladybug daemon takes tens of seconds before the cache is
+	// a fresh daemon on a disk backend takes tens of seconds before the cache is
 	// populated.
 	if len(rows) == 0 && !s.coChangeReady() {
 		result["mining_in_progress"] = true
@@ -132,10 +132,10 @@ func (s *Server) handleFindCoChangingSymbols(ctx context.Context, req mcp.CallTo
 // ensureCoChange triggers the co-change mine if it has not run yet
 // and returns IMMEDIATELY — the mine itself runs asynchronously.
 //
-// Why async? On a disk backend (Ladybug) with no pre-existing
+// Why async? On a disk backend with no pre-existing
 // EdgeCoChange edges, mineCoChange spends 60+ seconds in
 // cochange.AddEdges: an AllNodes full-table scan plus thousands of
-// per-pair AddEdge cgo round-trips. Wrapping that in sync.Once.Do
+// per-pair AddEdge round-trips. Wrapping that in sync.Once.Do
 // turned every queued tool call into a blocked-for-60s caller. The
 // async shape keeps the request path off the slow path.
 //
@@ -182,7 +182,7 @@ func (s *Server) coChangeReady() bool {
 // The mine writes ONLY the in-memory caches — it deliberately does
 // not materialise EdgeCoChange edges back into the graph store.
 // Persisting tens of thousands of EdgeCoChange edges via AddEdge on a
-// disk backend (Ladybug) is several minutes of cgo INSERTs, and every
+// disk backend is several minutes of INSERTs, and every
 // such insert grows the live edge count. The analyze[clusters]
 // partition cache is keyed on (NodeCount, EdgeCount,
 // EdgeIdentityRevisions); a background edge-count drift invalidates
@@ -234,12 +234,12 @@ func (s *Server) mineCoChange() {
 //
 // EdgesByKind streams only the CoChange edges; the endpoint nodes are
 // fetched in one batched GetNodesByIDs call instead of two GetNode
-// round-trips per edge. On disk backends (Ladybug) that drops the
-// whole-graph AllEdges materialisation plus the per-edge cgo
+// round-trips per edge. On disk backends that drops the
+// whole-graph AllEdges materialisation plus the per-edge
 // GetNode trips that loaded the file paths.
 func (s *Server) coChangeFromEdges(scores map[string]map[string]float64, counts map[string]map[string]int) bool {
 	// First pass: collect CoChange edges + the set of node IDs they
-	// reference. Both can stream from EdgesByKind in one Cypher
+	// reference. Both can stream from EdgesByKind in one
 	// round-trip on disk backends.
 	type ccEdge struct {
 		from, to string
@@ -277,7 +277,7 @@ func (s *Server) coChangeFromEdges(scores map[string]map[string]float64, counts 
 		return false
 	}
 
-	// Batched endpoint resolution — one Cypher WHERE id IN $ids vs.
+	// Batched endpoint resolution — one batched id-IN query vs.
 	// 2 * len(edges) per-row GetNode trips. On a workspace with
 	// thousands of co-change edges this is the bulk of the latency.
 	ids := make([]string, 0, len(idSet))

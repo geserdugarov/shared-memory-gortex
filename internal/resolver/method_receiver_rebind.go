@@ -16,7 +16,7 @@ import (
 // belong to the single type node defined elsewhere.
 //
 // Without this pass:
-//   - ladybug materialises phantom Node rows to satisfy the
+//   - the on-disk backend materialises phantom Node rows to satisfy the
 //     rel-table FK on every cross-file method-receiver edge;
 //   - InferImplements builds a typeID → method-set map keyed on the
 //     phantom IDs, so a type whose methods span N files appears as N
@@ -65,7 +65,7 @@ func (r *Resolver) rebindGoMethodReceivers() {
 	}
 	// Materialise the MemberOf edges and batch-load their endpoints in one
 	// GetNodesByIDs: a per-edge GetNode(e.From)+GetNode(e.To) here is two
-	// Cypher round-trips per method on a disk backend — across tens of
+	// query round-trips per method on a disk backend — across tens of
 	// thousands of methods it was a multi-minute cold-warmup stall.
 	var memberOf []*graph.Edge
 	ids := make(map[string]struct{})

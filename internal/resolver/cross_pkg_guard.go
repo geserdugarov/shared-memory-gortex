@@ -203,7 +203,7 @@ func (r *Resolver) buildImportClosure() map[string]map[string]struct{} {
 	}
 	// Materialise the resolved import edges and batch-load their endpoints
 	// (caller file + target) in one GetNodesByIDs — a per-edge GetNode here
-	// is a Cypher round-trip per import on a disk backend. Inlines
+	// is a query round-trip per import on a disk backend. Inlines
 	// edgeCallerFile's cached-node logic against the batch map.
 	var imports []*graph.Edge
 	ids := make(map[string]struct{})

@@ -86,7 +86,7 @@ type Store interface {
 	// GetNodesByQualNames returns a map qualName→*Node (first match per
 	// qual_name) for the whole batch — the qual-name twin of
 	// FindNodesByNames. It pre-warms the resolver's import resolution:
-	// qual_name is unindexed on the ladybug backend, so the per-edge
+	// qual_name is unindexed on the disk backend, so the per-edge
 	// GetNodeByQualName in resolveImport is a full node scan per import
 	// edge; one batched IN-scan collapses that to a single query.
 	GetNodesByQualNames(qualNames []string) map[string]*Node
@@ -127,7 +127,7 @@ type Store interface {
 	// GetRepoEdges returns every edge whose source node has the given
 	// RepoPrefix. Equivalent to GetRepoNodes(r) followed by
 	// GetOutEdges(n.ID) for every n, but executes as a single backend
-	// query — critical on disk backends (Ladybug, SQLite, DuckDB)
+	// query — critical on the disk backend (SQLite)
 	// where the per-node loop is O(repo_nodes) round-trips. The
 	// in-memory backend forwards to that same nested walk; the disk
 	// backends push the join into one server-side query.
@@ -232,8 +232,8 @@ var _ Store = (*Graph)(nil)
 
 // BackendResolver is an optional interface backends MAY implement to
 // drain the bulk-tractable subset of the resolver's work entirely
-// inside the backend engine (Cypher MATCH+SET on Ladybug,
-// UPDATE...FROM on DuckDB) instead of round-tripping every
+// inside the backend engine (a single server-side bulk UPDATE on the
+// disk backend) instead of round-tripping every
 // resolution decision back to Go.
 //
 // Sequencing matters: earlier rules are higher-precision than later
@@ -300,12 +300,11 @@ type BackendResolver interface {
 // a high-throughput cold-load fast path that bypasses per-call query
 // overhead. The cold-start indexer fires ~2000 small AddBatch calls
 // during its parse phase; on backends where every AddBatch round-trips
-// through a query parser (Ladybug, DuckDB) that per-call cost
+// through a query parser that per-call cost
 // dominates wall time. BulkLoader lets the indexer bracket the parse
 // loop with BeginBulkLoad / FlushBulk: AddBatch calls inside the
 // bracket buffer rows in memory, and FlushBulk commits them through
-// the backend's native bulk primitive (Ladybug's COPY FROM,
-// DuckDB's long-lived Appender).
+// the backend's native bulk primitive.
 //
 // Contract:
 //
@@ -343,7 +342,7 @@ type BulkLoader interface {
 
 // SymbolHit is a single full-text-search result: the matched node ID
 // plus its relevance score from the backend's scorer (BM25 in
-// Ladybug's FTS). Higher score = more relevant.
+// the disk backend's FTS). Higher score = more relevant.
 type SymbolHit struct {
 	NodeID string
 	Score  float64
@@ -377,8 +376,8 @@ type SymbolFTSItem struct {
 //
 //   - BulkUpsertSymbolFTS is the cold-start fast path used by the
 //     indexer's shadow-swap drain. Implementations SHOULD use the
-//     backend's native bulk primitive (TSV + COPY FROM on Ladybug)
-//     so a 600k-node repo doesn't pay per-row Cypher parse cost.
+//     backend's native bulk primitive
+//     so a 600k-node repo doesn't pay per-row query parse cost.
 //     Idempotent on NodeID like UpsertSymbolFTS — re-running with
 //     an overlapping set replaces in place.
 //
@@ -390,7 +389,7 @@ type SymbolFTSItem struct {
 //
 //   - BuildSymbolIndex finalises the index after the bulk parse
 //     phase. For backends whose FTS index updates automatically on
-//     row writes (Ladybug), this is a one-shot cold-start call;
+//     row writes, this is a one-shot cold-start call;
 //     for backends that need an explicit build pass, it's where
 //     the work happens. Idempotent — safe to call multiple times.
 //
@@ -447,14 +446,6 @@ type SymbolBundle struct {
 // bundled form avoids. The contract is intentionally read-only —
 // writes still go through UpsertSymbolFTS / BulkUpsertSymbolFTS on
 // the SymbolSearcher.
-//
-// Today the Ladybug backend implements this via four cypher calls
-// (FTS → IDs, then a node batch + an outgoing-edge batch + an
-// inbound-edge batch on those IDs). A single combined Cypher with
-// OPTIONAL MATCH + collect() is slower in practice — the
-// cross-product Ladybugdbbuilds across the two OPTIONAL MATCH +
-// collect frames outweighs the cgo saving (probe: 150ms median vs
-// the 4-query split's 68ms median on the same id set).
 type SymbolBundleSearcher interface {
 	SearchSymbolBundles(query string, limit int) ([]SymbolBundle, error)
 }
@@ -462,8 +453,8 @@ type SymbolBundleSearcher interface {
 // VectorItem is the payload BulkUpsertEmbeddings takes per node:
 // the node's ID and its embedding vector. Length of Vec must
 // match the dim the corresponding BuildVectorIndex call declared
-// — backends with fixed-width vector columns (Ladybug's
-// FLOAT[N]) reject inserts that don't match.
+// — backends with fixed-width vector columns reject inserts that
+// don't match.
 type VectorItem struct {
 	NodeID string
 	Vec    []float32
@@ -471,7 +462,7 @@ type VectorItem struct {
 
 // VectorHit is a single ANN search result: the matched node ID
 // plus its distance to the query vector under the backend's
-// metric (cosine by default in Ladybug). LOWER distance = more
+// metric (cosine by default). LOWER distance = more
 // similar. Callers that need a similarity score in [0,1] should
 // translate via `1 - distance` for cosine.
 type VectorHit struct {
@@ -487,20 +478,14 @@ type VectorHit struct {
 // HNSW — saving roughly `dim × 4 × N` bytes of heap (≈ 1 GB for
 // 384-dim × 663k symbols on a Vscode-scale repo).
 //
-// The bigger win — and the reason Option B exists alongside
-// Option C in the storage-engine roadmap — is that vector
-// neighbours and graph traversal can be combined in a single
-// Cypher round-trip:
+// The bigger win is that vector neighbours and graph traversal can
+// be combined in a single server-side round-trip: an ANN seed
+// lookup feeding straight into an adjacency match (e.g. "callers
+// of the nearest symbols, scoped to one repo and excluding tests").
 //
-//	CALL QUERY_VECTOR_INDEX('SymbolVec', 'idx_emb', $vec, 50)
-//	  YIELD node AS seed
-//	MATCH (seed)<-[:calls]-(caller:KindFunction)
-//	WHERE caller.RepoPrefix = $repo AND NOT caller.id CONTAINS '_test'
-//	RETURN seed.name, caller.name
-//
-// Today this query is three round-trips on the in-process HNSW
+// Today this is three round-trips on the in-process HNSW
 // path (ANN → IDs → graph fetch → Go-side filter); with
-// VectorSearcher it's one engine-vectorised pipeline.
+// VectorSearcher it's one engine-side pipeline.
 //
 // Contract:
 //
@@ -509,10 +494,9 @@ type VectorHit struct {
 //
 //   - BulkUpsertEmbeddings is the cold-start fast path used by
 //     the indexer's embedding pass. Implementations SHOULD use
-//     the backend's native bulk primitive (TSV + COPY FROM on
-//     Ladybug) so a 600k-node corpus doesn't pay per-row Cypher
-//     parse cost. Idempotent on NodeID — re-running with an
-//     overlapping set replaces in place.
+//     the backend's native bulk primitive so a 600k-node corpus
+//     doesn't pay per-row query parse cost. Idempotent on NodeID
+//     — re-running with an overlapping set replaces in place.
 //
 //   - BuildVectorIndex finalises the HNSW index after the bulk
 //     populate. The dim parameter declares the embedding
@@ -539,9 +523,8 @@ type VectorSearcher interface {
 //
 // NodeKinds / EdgeKinds restrict the projected subgraph the
 // algorithm runs over. Empty means "all kinds" — the algo sees the
-// full graph. A non-empty filter is rewritten into the projected-
-// graph predicate (Ladybug supports per-table predicates of the
-// form 'n.kind = "function"').
+// full graph. A non-empty filter is rewritten into a projected-
+// graph predicate (e.g. n.kind = "function").
 type PageRankOpts struct {
 	NodeKinds     []NodeKind
 	EdgeKinds     []EdgeKind
@@ -561,9 +544,8 @@ type PageRankHit struct {
 // PageRanker is an optional interface backends MAY implement to
 // expose engine-native PageRank centrality. When the store
 // implements it, the daemon's hotspot / authority-ranking path
-// routes through the backend's parallel implementation (Ligra-
-// based on Ladybug) instead of computing degree-centrality
-// in-process.
+// routes through the backend's parallel implementation instead of
+// computing degree-centrality in-process.
 //
 // Engine-native PageRank is qualitatively different from the
 // degree-based hotspot analyzer: random-walk authority weights
@@ -578,9 +560,9 @@ type PageRankHit struct {
 //     declared and torn down per call — callers don't manage
 //     PROJECT_GRAPH lifecycle directly.
 //
-//   - The score is normalized so the full corpus sums to 1
-//     (Ladybug's default). Relative ordering — not the absolute
-//     value — is what callers should consume.
+//   - The score is normalized so the full corpus sums to 1.
+//     Relative ordering — not the absolute value — is what callers
+//     should consume.
 //
 //   - Close is implied by graph.Store.Close.
 type PageRanker interface {
@@ -589,7 +571,7 @@ type PageRanker interface {
 
 // CommunityOpts tunes Louvain community detection over a projected
 // subgraph. Zero values request the backend default
-// (maxPhases=20, maxIterations=20 on Ladybug). NodeKinds / EdgeKinds
+// (maxPhases=20, maxIterations=20). NodeKinds / EdgeKinds
 // restrict the projection; an empty filter runs over the full graph.
 type CommunityOpts struct {
 	NodeKinds     []NodeKind
@@ -601,17 +583,16 @@ type CommunityOpts struct {
 // CommunityHit is one row of the Louvain output: the node ID plus
 // the integer community label the algorithm assigned. Two nodes
 // with the same CommunityID are in the same community; the actual
-// integer is opaque (Ladybug uses internal node offsets and
-// promises no stability across runs).
+// integer is opaque and promises no stability across runs.
 type CommunityHit struct {
 	NodeID      string
 	CommunityID int64
 }
 
 // CommunityDetector is an optional interface backends MAY
-// implement to expose engine-native Louvain community detection
-// (Ladybug uses a parallel Grappolo implementation). When the
-// store implements it, the daemon's analysis.DetectCommunitiesLouvain
+// implement to expose engine-native Louvain community detection.
+// When the store implements it, the daemon's
+// analysis.DetectCommunitiesLouvain
 // path can delegate the partitioning step and keep the existing
 // post-processing (label disambiguation, hub detection, cohesion,
 // parent assignment).
@@ -622,7 +603,7 @@ type CommunityHit struct {
 //     returns one hit per node assigning it to a community. The
 //     projection is declared and torn down per call.
 //
-//   - Ladybug's implementation treats edges as undirected (the
+//   - The engine-native implementation treats edges as undirected (the
 //     modularity score is computed on the undirected graph even
 //     though the projected Edge table is directed). Callers that
 //     care about directed modularity should consult the in-process
@@ -635,7 +616,7 @@ type CommunityDetector interface {
 
 // ComponentOpts tunes connected-component computation over a
 // projected subgraph. Zero values request the backend default
-// (maxIterations=100 on Ladybug). NodeKinds / EdgeKinds restrict
+// (maxIterations=100). NodeKinds / EdgeKinds restrict
 // the projection.
 type ComponentOpts struct {
 	NodeKinds     []NodeKind
@@ -646,7 +627,7 @@ type ComponentOpts struct {
 // ComponentHit is one row of a connected-component output: the
 // node ID plus the integer component label the algorithm assigned.
 // Two nodes with the same ComponentID are in the same component.
-// The integer is opaque (Ladybug uses internal node offsets).
+// The integer is opaque.
 type ComponentHit struct {
 	NodeID      string
 	ComponentID int64
@@ -715,8 +696,8 @@ type KCorer interface {
 // DeadCodeCandidator is an optional capability backends MAY implement
 // to compute the dead-code candidate set server-side. The default Go
 // path in analysis.FindDeadCode pulls every node + a batched in-edge
-// map and filters in Go; on disk backends (Ladybug) that's
-// ~1.3M edge rows over cgo per call. A backend that implements
+// map and filters in Go; on a disk backend that's
+// ~1.3M edge rows per call. A backend that implements
 // DeadCodeCandidator runs the equivalent WHERE-NOT-EXISTS filter
 // inside the query engine and returns ~hundreds of true candidates,
 // skipping the materialise-then-filter loop entirely.
@@ -755,7 +736,7 @@ type IfaceImplementsRow struct {
 // target is a KindInterface node carrying Meta["methods"]. Used by
 // analysis.FindDeadCode to compute "type implements interface, so
 // these methods are alive even if never called directly". The
-// server-side join is one Cypher; the Go-side equivalent fetched
+// server-side join is one query; the Go-side equivalent fetched
 // every interface node then every implements edge separately.
 //
 // Optional capability — analysis.FindDeadCode falls back to the
@@ -784,8 +765,8 @@ type NodeDegreeRow struct {
 // implement to return per-node in/out edge counts plus a usage-edge
 // count, server-side. Used by analysis.GraphConnectivity to replace
 // the per-node g.GetInEdges(id) + g.GetOutEdges(id) +
-// graph.ClassifyZeroEdge(id) trio — three cgo round-trips per node
-// on Ladybug, three full edge materialisations per node on disk.
+// graph.ClassifyZeroEdge(id) trio — three full edge materialisations
+// per node on a disk backend.
 // One round-trip returns all three counts and lets the analyzer
 // classify isolated / leaf / source-only / sink-only / extraction-gap
 // without ever materialising the underlying edge structs.
@@ -816,8 +797,8 @@ type NodeFanRow struct {
 // to compute per-node fan-in / fan-out counts filtered by edge kind,
 // server-side. Used by analysis.FindHotspots and
 // handleAnalyzeHealthScore to replace the AllEdges() materialisation
-// they both ran every call (~500k edges over cgo on the gortex
-// workspace, the bulk of the wall-clock cost on Ladybug). The Go-side
+// they both ran every call (~500k edges on the gortex
+// workspace, the bulk of the wall-clock cost on a disk backend). The Go-side
 // crossing computation still needs per-edge (from, to) for the
 // Calls/References kinds — that runs through EdgesByKind, which
 // streams without materialising the full edge set.
@@ -847,9 +828,9 @@ type FileImporterRow struct {
 // answer "which files import filePath?" with a single backend round-
 // trip instead of a Go-side AllEdges() scan. The MCP check_references
 // tool's importing-files block hammered AllEdges() per call: ~286k
-// edges materialised over cgo on the gortex workspace, then a per-
-// edge GetNode(e.To) + GetNode(e.From) — multiple thousand cgo round-
-// trips for a single check_references call. A backend that implements
+// edges materialised on the gortex workspace, then a per-
+// edge GetNode(e.To) + GetNode(e.From) — multiple thousand backend
+// round-trips for a single check_references call. A backend that implements
 // FileImporters runs the equivalent join inside the query engine and
 // only surfaces the rows that match.
 //
@@ -869,10 +850,10 @@ type FileImporters interface {
 // InEdgeCounter is an optional capability backends MAY implement to
 // compute incoming-edge fan-in counts per target node for a fixed
 // set of edge kinds in one backend round-trip. The fallback iterates
-// AllEdges() Go-side; on Ladybug that materialises every edge over
-// cgo (~286k rows on the gortex workspace) just to bucket by To.
-// The capability instead runs `MATCH ()-[e:Edge]->(n) WHERE e.kind
-// IN $kinds RETURN n.id, count(*)` and ships back only the per-target
+// AllEdges() Go-side; on a disk backend that materialises every edge
+// (~286k rows on the gortex workspace) just to bucket by To.
+// The capability instead runs a single server-side GROUP BY filtered
+// by edge kind and ships back only the per-target
 // counts — a fraction of the rows and zero per-row Go object alloc.
 //
 // Used by handleGetUntestedSymbols to compute the calls+references
@@ -890,10 +871,9 @@ type InEdgeCounter interface {
 // NodesInFilesByKindFinder is an optional capability backends MAY
 // implement to answer "which nodes of kinds K live in files F?"
 // with a single backend round-trip. The fallback iterates AllNodes()
-// Go-side; on Ladybug that materialises the full node table over
-// cgo per call. The capability instead runs `MATCH (n:Node) WHERE
-// n.file_path IN $files AND n.kind IN $kinds RETURN ...` and ships
-// only the matching rows.
+// Go-side; on a disk backend that materialises the full node table
+// per call. The capability instead runs a single server-side query
+// filtering by file path and kind, and ships only the matching rows.
 //
 // Used by handleFindDeclaration to build the per-file enclosing-
 // symbol index off the small set of trigram-match file paths. The
@@ -934,12 +914,12 @@ type FileMtimeReader interface {
 // EdgesByKindsScanner is an optional capability backends MAY
 // implement to stream every edge whose Kind is in the supplied set,
 // in a single backend round-trip. The fallback iterates AllEdges()
-// Go-side and filters in process — on Ladybug AllEdges materialises
-// every edge over cgo (~286k rows on the gortex workspace) for the
+// Go-side and filters in process — on a disk backend AllEdges
+// materialises every edge (~286k rows on the gortex workspace) for the
 // edge-driven analyzers (channel_ops, pubsub, k8s_resources,
 // kustomize, error_surface, …) that only care about a handful of
-// kinds. The capability runs `MATCH ()-[e:Edge]->() WHERE e.kind IN
-// $kinds RETURN ...` and ships back only the matching rows.
+// kinds. The capability runs a single server-side query filtering
+// by edge kind and ships back only the matching rows.
 //
 // The single-kind variant EdgesByKind already exists, but the
 // analyzers in question typically need 2-5 kinds in one pass; firing
@@ -966,14 +946,14 @@ type EdgesByKindsScanner interface {
 // (todos, stale_code, stale_flags, ownership, coverage_gaps,
 // coverage_summary, cgo_users, wasm_users, orphan_tables,
 // unreferenced_tables). Each of those scans the entire node table just
-// to keep one or two kinds — on Ladybug that's ~70k rows over cgo on
-// the gortex workspace per call. The capability runs
-// `MATCH (n:Node) WHERE n.kind IN $kinds RETURN ...` and ships only the
+// to keep one or two kinds — on a disk backend that's ~70k rows on
+// the gortex workspace per call. The capability runs a single
+// server-side query filtering by node kind and ships only the
 // matching rows.
 //
 // Why a separate kinds-IN scanner instead of looping the existing
-// NodesByKind iterator per kind: on Ladybug NodesByKind is one query
-// per call. Looping it for {function, method} doubles the round-trip
+// NodesByKind iterator per kind: on a disk backend NodesByKind is one
+// query per call. Looping it for {function, method} doubles the round-trip
 // count and rebuilds the row decoder for each pass. One IN-list query
 // returns the union directly. The dedup is intentional — duplicated
 // kinds in the input never reach the IN-list, matching the in-memory
@@ -991,12 +971,12 @@ type NodesByKindsScanner interface {
 // is in the supplied edge-kind set AND whose endpoints both belong
 // to the supplied node-kind set. The shape covers the betweenness /
 // centrality adjacency build that today calls EdgesByKinds and
-// filters Go-side: on Ladybug the per-edge row carries ~10 string
-// columns over cgo, multiplied by ~286k edges on the gortex
+// filters Go-side: on a disk backend the per-edge row carries ~10 string
+// columns, multiplied by ~286k edges on the gortex
 // workspace, just for a build that uses only From/To. The
-// capability returns a 2-column projection from a single Cypher
+// capability returns a 2-column projection from a single server-side
 // join — every endpoint kind is enforced by the planner, so neither
-// the cross-kind edges nor the irrelevant columns ever cross cgo.
+// the cross-kind edges nor the irrelevant columns ever leave the backend.
 //
 // Empty edgeKinds or empty nodeKinds yields nothing — never a
 // whole-table scan. Iterators stop when the consumer's yield
@@ -1017,7 +997,7 @@ type EdgeAdjacencyForKinds interface {
 // Replaces the FindHotspots.countCrossings loop that today iterates
 // EdgesByKind twice and tallies per-source Go-side: on the gortex
 // workspace the two EdgesByKind passes materialised the full call /
-// reference bucket over cgo (~286k rows × ~10 columns) just to
+// reference bucket (~286k rows × ~10 columns) just to
 // derive a thousand-row aggregate. The capability ships only the
 // (from, to) projection — the community comparison runs Go-side
 // because the community map isn't a Node column today.
@@ -1088,8 +1068,8 @@ type CrossRepoEdgeRow struct {
 // scanned AllEdges() + per-edge GetNode(from)+GetNode(to) just to
 // emit one row per (kind, from_repo, to_repo). On the gortex
 // workspace that meant ~286k edge rows + ~thousands of GetNode
-// round-trips over cgo for typically <100 cross-repo rows. The
-// aggregator runs one Cypher GROUP BY and ships only the surviving
+// round-trips for typically <100 cross-repo rows. The
+// aggregator runs one server-side GROUP BY and ships only the surviving
 // per-triple counts.
 //
 // Cross-repo edges are identified by graph.BaseKindForCrossRepo —
@@ -1118,7 +1098,7 @@ type FileImportCountRow struct {
 // get_repo_outline and suggest_queries) which previously scanned
 // AllEdges() + per-edge GetNode(to) just to bucket counts by path.
 // On the gortex workspace that loop materialised ~286k edges + per-
-// edge GetNode round-trips over cgo to produce a top-10 list. The
+// edge GetNode round-trips to produce a top-10 list. The
 // aggregator GROUPs server-side and ships the per-file counts only.
 //
 // scope, when non-nil, bounds the counted edges to those whose target
@@ -1141,7 +1121,7 @@ type FileImportAggregator interface {
 // and the per-edge anomaly walk, but the hub check only cares about
 // nodes already inside the session-scoped working set; counting every
 // edge across the table just to bucket by `To` materialises the entire
-// edge column (~286k rows over cgo on Ladybug).
+// edge column (~286k rows on a disk backend).
 //
 // Empty ids returns nil — never a whole-table scan. Targets with zero
 // matching in-edges may be absent from the returned map (callers index
@@ -1157,7 +1137,7 @@ type InDegreeForNodes interface {
 // implement to compute the set of node IDs reachable from the seed
 // frontier via outgoing edges whose Kind is in the supplied set, in
 // one backend round-trip. The Go fallback runs a layer-by-layer BFS
-// firing GetOutEdges per node — on Ladybug that's N+1 cgo round-trips
+// firing GetOutEdges per node — on a disk backend that's N+1 round-trips
 // where N is the transitive frontier size; on a 100k-symbol repo with
 // a few thousand test functions the BFS easily issues tens of
 // thousands of edge fetches.
@@ -1204,9 +1184,9 @@ type ThrowerErrorRow struct {
 // to evaluate the analyze(error_surface) rollup entirely inside the
 // storage layer. The Go fallback walks EdgeThrows once for the per-
 // thrower aggregation, then issues GetOutEdges per surviving thrower
-// to attach the literal error-message strings. On Ladybug that's two
-// scans of the edge table plus an N+1 cgo loop for the per-thrower
-// emit walk; the capability runs two Cypher GROUP BYs and ships the
+// to attach the literal error-message strings. On a disk backend that's
+// two scans of the edge table plus an N+1 loop for the per-thrower
+// emit walk; the capability runs two server-side GROUP BYs and ships the
 // pre-shaped rows back.
 //
 // pathPrefix narrows the EdgeThrows rows by their stored FilePath
@@ -1242,10 +1222,10 @@ type MemberMethodInfo struct {
 // round-trip. Replaces the InferImplements / InferOverrides Pass 1
 // pattern of EdgesByKind(EdgeMemberOf) followed by per-edge
 // GetNode(e.From) to filter on Kind == KindMethod and read the
-// method's columns. On Ladybug that loop is N+1 cgo: each method
-// GetNode pulls ~10 string columns + the Meta blob over cgo just to
-// read four scalar fields. The capability runs a single Cypher join,
-// server-side, and ships only the four method columns the resolver
+// method's columns. On a disk backend that loop is N+1 round-trips:
+// each method GetNode pulls ~10 string columns + the Meta blob just to
+// read four scalar fields. The capability runs a single server-side
+// join and ships only the four method columns the resolver
 // actually consumes.
 //
 // Empty graph returns nil; types with no method members are absent
@@ -1278,10 +1258,10 @@ type StructuralParentEdgeRow struct {
 // (FromID, ToID, FromKind, ToKind, Origin) in one backend round-trip.
 // Replaces the InferOverrides Pass 2 pattern of g.AllEdges() followed
 // by per-edge GetNode(e.From) + GetNode(e.To) to apply the kind gate.
-// On Ladybug the AllEdges scan materialises every edge over cgo (~286k
+// On a disk backend the AllEdges scan materialises every edge (~286k
 // on the gortex workspace) plus issues two per-edge node lookups; the
-// capability runs one Cypher join with kind filters on both sides and
-// ships only the surviving rows back (typically a small fraction of
+// capability runs one server-side join with kind filters on both sides
+// and ships only the surviving rows back (typically a small fraction of
 // the edge table).
 //
 // Empty graph returns nil. Rows from extends/implements/composes edges
@@ -1310,8 +1290,8 @@ type CrossRepoCandidateRow struct {
 // whose endpoints carry two different non-empty RepoPrefix values, in
 // one backend round-trip. Replaces the DetectCrossRepoEdges pattern of
 // g.AllEdges() + per-edge GetNode(e.From) + GetNode(e.To) to extract
-// the RepoPrefix pair. On Ladybug the AllEdges scan ships every edge
-// in the graph over cgo plus issues two GetNode lookups per surviving
+// the RepoPrefix pair. On a disk backend the AllEdges scan ships every
+// edge in the graph plus issues two GetNode lookups per surviving
 // row; the capability filters by edge kind + the repo-prefix mismatch
 // server-side and ships only the surviving rows (typically a small
 // fraction of the edge table on a multi-repo workspace).
@@ -1347,10 +1327,10 @@ type ExtractCandidateRow struct {
 
 // ExtractCandidatesScanner is an optional capability backends MAY
 // implement to compute the get_extraction_candidates ranking in two
-// Cypher round-trips (per-node caller-count and fan-out aggregation
+// server-side round-trips (per-node caller-count and fan-out aggregation
 // joined to the node table). Replaces the AllNodes() scan + per-node
 // GetInEdges / GetOutEdges loop the handler used previously — on the
-// gortex workspace that was ~30k node × 2 cgo trips per call, where
+// gortex workspace that was ~30k node × 2 trips per call, where
 // each trip materialised the full edge bucket just to count
 // distinct endpoints. The capability instead runs the count
 // (DISTINCT-by-endpoint) inside the engine and ships only the rows
@@ -1386,9 +1366,9 @@ type FileSymbolNameRow struct {
 // names) projection for a slice of file paths in one backend round-
 // trip. Replaces the per-file GetFileNodes loop find_co_changing_symbols
 // runs after a positive cochange match: 20 result rows × one
-// `MATCH (n {file_path: $p})` query each on Ladybug. The capability
-// runs a single `WHERE n.file_path IN $paths AND n.kind IN $kinds`
-// query and ships one row per (file, name).
+// per-file query each on a disk backend. The capability runs a single
+// query filtering by file path and kind with an IN-list, and ships
+// one row per (file, name).
 //
 // Empty paths returns nil — never a whole-table scan. Rows for paths
 // with no qualifying symbols are absent from the result; callers
@@ -1414,11 +1394,11 @@ type ClassHierarchyRow struct {
 
 // ClassHierarchyTraverser is an optional capability backends MAY
 // implement to compute the inheritance subgraph rooted at a seed in
-// one (or two — up + down) Cypher variable-length traversals, server-
+// one (or two — up + down) variable-length traversals, server-
 // side. Replaces the BFS in query.ClassHierarchy: each frontier node
-// fired GetNode + GetInEdges or GetOutEdges per visit on Ladybug, so a
-// depth-5 walk over an interface with a wide implementer set burned
-// hundreds of cgo round-trips just to discover ~50 edges.
+// fired GetNode + GetInEdges or GetOutEdges per visit on a disk
+// backend, so a depth-5 walk over an interface with a wide implementer
+// set burned hundreds of round-trips just to discover ~50 edges.
 //
 // kinds is the edge-kind set the walk consumes (EdgeExtends +
 // EdgeImplements + EdgeComposes + EdgeOverrides). depth caps the hop
@@ -1444,9 +1424,9 @@ type ClassHierarchyTraverser interface {
 // FileEditingContext is an optional capability backends MAY
 // implement to return the get_editing_context payload (defines +
 // imports + 1-hop callers + 1-hop callees, all for one file) in a
-// small fixed number of Cypher round-trips. Replaces the handler's
+// small fixed number of server-side round-trips. Replaces the handler's
 // per-symbol GetCallers / GetCallChain loop — for a file with 30
-// functions that fired 60 query-engine entry points on Ladybug.
+// functions that fired 60 query-engine entry points on a disk backend.
 //
 // kinds is the set of node kinds the caller treats as call-targets
 // (KindFunction + KindMethod). The capability returns FileNode (the
@@ -1478,12 +1458,11 @@ type FileEditingContext interface {
 //
 // On the in-memory backend the per-id GetOutEdges / GetInEdges loop
 // is already O(1) per node, so the query.Engine.GetFileSymbols
-// fallback wraps it. On disk backends the same loop is
-// O(file_symbols × cgo) — ~547 symbols on a real file fanned out into
-// ~5 000 cgo round-trips just to dedup edges in Go. The capability
-// lets Ladybug express the walk as one Cypher pattern match that
-// uses the primary-key HASH index on Node.id plus the rel-table's
-// FROM index on Edge — both already present without any DDL change.
+// fallback wraps it. On a disk backend the same loop is
+// O(file_symbols) round-trips — ~547 symbols on a real file fanned
+// out into ~5 000 round-trips just to dedup edges in Go. The
+// capability lets the backend express the walk as a single server-side
+// query over the node and edge indexes.
 //
 // Returned slices are deduplicated by the implementation. Missing
 // file returns (nil, nil); empty file (file node only, no symbols)
@@ -1518,7 +1497,7 @@ type FrontierHop struct {
 // row cap so a hub node's fan-out can no longer be dragged across the
 // boundary in full.
 //
-// query.Engine.bfs uses it when the reader implements it (the ladybug
+// query.Engine.bfs uses it when the reader implements it (the disk
 // store) and falls back to per-node GetOutEdges/GetInEdges + GetNode
 // otherwise — the in-memory graph needs no batching (its reads are O(1)).
 type FrontierExpander interface {
@@ -1530,8 +1509,8 @@ type FrontierExpander interface {
 // distinct edges adjacent to any of them, without materialising the
 // edges themselves.
 //
-// The Ladybug headline cost for get_file_summary on a 500-symbol file
-// was the ~4 000-row cgo crossing to ship every adjacent edge back to
+// The disk-backend headline cost for get_file_summary on a 500-symbol
+// file was the ~4 000-row crossing to ship every adjacent edge back to
 // Go. The gcx and compact output paths only emit a total_edges scalar
 // in their meta headers — never per-edge rows — so handleGetFileSummary
 // routes gcx through this method and skips the row materialisation
@@ -1554,10 +1533,10 @@ type FileSubGraphCountReader interface {
 // to return per-node total in/out edge counts for every node whose
 // kind is in the supplied set, server-side. Replaces the
 // get_knowledge_gaps pattern of "give me all functions, then ask for
-// their in/out degree" — on Ladybug that fed an IN-list of ~30k node
-// IDs to the NodeDegreeCounts query, which has to compare every node
-// against the list. The capability instead matches kinds at the
-// source and groups by node — one Cypher per direction with a kind
+// their in/out degree" — on a disk backend that fed an IN-list of ~30k
+// node IDs to the NodeDegreeCounts query, which has to compare every
+// node against the list. The capability instead matches kinds at the
+// source and groups by node — one query per direction with a kind
 // predicate the planner can index.
 //
 // pathPrefix narrows the scan to nodes under that file-path prefix;

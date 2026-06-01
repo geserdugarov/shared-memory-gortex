@@ -19,8 +19,7 @@ type KCoreHit struct {
 
 // KCoreOptions filters the working set. Empty NodeKinds /
 // EdgeKinds means "all kinds". Edges are treated as undirected
-// (k-core is defined on undirected graphs; matches Ladybug's
-// engine-native behaviour).
+// (k-core is defined on undirected graphs).
 type KCoreOptions struct {
 	NodeKinds []graph.NodeKind
 	EdgeKinds []graph.EdgeKind

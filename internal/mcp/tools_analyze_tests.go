@@ -70,8 +70,8 @@ func (s *Server) handleAnalyzeTestsAsEdges(ctx context.Context, req mcp.CallTool
 
 	// Batch-fetch every primary key and every related ID in one bulk
 	// round-trip. On a repo with thousands of EdgeTests edges the old
-	// per-id GetNode pattern burned one cgo Cypher call per row plus
-	// one per related ID on Ladybug — easily 5-10k round-trips per
+	// per-id GetNode pattern burned one round-trip per row plus
+	// one per related ID on a disk backend — easily 5-10k round-trips per
 	// analyze kind=tests_as_edges call.
 	idSet := make(map[string]struct{}, len(primary))
 	for id, relatedIDs := range primary {

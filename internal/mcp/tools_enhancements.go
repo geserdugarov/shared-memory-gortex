@@ -39,7 +39,7 @@ func (s *Server) ensureFresh(filePaths []string) []string {
 	// always empty for cross-repo paths, so IsStale returns true for
 	// every file → IndexFile fires → race with the daemon's read
 	// surface, which has been observed to crash the MCP transport
-	// (CGo concurrency hazard on liblbug). The MultiIndexer's own
+	// (a concurrency hazard against the live read surface). The MultiIndexer's own
 	// per-repo watcher / Reconcile path owns freshness here; the
 	// single-Indexer auto-refresh is dead weight that does more harm
 	// than good.
@@ -857,7 +857,7 @@ func (s *Server) handleAnalyzeTodos(ctx context.Context, req mcp.CallToolRequest
 	var rows []todoRow
 	// Push the kind filter into the storage layer — todos are a
 	// tiny slice of the node table, so the AllNodes scan was the
-	// dominant cgo cost on Ladybug.
+	// dominant cost on a disk backend.
 	for _, n := range s.scopedNodesByKinds(ctx, []graph.NodeKind{graph.KindTodo}) {
 		tag, _ := n.Meta["tag"].(string)
 		assignee, _ := n.Meta["assignee"].(string)
@@ -1016,7 +1016,7 @@ func (s *Server) handleAnalyzeStaleCode(ctx context.Context, req mcp.CallToolReq
 	var rows []staleRow
 	// Push the kind filter into the storage layer; the meta gate
 	// (last_authored.timestamp) stays in Go since the meta column is
-	// opaque to Cypher.
+	// opaque to the query layer.
 	for _, n := range s.scopedNodesByKinds(ctx, allowedKindsSlice(allowedKinds)) {
 		la, ok := n.Meta["last_authored"].(map[string]any)
 		if !ok {
@@ -1169,7 +1169,7 @@ func (s *Server) handleAnalyzeOwnership(ctx context.Context, req mcp.CallToolReq
 
 	// Kind pushdown — owners are derived from the blame meta on
 	// function/method (or wider) nodes; the analyzer scans tens of
-	// thousands of irrelevant nodes without it on Ladybug.
+	// thousands of irrelevant nodes without it on a disk backend.
 	for _, n := range s.scopedNodesByKinds(ctx, allowedKindsSlice(allowedKinds)) {
 		if pathPrefix != "" && !strings.HasPrefix(n.FilePath, pathPrefix) {
 			continue
@@ -1425,8 +1425,8 @@ func (s *Server) handleAnalyzeStaleFlags(ctx context.Context, req mcp.CallToolRe
 
 	// Kind pushdown — KindFlag is a few hundred nodes max even on
 	// the biggest workspaces, so pulling AllNodes() to find them
-	// was pure cgo overhead. The caller batch below still does per-
-	// flag GetInEdges; pushing that into a single Cypher join is a
+	// was pure overhead. The caller batch below still does per-
+	// flag GetInEdges; pushing that into a single query join is a
 	// separate follow-up since the join semantics differ per flag.
 	for _, n := range s.scopedNodesByKinds(ctx, []graph.NodeKind{graph.KindFlag}) {
 		provider, _ := n.Meta["provider"].(string)
@@ -1818,7 +1818,7 @@ func (s *Server) handleAnalyzeInteropUsers(ctx context.Context, req mcp.CallTool
 	var rows []interopFile
 	// Kind pushdown — uses_cgo / uses_wasm_bindgen sentinels only
 	// live on file nodes; pulling AllNodes() to find them was pure
-	// cgo overhead on Ladybug.
+	// overhead on a disk backend.
 	for _, n := range s.scopedNodesByKinds(ctx, []graph.NodeKind{graph.KindFile}) {
 		if v, _ := n.Meta[metaKey].(bool); !v {
 			continue

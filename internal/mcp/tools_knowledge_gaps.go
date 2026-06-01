@@ -34,11 +34,11 @@ func (s *Server) registerKnowledgeGapsTool() {
 // edges. Almost always either dead code or an isolated utility
 // nobody wired up.
 type gapDisconnected struct {
-	ID       string `json:"id"`
-	Name     string `json:"name"`
-	Kind     string `json:"kind"`
-	File     string `json:"file"`
-	Line     int    `json:"line"`
+	ID   string `json:"id"`
+	Name string `json:"name"`
+	Kind string `json:"kind"`
+	File string `json:"file"`
+	Line int    `json:"line"`
 }
 
 // gapCommunity — for thin and single-file communities the caller
@@ -56,13 +56,13 @@ type gapCommunity struct {
 // gate so we surface load-bearing nodes even in small repos where
 // the analyzer is conservative.
 type gapUntestedHotspot struct {
-	ID         string  `json:"id"`
-	Name       string  `json:"name"`
-	File       string  `json:"file"`
-	Line       int     `json:"line"`
-	FanIn      int     `json:"fan_in"`
-	Coverage   float64 `json:"coverage_pct"`
-	HasCoverage bool   `json:"has_coverage"`
+	ID          string  `json:"id"`
+	Name        string  `json:"name"`
+	File        string  `json:"file"`
+	Line        int     `json:"line"`
+	FanIn       int     `json:"fan_in"`
+	Coverage    float64 `json:"coverage_pct"`
+	HasCoverage bool    `json:"has_coverage"`
 }
 
 func (s *Server) handleGetKnowledgeGaps(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -82,7 +82,7 @@ func (s *Server) handleGetKnowledgeGaps(ctx context.Context, req mcp.CallToolReq
 	// function/method in scope, computed once via the backend's
 	// NodeDegreeByKinds path when available. The legacy
 	// NodeDegreeCounts route shipped a 30k-element IN-list per call
-	// on Ladybug; NodeDegreeByKinds runs the same aggregate over the
+	// on a disk backend; NodeDegreeByKinds runs the same aggregate over the
 	// kind-filtered node set so the planner never builds the list.
 	degreeByID, scoped := s.scopedFunctionDegrees(ctx, pathPrefix)
 

@@ -229,11 +229,11 @@ func EnrichGraph(g graph.Store, repoRoot string) (int, error) {
 	// Symbol nodes we stamp meta.last_authored on. They must be
 	// round-tripped back through the store at the end: on the in-memory
 	// backend the in-place mutation already persists (n is canonical),
-	// but on disk backends (Ladybug) n is a per-call AllNodes
+	// but on disk backends (SQLite) n is a per-call AllNodes
 	// reconstruction, so without the write-back the last_authored stamp
 	// is silently discarded — leaving stale_code / ownership /
-	// health_score's recency axis empty on Ladybug even after a
-	// successful `gortex enrich blame`. (The person nodes and
+	// health_score's recency axis empty on the disk backend even after
+	// a successful `gortex enrich blame`. (The person nodes and
 	// EdgeAuthored edges below already persist via AddNode/AddEdge; only
 	// the symbol-node Meta was being dropped.) Mirrors the reach index,
 	// coverage, and releases enrichers.

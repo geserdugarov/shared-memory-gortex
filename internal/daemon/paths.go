@@ -97,7 +97,7 @@ func LogFilePath() string {
 // `daemon.gob.gz` under the state dir. Kept for callers that haven't
 // moved to backend-tagged storage yet (cloud indexer worker, ad-hoc
 // `gortex index --snapshot` runs). The daemon itself routes through
-// BackendSnapshotPath so a memory ↔ ladybug switch can't read the
+// BackendSnapshotPath so a memory ↔ disk-backend switch can't read the
 // other backend's snapshot — see that function's doc.
 func SnapshotPath() string {
 	if override := os.Getenv("GORTEX_DAEMON_SNAPSHOT"); override != "" {
@@ -110,13 +110,13 @@ func SnapshotPath() string {
 }
 
 // BackendSnapshotPath returns a backend-tagged snapshot path so the
-// memory and ladybug backends use distinct files. The memory backend
-// snapshot is a full gob+gzip of the in-memory graph; the ladybug
+// memory and disk backends use distinct files. The memory backend
+// snapshot is a full gob+gzip of the in-memory graph; the disk
 // backend snapshot is metadata-only (FileMtimes, contracts, vector
-// index) because the graph itself lives in `store.lbug`. Loading the
-// memory backend's snapshot into a ladybug daemon (or vice versa)
-// silently produced wrong state — empty graph after ladybug→memory
-// switch, decode-and-discard nodes after memory→ladybug — so a fresh
+// index) because the graph itself lives in the on-disk store. Loading
+// the memory backend's snapshot into a disk-backed daemon (or vice
+// versa) silently produced wrong state — empty graph after disk→memory
+// switch, decode-and-discard nodes after memory→disk — so a fresh
 // daemon now picks the right file by backend tag.
 //
 // Empty backend tag falls back to SnapshotPath() so embedded callers
@@ -140,15 +140,15 @@ func BackendSnapshotPath(backend string) string {
 }
 
 // normalizeBackendTag canonicalizes a backend identifier into the
-// short tag used in the snapshot filename — "memory" / "ladybug" /
+// short tag used in the snapshot filename — "memory" / "sqlite" /
 // etc. Empty / unknown input returns the empty string so the caller
 // can fall back to the legacy unsuffixed path.
 func normalizeBackendTag(backend string) string {
 	switch backend {
 	case "memory", "mem", "in-memory":
 		return "memory"
-	case "ladybug", "lbug":
-		return "ladybug"
+	case "sqlite", "sqlite3":
+		return "sqlite"
 	default:
 		return ""
 	}

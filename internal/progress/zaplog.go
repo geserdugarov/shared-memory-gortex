@@ -85,7 +85,7 @@ func (r *ZapReporter) Report(stage string, cur, total int) {
 // StartHeartbeat runs a goroutine that logs an "alive" line every
 // interval until the context is done. Useful when the indexer is
 // inside a long-running phase that doesn't call Report itself
-// (e.g. ladybug's per-row Cypher writes during a slow drain).
+// (e.g. the disk backend's bulk writes during a slow drain).
 func StartHeartbeat(ctx context.Context, logger *zap.Logger, prefix string, interval time.Duration, snapshot func() map[string]any) {
 	if logger == nil || interval <= 0 {
 		return

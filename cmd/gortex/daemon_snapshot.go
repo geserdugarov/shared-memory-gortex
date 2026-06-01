@@ -339,9 +339,9 @@ func migrateSnapshotFile(path string, fromVersion int) (io.Reader, error) {
 // a default-on daemon does not re-embed the whole graph on restart.
 func saveSnapshot(g *graph.Graph, repos []snapshotRepo, snapContracts []snapshotContract, vec snapshotVector, version string, logger *zap.Logger) {
 	// Memory backend: the gob+gzip dump IS the persistence layer, so
-	// route to the per-backend path so a future ladybug-backed daemon
+	// route to the per-backend path so a future disk-backed daemon
 	// can't accidentally pick up this snapshot at startup. See
-	// daemon.BackendSnapshotPath for the memory ↔ ladybug switch
+	// daemon.BackendSnapshotPath for the memory ↔ disk-backend switch
 	// rationale.
 	_ = saveSnapshotTo(g, repos, snapContracts, vec, version, daemon.BackendSnapshotPath("memory"), logger)
 }

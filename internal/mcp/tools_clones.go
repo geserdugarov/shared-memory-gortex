@@ -85,9 +85,9 @@ func (s *Server) handleFindClones(ctx context.Context, req mcp.CallToolRequest) 
 	// pair is counted once.
 	//
 	// EdgesByKind streams only the SimilarTo edges -- on disk backends
-	// (Ladybug) that is one MATCH (...)-[e:Edge {kind: $kind}]->(...)
-	// instead of the full AllEdges scan we used to pay for. ~500k edge
-	// rows materialised over cgo dropped to the SimilarTo-bearing
+	// that is one kind-filtered edge query instead of the full AllEdges
+	// scan we used to pay for. ~500k edge rows materialised over the
+	// storage boundary dropped to the SimilarTo-bearing
 	// subset (~hundreds-to-thousands on a normal workspace).
 	seen := make(map[[2]string]struct{})
 	var pairs []clones.Pair

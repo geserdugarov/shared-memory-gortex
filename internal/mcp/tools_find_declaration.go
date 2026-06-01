@@ -184,9 +184,9 @@ func (s *Server) findUseSiteMatches(useSite string, isRegex bool, pathPrefix str
 // whose underlying view doesn't expose the capability); the function
 // then falls back to walking eng.AllNodes() Go-side, identical to
 // the pre-capability shape. Backends that ship the capability
-// (Ladybug) collapse the per-call node fetch into one Cypher join
+// (the disk backend) collapse the per-call node fetch into one query
 // scoped to the trigram-match file set — on the gortex workspace
-// that was ~70k AllNodes() rows over cgo just to keep the few
+// that was ~70k AllNodes() rows over the storage boundary just to keep the few
 // hundred whose FilePath sat in the small match-file set.
 func buildDeclFileIndex(eng *query.Engine, finder graph.NodesInFilesByKindFinder, matches []trigram.Match) map[string]*fileSymbolIndex {
 	wanted := make(map[string]struct{}, len(matches))

@@ -122,7 +122,7 @@ func (v *VectorBackend) Add(id string, vector []float32) {
 }
 
 // SetDelegate routes Search / Count through an engine-native vector
-// searcher (today the Ladybug store's graph.VectorSearcher). After
+// searcher (the disk store's graph.VectorSearcher). After
 // the call:
 //   - Add is a no-op (the indexer talks to the delegate directly via
 //     graph.VectorSearcher.BulkUpsertEmbeddings / UpsertEmbedding),

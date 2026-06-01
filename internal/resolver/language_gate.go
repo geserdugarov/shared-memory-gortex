@@ -8,7 +8,7 @@ import (
 
 // graphHasLanguage reports whether the backing store contains any node of
 // the given language. Cheap — a LIMIT-1 probe — on stores that implement
-// it (ladybug); conservatively returns true on stores that don't, so a
+// it (the on-disk backend); conservatively returns true on stores that don't, so a
 // language-gated pass still runs rather than being silently skipped. Lets
 // the Go / Python attribution passes skip a graph that has none of their
 // language instead of scanning + discarding the whole node/edge set.

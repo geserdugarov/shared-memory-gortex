@@ -94,7 +94,7 @@ const (
 	// ControlEnrichChurn dispatches to Controller.EnrichChurn — the daemon
 	// runs the churn enricher against its in-process graph so the CLI
 	// (and the post-commit / post-merge git hooks) don't have to fight
-	// the LadyBug write lock the daemon holds.
+	// the on-disk store's write lock the daemon holds.
 	ControlEnrichChurn = "enrich_churn"
 	// ControlEnrichReleases dispatches to Controller.EnrichReleases.
 	// Same routing rationale as ControlEnrichChurn — the CLI hands the

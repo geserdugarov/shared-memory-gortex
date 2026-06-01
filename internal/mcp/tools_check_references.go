@@ -82,8 +82,8 @@ func (s *Server) handleCheckReferences(ctx context.Context, req mcp.CallToolRequ
 	totalEdges := 0
 	if target != nil {
 		// Pre-filter the in-edges and batch-fetch the surviving
-		// `From` nodes in one round-trip. On Ladybug the per-edge
-		// GetNode pattern was a cgo Cypher call per inbound edge —
+		// `From` nodes in one round-trip. On a disk backend the per-edge
+		// GetNode pattern was a round-trip per inbound edge —
 		// for heavily-referenced symbols (hundreds of callers) the
 		// cost was dominant. One GetNodesByIDs gives us the same
 		// data in a single bulk query.
@@ -175,7 +175,7 @@ func (s *Server) handleCheckReferences(ctx context.Context, req mcp.CallToolRequ
 
 	// Importing-files scan — every file whose nodes carry an
 	// EdgeImports edge into the target's FilePath. Backends that
-	// implement graph.FileImporters serve this from one Cypher join
+	// implement graph.FileImporters serve this from one query
 	// (no AllEdges() materialisation, no per-edge GetNode round-
 	// trip). The legacy AllEdges + per-edge GetNode loop stays as
 	// the fallback for backends that don't ship the capability.
@@ -199,7 +199,7 @@ func (s *Server) handleCheckReferences(ctx context.Context, req mcp.CallToolRequ
 
 // collectImportingFiles answers "which files import the file that
 // holds target?". Prefers the graph.FileImporters capability when
-// the backend implements it — that path runs one Cypher join
+// the backend implements it — that path runs one query
 // instead of an AllEdges() scan plus 2× per-edge GetNode round-trip.
 // Returns a sorted, deduplicated, optionally test-filtered slice
 // of file paths.

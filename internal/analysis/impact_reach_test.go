@@ -223,8 +223,8 @@ func TestAnalyzeImpact_FastPathSubMillisecond(t *testing.T) {
 	// per-entry GetNode rendering in fillImpactFromReach), so the old
 	// ~1.8x relative speedup no longer holds here — it collapses to
 	// ~1.0x. The precompute's large win is now realised on disk
-	// backends (Ladybug), where each per-node query the batching
-	// eliminates was a cgo round-trip, not a map read.
+	// backends (SQLite), where each per-node query the batching
+	// eliminates is a disk round-trip, not a map read.
 	//
 	// We therefore keep the absolute sub-ms guarantee (the user-facing
 	// contract: a blast-radius query stays interactive) and a loose

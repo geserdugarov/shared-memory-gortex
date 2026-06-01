@@ -219,7 +219,7 @@ func runEnrichReleases(cmd *cobra.Command, args []string) error {
 	}
 
 	// Daemon path: forward to the running daemon so the enrichment
-	// runs against its in-process (and possibly LadyBug-backed)
+	// runs against its in-process (and possibly disk-backed)
 	// graph. Mirrors the churn CLI's behaviour.
 	if daemon.IsRunning() {
 		return forwardEnrichReleasesToDaemon(cmd, abs)

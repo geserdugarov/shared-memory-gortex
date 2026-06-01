@@ -1111,20 +1111,19 @@ func (mi *MultiIndexer) ReconcileRepoCtx(ctx context.Context, entry config.RepoE
 	// Choose the reconcile strategy. A repo that changed while the
 	// daemon was down must NOT take IncrementalReindex's per-file path:
 	// re-resolving a changed file there goes through per-edge
-	// graph.ReindexEdges, and the per-edge ladybug write hangs inside
-	// lbug_connection_prepare on the first write to a freshly reopened
-	// store (the warm restart wedges forever at 0% CPU). The shadow/bulk
+	// graph.ReindexEdges, and the per-edge write against a freshly
+	// reopened disk store is slow and unreliable. The shadow/bulk
 	// re-track path (IndexCtx) resolves in an in-memory shadow and
-	// commits one bulk COPY, so it never issues a per-edge write to the
+	// commits one bulk load, so it never issues a per-edge write to the
 	// reopened store. It re-indexes the whole repo, but only repos that
 	// actually changed pay it, and it is reliable where the per-edge path
 	// is not. A repo with zero changes keeps the fast IncrementalReindex
 	// no-op (walk + 0 stale → return), which is what makes an unchanged
 	// warm restart near-instant.
-	// The shadow/bulk re-track workaround for the per-edge ReindexEdges
-	// hang applies ONLY to disk-backed stores (ladybug), which is where
-	// the first per-edge write to a reopened store wedges in
-	// lbug_connection_prepare. The in-memory backend (*graph.Graph) has
+	// The shadow/bulk re-track path for the per-edge ReindexEdges
+	// problem applies ONLY to disk-backed stores, which is where the
+	// per-edge write to a reopened store is unreliable. The in-memory
+	// backend (*graph.Graph) has
 	// no reopen and no CGo write path, and IncrementalReindex is the
 	// authoritative path there — it evicts offline-deleted files in place
 	// (a re-track of a shared in-memory graph would not). Gate on the

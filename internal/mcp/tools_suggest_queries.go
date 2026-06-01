@@ -91,8 +91,8 @@ func (s *Server) buildSuggestedQueries(scoped []*graph.Node, inScope map[string]
 	// directly off the graph rather than via FindHotspots, whose
 	// mean+2σ threshold returns nothing on small repositories.
 	//
-	// EdgesByKind streams from the storage layer (one Cypher per kind
-	// on Ladybug, an indexed bucket scan in-memory) so the cost is
+	// EdgesByKind streams from the storage layer (one query per kind
+	// on a disk backend, an indexed bucket scan in-memory) so the cost is
 	// O(call+reference edges) once — replacing the per-node
 	// GetInEdges loop that was N cgo round-trips materialising the
 	// full in-edge bucket per candidate.

@@ -149,7 +149,7 @@ func BuildIndexCtx(ctx context.Context, g graph.Store) *Stats {
 	// Collect the seed nodes we stamp so we can persist the Meta back
 	// through the store in one batch at the end. On the in-memory
 	// backend the in-place stamp already persists (n is canonical); on
-	// disk backends (Ladybug) n is a GetNode reconstruction, so without
+	// disk backends n is a GetNode reconstruction, so without
 	// the write-back the whole reach index would be computed and then
 	// thrown away. Mirrors the per-seed AddNode in Lookup's slow path.
 	stamped := make([]*graph.Node, 0, seedTotal)
@@ -242,10 +242,10 @@ func compute(g graph.Store, seedID string) [3]tier {
 	for depth := 1; depth <= 3 && len(current) > 0; depth++ {
 		// Batch the whole BFS level's incoming-edge fetch into one
 		// backend round-trip. The per-node g.GetInEdges(id) form issued
-		// one Cypher query + cgo crossing per node on disk backends — an
+		// one query per node on disk backends — an
 		// O(reachable-nodes) query storm that turned a single
 		// AnalyzeImpact live walk into a multi-minute (timeout) call on
-		// Ladybug. GetInEdgesByNodeIDs collapses it to one query per depth.
+		// a disk backend. GetInEdgesByNodeIDs collapses it to one query per depth.
 		inEdges := g.GetInEdgesByNodeIDs(current)
 
 		// First pass: discover this level's new From-nodes in
@@ -433,7 +433,7 @@ func Lookup(g graph.Store, seedID string) (d1, d2, d3 []Entry, hit bool) {
 	// Persist the freshly-stamped Meta through the store. On the
 	// in-memory backend n is the canonical node, so the mutations above
 	// already stuck — AddNode re-inserts the same pointer idempotently.
-	// On disk backends (Ladybug) n is a per-call reconstruction returned
+	// On disk backends n is a per-call reconstruction returned
 	// by GetNode, so the in-place stamp would otherwise be discarded the
 	// moment this function returns: the lazy reach cache would never
 	// survive a single query, forcing a full recompute on every

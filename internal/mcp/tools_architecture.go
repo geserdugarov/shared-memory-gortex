@@ -338,8 +338,8 @@ func architectureHotspots(hotspots []analysis.HotspotEntry, inScope map[string]b
 // scoped-nodes slice every call just to keep the callable subset.
 //
 // Uses NodeDegreeAggregator when the backend implements it (one
-// batched in/out count instead of 2N GetInEdges/GetOutEdges cgo
-// round-trips on Ladybug — the per-node loop was the entire
+// batched in/out count instead of 2N GetInEdges/GetOutEdges
+// round-trips on a disk backend — the per-node loop was the entire
 // wall-clock cost of this section on large repos).
 func architectureEntryPoints(inScope map[string]bool, g graph.Store, top int) []map[string]any {
 	type entryCandidate struct {
@@ -469,9 +469,9 @@ func architectureProcesses(pr *analysis.ProcessResult, inScope map[string]bool, 
 // cross-repo edges exist (single-repo mode).
 //
 // Picks the CrossRepoEdgeAggregator capability when the backend
-// implements it (one Cypher GROUP BY replaces the AllEdges +
-// per-edge GetNode pair — typically ~286k cgo edge rows + thousands
-// of GetNode round-trips on Ladybug for <100 rows of output). Falls
+// implements it (one server-side aggregate replaces the AllEdges +
+// per-edge GetNode pair — typically ~286k edge rows + thousands
+// of GetNode round-trips on a disk backend for <100 rows of output). Falls
 // back to the AllEdges-driven loop on backends that don't.
 func architectureCrossRepo(g graph.Store) []crossRepoRow {
 	type key struct {

@@ -165,10 +165,10 @@ func (e *Engine) GetFileSymbolsCounts(filePath string) *SubGraph {
 // GetFileSymbols returns the file node, every symbol the file
 // defines or contains, and every edge adjacent to any of them.
 //
-// Backends that implement graph.FileSubGraphReader (the Ladybug
+// Backends that implement graph.FileSubGraphReader (the on-disk
 // store, for instance) handle the whole walk in one method call so
 // they can express the symbol enumeration as a primary-key probe +
-// rel-table FROM walk instead of a property-filter scan over Node.
+// adjacency walk instead of a property-filter scan over Node.
 // Backends without the capability fall through to the
 // GetFileNodes + GetOut/InEdgesByNodeIDs trio — equivalent on the
 // in-memory graph (the per-id lookups are already O(1)).
@@ -370,7 +370,7 @@ func (e *Engine) FindUsagesScoped(nodeID string, opts QueryOptions) *SubGraph {
 	// First pass: collect every From id whose edge kind qualifies as
 	// a usage. We need the From *Node for the workspace / test
 	// filters below, but the legacy loop fetched it with one GetNode
-	// per edge — on Ladybug that's one cgo Cypher round-trip per
+	// per edge — on a disk backend that's one query round-trip per
 	// inbound edge, which for hot symbols (hundreds of callers) was
 	// the dominant cost of find_usages. Pre-filter the kinds, then
 	// batch the lookup so the disk backend issues one query instead
@@ -570,8 +570,8 @@ func (e *Engine) SearchSymbolsScoped(query string, limit int, opts QueryOptions)
 // vector candidates merge into one rerank slice.
 //
 // Fallback (no bundle support): the legacy path — Search() / channel
-// for IDs, GetNodesByIDs to materialise. On disk backends (Ladybug)
-// the bundle fast path collapses 3 cgo round-trips (FTS + nodes +
+// for IDs, GetNodesByIDs to materialise. On a disk backend
+// the bundle fast path collapses 3 round-trips (FTS + nodes +
 // the rerank's 2 edge fetches) into 4 server-side queries with no
 // engine→rerank boundary crossings; the GetNodesByIDs cost goes
 // away entirely for the BM25 hits.
@@ -596,7 +596,7 @@ func (e *Engine) gatherBackendCandidates(query string, limit int, opts QueryOpti
 		// VectorChannelOnly avoids re-running the text BM25 path —
 		// the bundle already returned the BM25 hits and their full
 		// node + edge payload. Falling back to SearchChannels here
-		// would double-pay the FTS Cypher cost per BM25 fan-out.
+		// would double-pay the FTS query cost per BM25 fan-out.
 		type vectorOnly interface {
 			VectorChannelOnly(query string, limit int) ([]string, search.ChannelTimings)
 		}
@@ -636,7 +636,7 @@ func (e *Engine) gatherBackendCandidates(query string, limit int, opts QueryOpti
 		// branch. Otherwise the fallback path below pulls both.
 		// VectorChannelOnly skips the BM25 re-run (the bundle already
 		// returned text hits + their full payload); a few hundred
-		// microseconds of embed + ANN, not a second FTS Cypher.
+		// microseconds of embed + ANN, not a second FTS query.
 		//
 		// opts.SkipVectorChannel suppresses the embed + ANN entirely.
 		// The MCP handler flips this on for identifier-shape queries
@@ -786,7 +786,7 @@ func (e *Engine) gatherBackendCandidates(query string, limit int, opts QueryOpti
 	// the tail of the text channel so they're still text-ranked. The
 	// caller can suppress this when the query string is known to never
 	// match a literal Name (the combined-OR fan-out's concatenated bag
-	// of expansion terms, for example) — saves the Cypher round-trip
+	// of expansion terms, for example) — saves the query round-trip
 	// that would unconditionally return zero rows.
 	if !opts.SkipExactNameSplice {
 		findNameStart := time.Now()
@@ -856,7 +856,7 @@ func (e *Engine) gatherBackendCandidates(query string, limit int, opts QueryOpti
 			}
 			bigramIDs := bg.BigramCandidates(query, minOverlap)
 			// Skip the batch fetch entirely when the bigram backend
-			// returned nothing — otherwise we'd issue an empty Cypher
+			// returned nothing — otherwise we'd issue an empty query
 			// round-trip.
 			if len(bigramIDs) > 0 {
 				bigramNodes := e.g.GetNodesByIDs(bigramIDs)
@@ -1077,7 +1077,7 @@ func (e *Engine) bfs(nodeID string, opts QueryOptions, forward bool, edgeKinds [
 		return neighborID
 	}
 
-	// A backend that implements graph.FrontierExpander (the ladybug
+	// A backend that implements graph.FrontierExpander (the on-disk
 	// store) returns a whole frontier's edges + neighbour nodes in one
 	// round-trip — no GetNode per edge, no meta decode. Bidirectional
 	// (cluster) walks and capability-less backends (the in-memory graph,

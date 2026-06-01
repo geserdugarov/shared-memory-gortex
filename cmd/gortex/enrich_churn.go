@@ -37,7 +37,7 @@ doesn't pollute the persisted data. Pass --branch to override.
 
 When a daemon is running on the default socket, this command sends a
 control RPC and the daemon does the enrichment against its in-process
-graph (avoiding the LadyBug write-lock collision a direct write would
+graph (avoiding the disk-backend write-lock collision a direct write would
 cause). Without a daemon, the command falls back to a one-shot in-
 memory pass that can be persisted with --snapshot.`,
 	Args: cobra.MaximumNArgs(1),
@@ -66,10 +66,10 @@ func runEnrichChurn(cmd *cobra.Command, args []string) error {
 	}
 
 	// Daemon path: forward to the running daemon so the enrichment
-	// runs against its in-process (and possibly LadyBug-backed)
+	// runs against its in-process (and possibly disk-backed)
 	// graph. The daemon already owns the write lock; routing
-	// through it sidesteps the "can't open the same LadyBug
-	// directory twice" failure mode.
+	// through it sidesteps the "can't open the same on-disk
+	// store twice" failure mode.
 	if daemon.IsRunning() {
 		return forwardEnrichChurnToDaemon(cmd, abs)
 	}

@@ -177,8 +177,8 @@ func (s *Server) symbolNamesInFile(filePath string) []string {
 // FileSymbolNamesByPaths; falls back to the per-file loop otherwise.
 // Used by find_co_changing_symbols and analyze fixes_history where
 // the row count after truncation is bounded but each per-row name
-// lookup was a separate Cypher query before — multiple thousand
-// query-engine entry points per call on Ladybug.
+// lookup was a separate query before — multiple thousand
+// query-engine entry points per call on a disk backend.
 func (s *Server) symbolNamesByFiles(paths []string) map[string][]string {
 	if len(paths) == 0 {
 		return nil

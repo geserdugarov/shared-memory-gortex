@@ -65,7 +65,7 @@ var usageEdgeKinds = map[EdgeKind]bool{
 // kinds that classify a symbol as "used" by ClassifyZeroEdge. Exposed
 // for capability callers (NodeDegreeAggregator) that need to mirror
 // the in-graph usage filter server-side. Order is stable so the slice
-// is safe to pass directly to a Cypher parameter binding.
+// is safe to pass directly to a query parameter binding.
 func UsageInboundEdgeKinds() []EdgeKind {
 	return []EdgeKind{
 		EdgeCalls,

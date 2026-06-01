@@ -7,8 +7,8 @@ import (
 
 // backendResolverEnabled reports whether the resolver should consult
 // graph.BackendResolver before running its Go-side worker pool.
-// Default on for the ladybug-only daemon: the backend resolver runs
-// one Cypher per rule rather than one round-trip per unresolved edge.
+// Default on for the disk-backed daemon: the backend resolver runs
+// one query per rule rather than one round-trip per unresolved edge.
 // With the multi-repo encoding exposing 100k+ `unresolved::*` edges
 // at warmup, the per-edge Go path is the difference between a sub-
 // 10-minute warmup and a hang / OOM. Set GORTEX_BACKEND_RESOLVER=0

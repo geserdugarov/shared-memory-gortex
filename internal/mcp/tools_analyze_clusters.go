@@ -80,7 +80,7 @@ func (s *Server) handleAnalyzeClusters(ctx context.Context, req mcp.CallToolRequ
 	// gates, then sort + truncate to the requested limit. The density,
 	// language-mix, and top-files work below is bounded by the truncated
 	// row count instead of every community in the partition — important
-	// on Ladybug where each member touches the graph store.
+	// on a disk backend where each member touches the graph store.
 	type pending struct {
 		c   *analysis.Community
 		row clusterRow
@@ -126,15 +126,15 @@ func (s *Server) handleAnalyzeClusters(ctx context.Context, req mcp.CallToolRequ
 	}
 
 	// Batch every surviving cluster's member ids and pull their nodes +
-	// outgoing edges in two calls — one Cypher round-trip each on
-	// Ladybug, against the per-member GetNode / GetOutEdges loop the
-	// previous shape ran (N members × 2 cgo trips). Members from
+	// outgoing edges in two calls — one round-trip each on
+	// a disk backend, against the per-member GetNode / GetOutEdges loop the
+	// previous shape ran (N members × 2 round-trips). Members from
 	// communities that didn't survive the truncate above never reach
 	// the store.
 	//
 	// Per-cluster member cap: communities can hold thousands of nodes
-	// each. On Ladybug, fetching tens of thousands of nodes + edges per
-	// call is several seconds of cgo cost — the rendered response only
+	// each. On a disk backend, fetching tens of thousands of nodes + edges per
+	// call is several seconds of cost — the rendered response only
 	// uses these to compute density / language mix / top files, all of
 	// which converge on a representative sample long before they need
 	// every member. With a default 50-cluster limit and ~200 sampled

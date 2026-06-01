@@ -73,7 +73,7 @@ type CrossRepoResolver struct {
 	// Populated by warmLookupCache before the per-edge fan-out and
 	// cleared on return; cachedGetNode / cachedFindNodesByName consult
 	// them first. Without it the cross-repo pass fires one
-	// GetNode/FindNodesByName Cypher per pending edge — across 200k+
+	// GetNode/FindNodesByName query per pending edge — across 200k+
 	// unresolved edges that is a warmup hang on disk backends.
 	logger          *zap.Logger
 	nodeByID        map[string]*graph.Node
@@ -333,7 +333,7 @@ func (cr *CrossRepoResolver) ResolveForRepo(repoPrefix string) *CrossRepoStats {
 	defer cr.mu.Unlock()
 	// One backend query for every out-edge from this repo's nodes,
 	// instead of GetRepoNodes followed by GetOutEdges per node. On
-	// disk backends (Ladybug, SQLite, DuckDB) the per-node loop
+	// disk backends (SQLite, DuckDB) the per-node loop
 	// was O(repo_nodes) round-trips per pass — single-digit minutes
 	// of warmup on a multi-repo workspace where this method runs
 	// once per tracked repo.
@@ -495,7 +495,7 @@ func (cr *CrossRepoResolver) clearDirIndexes() {
 func (cr *CrossRepoResolver) buildReachableReposIndex() {
 	idx := make(map[string]map[string]struct{})
 	// Materialise the import edges and batch-load their targets in one
-	// GetNodesByIDs — a per-edge GetNode(e.To) here is a Cypher round-trip
+	// GetNodesByIDs — a per-edge GetNode(e.To) here is a query round-trip
 	// per import on a disk backend, which under the cross-repo pass's
 	// import population was a multi-minute cold-warmup stall (it runs
 	// before the pass even logs "pass start").

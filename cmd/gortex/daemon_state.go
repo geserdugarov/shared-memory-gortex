@@ -211,15 +211,14 @@ func buildDaemonState(logger *zap.Logger) (*daemonState, error) {
 	//     gob+gzip dump IS the persistence layer; nodes + edges are
 	//     replayed into the empty *graph.Graph.
 	//
-	//   - Persistent backend (ladybug): metadata-only load
+	//   - Persistent backend (sqlite): metadata-only load
 	//     (loadSnapshotMetadata). The graph already lives in the
 	//     backend's own on-disk store, so the snapshot only needs to
 	//     carry the data the backend doesn't track — per-repo
 	//     FileMtimes, contract registries, vector index. Skipping the
 	//     load entirely (the previous behaviour) left priorMtimes
 	//     empty and routed every warm restart through a full
-	//     TrackRepoCtx → BulkUpsertSymbolFTS path that crashes on an
-	//     already-populated store.
+	//     TrackRepoCtx → BulkUpsertSymbolFTS reindex path.
 	var loadResult snapshotLoadResult
 	if mg, ok := g.(*graph.Graph); ok {
 		loadResult, err = loadSnapshot(mg, logger)
@@ -227,13 +226,13 @@ func buildDaemonState(logger *zap.Logger) (*daemonState, error) {
 			logger.Warn("daemon: snapshot load failed", zap.Error(err))
 		}
 	}
-	// Ladybug-backed daemons don't read a metadata snapshot: per-
+	// Disk-backed daemons don't read a metadata snapshot: per-
 	// repo FileMtimes live in the FileMtime sidecar table (loaded
 	// per-repo by priorMtimesFromStore in the parallel_parse loop
 	// below), KindContract nodes carry the rich contract record on
 	// Node.Meta (rehydrated via contracts.LoadRegistryFromGraph),
-	// and vector queries route to ladybug's native HNSW. The legacy
-	// gob round-trip is now memory-backend-only.
+	// and vector queries route to the backend's native vector index.
+	// The legacy gob round-trip is now memory-backend-only.
 
 	idx := indexer.New(g, reg, cfg.Index, logger)
 
@@ -706,12 +705,10 @@ func warmupDaemonState(state *daemonState, logger *zap.Logger) *indexer.MultiWat
 		go func() {
 			defer wg.Done()
 			for entry := range jobs {
-				// Per-entry panic guard so one repo's CGo / liblbug
-				// crash (e.g. the "mutex lock failed: Invalid
-				// argument" the resolver's stub-merge path surfaces
-				// on certain warm-restart shapes) doesn't kill the
-				// worker — the bad repo logs and skips, the worker
-				// proceeds to the next job, and warmup completes.
+				// Per-entry panic guard so one repo's crash during
+				// reindex doesn't kill the worker — the bad repo logs
+				// and skips, the worker proceeds to the next job, and
+				// warmup completes.
 				func(entry config.RepoEntry) {
 					defer func() {
 						if r := recover(); r != nil {
@@ -742,7 +739,7 @@ func warmupDaemonState(state *daemonState, logger *zap.Logger) *indexer.MultiWat
 					repoStart := time.Now()
 					// Prefer mtimes stored in the backend's FileMtime
 					// sidecar table — that lifts the persistence off the
-					// gob snapshot for the ladybug backend, which is the
+					// gob snapshot for disk-backed backends, which is the
 					// path that actually rebuilds across restarts. Falls
 					// back to the snapshot's per-repo FileMtimes when the
 					// backend doesn't implement the reader (memory) or

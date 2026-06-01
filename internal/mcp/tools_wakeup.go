@@ -85,7 +85,7 @@ func BuildWakeup(g graph.Store, communities *analysis.CommunityResult, opts Wake
 	// hotspots and entry points already iterate the function/method
 	// subset via the analyzers / NodesByKindsScanner path, so the
 	// AllNodes() pull the legacy build used to feed the lang summary
-	// just adds a redundant 107k-row cgo trip on Ladybug.
+	// just adds a redundant 107k-row trip on a disk backend.
 	stats := g.Stats()
 	var b strings.Builder
 	b.WriteString("# Codebase wakeup\n\n")
@@ -178,13 +178,12 @@ func BuildWakeup(g graph.Store, communities *analysis.CommunityResult, opts Wake
 	return out, len(out) / 4
 }
 
-
 // wakeupEntryPoints returns functions/methods with zero incoming
 // edges and at least one outgoing edge, ranked by out-degree.
 //
 // Uses NodeDegreeAggregator when the backend implements it (one
 // batched in/out count instead of up to 3N GetInEdges/GetOutEdges
-// cgo round-trips on Ladybug — the sort path called GetOutEdges
+// round-trips on a disk backend — the sort path called GetOutEdges
 // twice per candidate, the worst single hot spot in this file). We
 // stash the fan-out alongside each node so the sort never has to
 // re-query.

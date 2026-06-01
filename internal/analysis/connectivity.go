@@ -111,7 +111,7 @@ const connectivityNote = "Connectivity health is a graph-EXTRACTION diagnostic, 
 // negative value for no cap.
 //
 // Backends that implement graph.NodeDegreeAggregator serve every
-// per-node count from one bulk Cypher pass; the fallback path runs
+// per-node count from one bulk pass; the fallback path runs
 // the legacy per-node GetInEdges + GetOutEdges + ClassifyZeroEdge
 // trio. The arithmetic is identical either way — the capability
 // inlines ClassifyZeroEdge's "no incoming usage edge" check into the
@@ -135,8 +135,8 @@ func GraphConnectivity(g graph.Store, nodes []*graph.Node, fileLimit int) GraphC
 	byFile := map[string]*fileAgg{}
 
 	// Bulk per-node count fetch when the backend supports it; one
-	// Cypher pair vs. 3N per-node round-trips for the legacy path
-	// (the killer on Ladybug — see the NodeDegreeAggregator doc-comment
+	// bulk pair vs. 3N per-node round-trips for the legacy path
+	// (the killer on a disk backend — see the NodeDegreeAggregator doc-comment
 	// for the workspace-scale numbers). Returns a map keyed on node ID
 	// or nil when the capability isn't available; the fallback path
 	// re-queries per node via the closure below.

@@ -274,8 +274,8 @@ func evalGraphQuery(eng *query.Engine, stages []gqStage, limit int) (*query.SubG
 			// When the pipeline opens with a `kind=` predicate (the
 			// common case — e.g. `nodes kind=function ...`), iterate
 			// the backend's per-kind bucket instead of AllNodes(). On
-			// Ladybug NodesByKind hits a server-side filter and only
-			// the matching rows cross cgo; AllNodes() materialised the
+			// a disk backend NodesByKind hits a server-side filter and only
+			// the matching rows cross the storage boundary; AllNodes() materialised the
 			// whole node table per request. Other filters
 			// (`name~`/`path=`/`lang=`) still post-filter in Go.
 			//

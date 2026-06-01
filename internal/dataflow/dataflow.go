@@ -377,8 +377,8 @@ func (p TaintPattern) matches(n *graph.Node) bool {
 // allowlist (function/method/param/field/variable/constant/type/
 // interface) that taintEligible enforces. Iterating the per-kind
 // NodesByKind bucket of each lets the backend stream only those
-// kinds instead of materialising the full node table over cgo;
-// on Ladybug AllNodes() pulled ~70k rows per request just to land
+// kinds instead of materialising the full node table;
+// on a disk backend AllNodes() pulls ~70k rows per request just to land
 // at a handful of taint candidates. Pattern post-filters (name /
 // path / pattern-supplied kind) still run Go-side — they compose
 // AND, can't be projected onto the bucket index efficiently, and

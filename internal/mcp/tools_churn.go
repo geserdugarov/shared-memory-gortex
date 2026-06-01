@@ -15,7 +15,7 @@ import (
 //
 // At read time the handler does NOT shell out to git. Every value it
 // returns lives in n.Meta["churn"] on the node, populated either by
-// the CLI/git-hook (which writes through the LadyBug backend) or by
+// the CLI/git-hook (which writes through the on-disk backend) or by
 // an in-process call to the enrich_churn MCP tool. When no node in
 // scope has the data, the response is a structured error pointing
 // the agent at the enrich command.
@@ -150,7 +150,7 @@ func (s *Server) handleGetChurnRate(ctx context.Context, req mcp.CallToolRequest
 //	}
 //
 // Numeric fields tolerate both int and float64 because Meta round-
-// trips through gob (LadyBug) or JSON (snapshots), which can widen
+// trips through the on-disk backend or JSON (snapshots), which can widen
 // ints to floats. Missing fields default to zero — they're stamped
 // together so partial payloads are unexpected, but a defensive read
 // is cheaper than asserting and crashing on an old snapshot.

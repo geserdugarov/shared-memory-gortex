@@ -1,6 +1,6 @@
 // Package exporter writes the in-memory graph to portable formats so users
-// can load it into external visualization and query tools (Neo4j, Memgraph,
-// Ladybug via Cypher; yEd, Gephi, Cytoscape via GraphML).
+// can load it into external visualization and query tools (Neo4j, Memgraph
+// via Cypher; yEd, Gephi, Cytoscape via GraphML).
 //
 // The exporter is read-only and operates on a snapshot — it never mutates
 // the graph. Filters (repo, kinds) are applied during emission.
@@ -42,11 +42,11 @@ type Options struct {
 
 // Stats reports what was emitted. Returned by every exporter Write call.
 type Stats struct {
-	NodesWritten   int
-	EdgesWritten   int
-	NodesSkipped   int
-	EdgesSkipped   int
-	BytesWritten   int64
+	NodesWritten int
+	EdgesWritten int
+	NodesSkipped int
+	EdgesSkipped int
+	BytesWritten int64
 }
 
 // nodeFilter returns true for nodes that pass the option filters.

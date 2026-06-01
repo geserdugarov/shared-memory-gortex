@@ -1461,9 +1461,9 @@ func (e *GoExtractor) emitImport(m parser.QueryResult, filePath, fileID string, 
 	})
 	// File → import-node edge. EdgeContains is the semantic fit (the
 	// file *contains* an import statement; it doesn't *define* the
-	// imported package). The Ladybug-backed GetFileSubGraph walks
+	// imported package). The disk-backed GetFileSubGraph walks
 	// EdgeDefines ∪ EdgeContains from the file node to enumerate the
-	// full neighbourhood in one rel-index pass.
+	// full neighbourhood in one edge-index pass.
 	result.Edges = append(result.Edges, &graph.Edge{
 		From:     fileID,
 		To:       importNodeID,

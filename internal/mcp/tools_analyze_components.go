@@ -17,7 +17,7 @@
 // Routing:
 //
 //   - When the backing graph.Store implements graph.ComponentFinder
-//     (today only store_ladybug), both kinds delegate to the
+//     (today only store_sqlite), both kinds delegate to the
 //     engine-native algorithm.
 //
 //   - Otherwise the in-process analysis.ComputeWCC /

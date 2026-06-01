@@ -201,3 +201,38 @@ func StubRepoPrefix(id string) string {
 	}
 	return ""
 }
+
+// IsResolvableRefEdge reports whether an edge of this kind is a
+// symbol-level reference that the resolver binds from an
+// `unresolved::<Name>` stub — calls, references, value reads/writes,
+// type positions (typed_as / returns), and type hierarchy
+// (implements / extends / composes / instantiates). These are the edges
+// that must survive a definition's re-index as pending stubs rather than
+// be dropped wholesale. Structural edges (contains / defines / member_of
+// / imports / param_of) and enrichment edges (tests / provides / spawns
+// / annotated / …) are not name-resolved and are excluded — re-stubbing
+// them would only create edges nothing ever rebinds.
+func IsResolvableRefEdge(k EdgeKind) bool {
+	switch k {
+	case EdgeCalls, EdgeReferences, EdgeReads, EdgeWrites,
+		EdgeTypedAs, EdgeReturns, EdgeInstantiates,
+		EdgeImplements, EdgeExtends, EdgeComposes:
+		return true
+	}
+	return false
+}
+
+// IsReferenceableSymbol reports whether a node of this kind can be the
+// target of a cross-file symbol reference — and thus the subject of
+// reverse resolution by name. Excludes files, imports, packages,
+// params, closures, locals, builtins, generic params, and the
+// coverage / infra node kinds, none of which a caller binds to by bare
+// name from an unresolved stub.
+func IsReferenceableSymbol(k NodeKind) bool {
+	switch k {
+	case KindFunction, KindMethod, KindType, KindInterface,
+		KindVariable, KindConstant, KindField, KindEnumMember:
+		return true
+	}
+	return false
+}

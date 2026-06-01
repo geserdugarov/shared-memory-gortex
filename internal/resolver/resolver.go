@@ -843,6 +843,111 @@ func (r *Resolver) ResolveFile(filePath string) *ResolveStats {
 	return stats
 }
 
+// ResolveIncomingForFile is the reverse of ResolveFile: instead of
+// resolving the file's own OUTGOING references, it binds pending
+// `unresolved::<Name>` edges in OTHER files that reference a symbol
+// (re)defined in this file. After a definition is added or re-indexed,
+// callers elsewhere still point at an unresolved stub — either one
+// emitted at their own extraction time, or one restubIncomingRefs
+// re-created when this file's prior concrete node was evicted. This
+// rebinds them, scoped to this file's symbol names, so it costs
+// O(references to those names), not a whole-graph ResolveAll. It uses
+// the same reachability / import gates as ResolveFile (via resolveEdge),
+// so an ambiguous name binds no differently and unsafe matches stay
+// pending for the periodic ResolveAll.
+func (r *Resolver) ResolveIncomingForFile(filePath string) *ResolveStats {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	r.buildDirIndexes()
+	defer r.clearDirIndexes()
+	r.buildDepModuleIndex()
+	defer r.clearDepModuleIndex()
+	r.buildProvidesForIndex()
+	defer r.clearProvidesForIndex()
+	r.buildReachabilityIndex()
+	defer r.clearReachabilityIndex()
+	defer r.clearLSPIndex()
+
+	stats := &ResolveStats{}
+	r.resolveIncomingLocked(filePath, stats)
+	return stats
+}
+
+// resolveIncomingLocked is the core of the reverse pass. Caller holds
+// r.mu and has built the per-pass indexes. For each distinct
+// referenceable symbol name defined in filePath it looks up the pending
+// edges parked under that name's unresolved-stub id — GetInEdges keyed
+// by the `unresolved::<Name>` target, so no new index is needed: the
+// stub id IS the in-edge bucket key — and runs the normal per-edge
+// resolution against them. Both the bare and the `<repoPrefix>::`
+// multi-repo stub forms are probed.
+func (r *Resolver) resolveIncomingLocked(filePath string, stats *ResolveStats) {
+	defNodes := r.graph.GetFileNodes(filePath)
+	if len(defNodes) == 0 {
+		return
+	}
+	seen := make(map[string]struct{}, len(defNodes))
+	var stubKeys []string
+	for _, n := range defNodes {
+		if n == nil || n.Name == "" || !graph.IsReferenceableSymbol(n.Kind) {
+			continue
+		}
+		if _, dup := seen[n.Name]; dup {
+			continue
+		}
+		seen[n.Name] = struct{}{}
+		stubKeys = append(stubKeys, graph.UnresolvedMarker+n.Name)
+		if n.RepoPrefix != "" {
+			stubKeys = append(stubKeys, n.RepoPrefix+"::"+graph.UnresolvedMarker+n.Name)
+		}
+	}
+	if len(stubKeys) == 0 {
+		return
+	}
+
+	var reindexBatch []graph.EdgeReindex
+	var jobs []reindexJob
+	for _, key := range stubKeys {
+		for _, e := range r.graph.GetInEdges(key) {
+			if e == nil || !graph.IsUnresolvedTarget(e.To) {
+				continue
+			}
+			oldTo, changed := r.resolveEdge(e, stats)
+			if changed {
+				reindexBatch = append(reindexBatch, graph.EdgeReindex{Edge: e, OldTo: oldTo})
+				jobs = append(jobs, reindexJob{
+					edge:       e,
+					oldTo:      oldTo,
+					newTo:      e.To,
+					kind:       e.Kind,
+					confidence: e.Confidence,
+					origin:     e.Origin,
+				})
+			}
+		}
+	}
+	if len(reindexBatch) > 0 {
+		r.graph.ReindexEdges(reindexBatch)
+	}
+
+	// Same cross-package name-match guard ResolveFile applies: revert a
+	// weak-tier call edge whose freshly-bound target lives in a package
+	// the caller never imports.
+	if len(jobs) > 0 {
+		if closure := r.buildImportClosure(); len(closure) > 0 {
+			if guarded := r.guardCrossPackageCallEdges(jobs, closure); guarded > 0 {
+				if stats.Resolved >= guarded {
+					stats.Resolved -= guarded
+				} else {
+					stats.Resolved = 0
+				}
+				stats.Unresolved += guarded
+			}
+		}
+	}
+}
+
 // reindexJob captures the resolved state for an edge whose target
 // changed during a parallel resolution pass.
 //

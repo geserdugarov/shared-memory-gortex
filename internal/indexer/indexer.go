@@ -2544,6 +2544,7 @@ func (idx *Indexer) indexFile(filePath string, resolve bool) error {
 				oldFuncIDs = append(oldFuncIDs, n.ID)
 			}
 		}
+		idx.restubIncomingRefs(graphPath)
 		idx.graph.EvictFile(graphPath)
 	}
 
@@ -2637,6 +2638,14 @@ func (idx *Indexer) indexFile(filePath string, resolve bool) error {
 
 	if resolve {
 		idx.resolver.ResolveFile(graphPath)
+		// Reverse pass: bind callers in OTHER files that reference a
+		// symbol (re)defined here. ResolveFile above only fixed this
+		// file's OUTGOING edges; a symbol newly defined or changed here
+		// leaves callers elsewhere pointing at the unresolved stub
+		// restubIncomingRefs left when the prior concrete node was
+		// evicted. Scoped to this file's names — not a whole-graph
+		// ResolveAll.
+		idx.resolver.ResolveIncomingForFile(graphPath)
 		// CPG-lite dataflow placeholders for this file: inter-
 		// procedural callees may have just been lifted by
 		// ResolveFile, so re-run the dataflow materialisation pass
@@ -2822,7 +2831,59 @@ func (idx *Indexer) EvictFile(filePath string) (int, int) {
 			idx.search.Remove(n.ID)
 		}
 	}
+	idx.restubIncomingRefs(graphPath)
 	return idx.graph.EvictFile(graphPath)
+}
+
+// restubIncomingRefs rewrites every resolved reference edge that points
+// INTO a symbol of graphPath from a surviving (other-file) source back
+// to an `unresolved::<Name>` stub, in place, BEFORE the file's nodes are
+// evicted. Graph eviction otherwise drops those incoming caller edges
+// wholesale (it removes the edge from the surviving source's out-edge
+// bucket) and nothing recreates them until a cold reindex — so editing
+// or deleting a definition silently strips its callers' edges and
+// find_usages / get_callers go blank. Re-stubbing detaches the edges
+// from the soon-to-be-evicted nodes so they survive as pending stubs;
+// ResolveIncomingForFile (after a re-index) rebinds them to the file's
+// fresh symbols, or they stay unresolved — the correct state once the
+// symbol is gone. Only name-resolvable reference kinds are re-stubbed;
+// structural and enrichment edges are left to be dropped. Backend-
+// agnostic: GetInEdges + ReindexEdges are the same Store primitives the
+// resolver uses, so this behaves identically on the in-memory and disk
+// stores.
+func (idx *Indexer) restubIncomingRefs(graphPath string) {
+	nodes := idx.graph.GetFileNodes(graphPath)
+	if len(nodes) == 0 {
+		return
+	}
+	evicted := make(map[string]struct{}, len(nodes))
+	for _, n := range nodes {
+		evicted[n.ID] = struct{}{}
+	}
+	var batch []graph.EdgeReindex
+	for _, n := range nodes {
+		if n.Name == "" || !graph.IsReferenceableSymbol(n.Kind) {
+			continue
+		}
+		stub := graph.UnresolvedMarker + n.Name
+		for _, e := range idx.graph.GetInEdges(n.ID) {
+			if e == nil || !graph.IsResolvableRefEdge(e.Kind) {
+				continue
+			}
+			if _, fromEvicted := evicted[e.From]; fromEvicted {
+				continue // intra-file edge: the source is evicted too
+			}
+			if graph.IsUnresolvedTarget(e.To) {
+				continue // already a pending stub
+			}
+			oldTo := e.To
+			e.To = stub
+			batch = append(batch, graph.EdgeReindex{Edge: e, OldTo: oldTo})
+		}
+	}
+	if len(batch) > 0 {
+		idx.graph.ReindexEdges(batch)
+	}
 }
 
 // embeddingDimsOrDefault returns the embedder's reported vector width,
@@ -3641,6 +3702,7 @@ func (idx *Indexer) IncrementalReindexPaths(root string, paths []string) (*Index
 
 	for _, relPath := range deletedFiles {
 		graphPath := idx.prefixPath(relPath)
+		idx.restubIncomingRefs(graphPath)
 		idx.graph.EvictFile(graphPath)
 		idx.mtimeMu.Lock()
 		delete(idx.fileMtimes, relPath)
@@ -3839,6 +3901,7 @@ func (idx *Indexer) IncrementalReindex(root string) (*IndexResult, error) {
 	// Evict only files that are truly absent from disk.
 	for _, relPath := range deletedFiles {
 		graphPath := idx.prefixPath(relPath)
+		idx.restubIncomingRefs(graphPath)
 		idx.graph.EvictFile(graphPath)
 		idx.mtimeMu.Lock()
 		delete(idx.fileMtimes, relPath)

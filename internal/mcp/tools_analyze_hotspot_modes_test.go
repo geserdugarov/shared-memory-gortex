@@ -127,11 +127,11 @@ func TestNoveltyWeight_LinearDecay(t *testing.T) {
 	window := 30 * 24 * time.Hour
 	// Day 0 → weight 1.0
 	n := &graph.Node{Meta: map[string]any{"last_authored": map[string]any{"timestamp": now.Unix()}}}
-	assert.InDelta(t, 1.0, noveltyWeight(n, now, window), 1e-6)
+	assert.InDelta(t, 1.0, noveltyWeight(nil, n, now, window), 1e-6)
 	// Day 15 → weight 0.5
 	n.Meta["last_authored"] = map[string]any{"timestamp": now.Add(-15 * 24 * time.Hour).Unix()}
-	assert.InDelta(t, 0.5, noveltyWeight(n, now, window), 1e-2)
+	assert.InDelta(t, 0.5, noveltyWeight(nil, n, now, window), 1e-2)
 	// Day 30+ → weight 0
 	n.Meta["last_authored"] = map[string]any{"timestamp": now.Add(-31 * 24 * time.Hour).Unix()}
-	assert.InDelta(t, 0.0, noveltyWeight(n, now, window), 1e-6)
+	assert.InDelta(t, 0.0, noveltyWeight(nil, n, now, window), 1e-6)
 }

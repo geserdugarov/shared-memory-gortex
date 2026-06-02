@@ -219,6 +219,7 @@ func (s *Server) handleAnalyzeHealthScore(ctx context.Context, req mcp.CallToolR
 	now := time.Now()
 
 	covRows := s.coverageByID()
+	blame := blameRowsByID(s.graph)
 	rows := make([]healthScoreRow, 0, 128)
 	for _, n := range scoped {
 		if n == nil {
@@ -272,7 +273,7 @@ func (s *Server) handleAnalyzeHealthScore(ctx context.Context, req mcp.CallToolR
 		// Linear piecewise: fresh (≤30d) = 100; ok-zone
 		// (30..365d) = 100→50; stale-zone (365..1095d) = 50→0;
 		// dead (>1095d) = 0.
-		if ts, ok := extractTimestamp(n.Meta); ok {
+		if ts, ok := lastAuthoredTSFrom(blame, n); ok {
 			ageDays := max(int(now.Sub(time.Unix(ts, 0)).Hours()/24), 0)
 			row.AgeDays = &ageDays
 			recHealth := recencyScore(ageDays)

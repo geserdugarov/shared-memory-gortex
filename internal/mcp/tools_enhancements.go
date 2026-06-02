@@ -1017,30 +1017,21 @@ func (s *Server) handleAnalyzeStaleCode(ctx context.Context, req mcp.CallToolReq
 	// Push the kind filter into the storage layer; the meta gate
 	// (last_authored.timestamp) stays in Go since the meta column is
 	// opaque to the query layer.
+	blame := blameRowsByID(s.graph)
 	for _, n := range s.scopedNodesByKinds(ctx, allowedKindsSlice(allowedKinds)) {
-		la, ok := n.Meta["last_authored"].(map[string]any)
-		if !ok {
+		la, ok := lastAuthoredFrom(blame, n)
+		if !ok || la.Timestamp == 0 {
 			continue
 		}
-		ts, ok := la["timestamp"].(int64)
-		if !ok {
-			// JSON unmarshal lands ints as float64 in some paths;
-			// accept both shapes so the analyzer works on graphs
-			// loaded from snapshots and graphs enriched in-process.
-			if f, isFloat := la["timestamp"].(float64); isFloat {
-				ts = int64(f)
-			} else {
-				continue
-			}
-		}
+		ts := la.Timestamp
 		if ts > cutoffSec {
 			continue
 		}
-		email, _ := la["email"].(string)
+		email := la.Email
 		if emailFilter != "" && email != emailFilter {
 			continue
 		}
-		commit, _ := la["commit"].(string)
+		commit := la.Commit
 		ageSec := time.Now().Unix() - ts
 		rows = append(rows, staleRow{
 			ID:        n.ID,
@@ -1170,19 +1161,20 @@ func (s *Server) handleAnalyzeOwnership(ctx context.Context, req mcp.CallToolReq
 	// Kind pushdown — owners are derived from the blame meta on
 	// function/method (or wider) nodes; the analyzer scans tens of
 	// thousands of irrelevant nodes without it on a disk backend.
+	ownBlame := blameRowsByID(s.graph)
 	for _, n := range s.scopedNodesByKinds(ctx, allowedKindsSlice(allowedKinds)) {
 		if pathPrefix != "" && !strings.HasPrefix(n.FilePath, pathPrefix) {
 			continue
 		}
-		la, ok := n.Meta["last_authored"].(map[string]any)
+		la, ok := lastAuthoredFrom(ownBlame, n)
 		if !ok {
 			continue
 		}
-		email, _ := la["email"].(string)
+		email := la.Email
 		if email == "" {
 			continue
 		}
-		ts := tsFromMeta(la["timestamp"])
+		ts := la.Timestamp
 		if ts == 0 {
 			continue
 		}
@@ -1432,6 +1424,7 @@ func (s *Server) handleAnalyzeStaleFlags(ctx context.Context, req mcp.CallToolRe
 	// was pure overhead. The caller batch below still does per-
 	// flag GetInEdges; pushing that into a single query join is a
 	// separate follow-up since the join semantics differ per flag.
+	flagBlame := blameRowsByID(s.graph)
 	for _, n := range s.scopedNodesByKinds(ctx, []graph.NodeKind{graph.KindFlag}) {
 		provider, _ := n.Meta["provider"].(string)
 		if providerFilter != "" && provider != providerFilter {
@@ -1465,11 +1458,11 @@ func (s *Server) handleAnalyzeStaleFlags(ctx context.Context, req mcp.CallToolRe
 			if caller == nil {
 				continue
 			}
-			la, ok := caller.Meta["last_authored"].(map[string]any)
+			la, ok := lastAuthoredFrom(flagBlame, caller)
 			if !ok {
 				continue
 			}
-			ts := tsFromMeta(la["timestamp"])
+			ts := la.Timestamp
 			if ts == 0 {
 				continue
 			}
@@ -3901,4 +3894,45 @@ func addedInFrom(rel map[string]string, n *graph.Node) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+// blameRowsByID batch-loads the blame sidecar (change A) into an
+// id->row map; nil when the backend lacks the capability.
+func blameRowsByID(g graph.Store) map[string]graph.BlameEnrichment {
+	r, ok := g.(graph.BlameEnrichmentReader)
+	if !ok {
+		return nil
+	}
+	rows := r.BlameRows("")
+	m := make(map[string]graph.BlameEnrichment, len(rows))
+	for _, e := range rows {
+		m[e.NodeID] = e
+	}
+	return m
+}
+
+// lastAuthoredFrom returns a node's blame, preferring the sidecar map and
+// falling back to Meta["last_authored"] for un-migrated DBs.
+func lastAuthoredFrom(blame map[string]graph.BlameEnrichment, n *graph.Node) (graph.BlameEnrichment, bool) {
+	if e, ok := blame[n.ID]; ok {
+		return e, true
+	}
+	if n.Meta != nil {
+		if la, ok := n.Meta["last_authored"].(map[string]any); ok {
+			e := graph.BlameEnrichment{NodeID: n.ID}
+			e.Commit, _ = la["commit"].(string)
+			e.Email, _ = la["email"].(string)
+			e.Timestamp = tsFromMeta(la["timestamp"])
+			return e, true
+		}
+	}
+	return graph.BlameEnrichment{}, false
+}
+
+// lastAuthoredTSFrom is the timestamp-only convenience over lastAuthoredFrom.
+func lastAuthoredTSFrom(blame map[string]graph.BlameEnrichment, n *graph.Node) (int64, bool) {
+	if e, ok := lastAuthoredFrom(blame, n); ok && e.Timestamp != 0 {
+		return e.Timestamp, true
+	}
+	return 0, false
 }

@@ -238,6 +238,8 @@ func EnrichGraph(g graph.Store, repoRoot string) (int, error) {
 	// the symbol-node Meta was being dropped.) Mirrors the reach index,
 	// coverage, and releases enrichers.
 	var stamped []*graph.Node
+	blameWriter, useBlameSidecar := g.(graph.BlameEnrichmentWriter)
+	var blameRows []graph.BlameEnrichment
 	// Person nodes are deduplicated within this enrichment pass.
 	// IDs are repo-scoped: in multi-repo mode the same email touching
 	// two repos becomes two distinct KindTeam nodes so per-repo
@@ -253,15 +255,23 @@ func EnrichGraph(g graph.Store, repoRoot string) (int, error) {
 			if latest == nil {
 				continue
 			}
-			if n.Meta == nil {
-				n.Meta = map[string]any{}
+			if useBlameSidecar {
+				blameRows = append(blameRows, graph.BlameEnrichment{
+					NodeID: n.ID, RepoPrefix: n.RepoPrefix,
+					Commit: latest.Commit, Email: latest.Email,
+					Timestamp: latest.Timestamp.Unix(),
+				})
+			} else {
+				if n.Meta == nil {
+					n.Meta = map[string]any{}
+				}
+				n.Meta["last_authored"] = map[string]any{
+					"commit":    latest.Commit,
+					"email":     latest.Email,
+					"timestamp": latest.Timestamp.Unix(),
+				}
+				stamped = append(stamped, n)
 			}
-			n.Meta["last_authored"] = map[string]any{
-				"commit":    latest.Commit,
-				"email":     latest.Email,
-				"timestamp": latest.Timestamp.Unix(),
-			}
-			stamped = append(stamped, n)
 			enriched++
 
 			if latest.Email == "" {
@@ -307,7 +317,17 @@ func EnrichGraph(g graph.Store, repoRoot string) (int, error) {
 	// Persist the symbol-node last_authored stamps in one batch (the
 	// durable write on disk backends; an idempotent re-insert on the
 	// in-memory backend).
-	if len(stamped) > 0 {
+	if useBlameSidecar && len(blameRows) > 0 {
+		byPrefix := map[string][]graph.BlameEnrichment{}
+		for _, r := range blameRows {
+			byPrefix[r.RepoPrefix] = append(byPrefix[r.RepoPrefix], r)
+		}
+		for prefix, rr := range byPrefix {
+			if err := blameWriter.BulkSetBlame(prefix, rr); err != nil {
+				return enriched, fmt.Errorf("blame: persist sidecar: %w", err)
+			}
+		}
+	} else if len(stamped) > 0 {
 		g.AddBatch(stamped, nil)
 	}
 	return enriched, nil

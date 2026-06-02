@@ -490,6 +490,10 @@ type Graph struct {
 	// releaseEnrich is the in-memory release-enrichment sidecar.
 	releaseEnrichMu sync.Mutex
 	releaseEnrich   map[string]ReleaseEnrichment
+
+	// blameEnrich is the in-memory blame-enrichment sidecar.
+	blameEnrichMu sync.Mutex
+	blameEnrich   map[string]BlameEnrichment
 }
 
 // cloneShingleEntry is one in-memory clone_shingles row: the owning
@@ -509,6 +513,10 @@ var (
 	_ ChurnEnrichmentReader    = (*Graph)(nil)
 	_ CoverageEnrichmentWriter = (*Graph)(nil)
 	_ CoverageEnrichmentReader = (*Graph)(nil)
+	_ ReleaseEnrichmentWriter  = (*Graph)(nil)
+	_ ReleaseEnrichmentReader  = (*Graph)(nil)
+	_ BlameEnrichmentWriter    = (*Graph)(nil)
+	_ BlameEnrichmentReader    = (*Graph)(nil)
 	_ ReleaseEnrichmentWriter  = (*Graph)(nil)
 	_ ReleaseEnrichmentReader  = (*Graph)(nil)
 )
@@ -735,6 +743,52 @@ func (g *Graph) ReleaseRows(repoPrefix string) []ReleaseEnrichment {
 	defer g.releaseEnrichMu.Unlock()
 	out := make([]ReleaseEnrichment, 0, len(g.releaseEnrich))
 	for _, r := range g.releaseEnrich {
+		if repoPrefix != "" && r.RepoPrefix != repoPrefix {
+			continue
+		}
+		out = append(out, r)
+	}
+	return out
+}
+
+// BulkSetBlame is the in-memory BlameEnrichmentWriter.
+func (g *Graph) BulkSetBlame(repoPrefix string, rows []BlameEnrichment) error {
+	if len(rows) == 0 {
+		return nil
+	}
+	g.blameEnrichMu.Lock()
+	defer g.blameEnrichMu.Unlock()
+	if g.blameEnrich == nil {
+		g.blameEnrich = make(map[string]BlameEnrichment, len(rows))
+	}
+	for _, r := range rows {
+		r.RepoPrefix = repoPrefix
+		g.blameEnrich[r.NodeID] = r
+	}
+	return nil
+}
+
+// DeleteBlame is the in-memory BlameEnrichmentWriter delete side.
+func (g *Graph) DeleteBlame(nodeIDs []string) error {
+	if len(nodeIDs) == 0 {
+		return nil
+	}
+	g.blameEnrichMu.Lock()
+	defer g.blameEnrichMu.Unlock()
+	for _, id := range nodeIDs {
+		if id != "" {
+			delete(g.blameEnrich, id)
+		}
+	}
+	return nil
+}
+
+// BlameRows reads blame rows; empty repoPrefix returns all.
+func (g *Graph) BlameRows(repoPrefix string) []BlameEnrichment {
+	g.blameEnrichMu.Lock()
+	defer g.blameEnrichMu.Unlock()
+	out := make([]BlameEnrichment, 0, len(g.blameEnrich))
+	for _, r := range g.blameEnrich {
 		if repoPrefix != "" && r.RepoPrefix != repoPrefix {
 			continue
 		}

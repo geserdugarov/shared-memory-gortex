@@ -1034,6 +1034,27 @@ type ReleaseEnrichmentReader interface {
 	ReleaseRows(repoPrefix string) []ReleaseEnrichment
 }
 
+// BlameEnrichment is one node's latest-author enrichment (change A),
+// moved out of nodes.meta. Timestamp is unix seconds.
+type BlameEnrichment struct {
+	NodeID     string
+	RepoPrefix string
+	Commit     string
+	Email      string
+	Timestamp  int64
+}
+
+// BlameEnrichmentWriter persists blame enrichment in a typed sidecar.
+type BlameEnrichmentWriter interface {
+	BulkSetBlame(repoPrefix string, rows []BlameEnrichment) error
+	DeleteBlame(nodeIDs []string) error
+}
+
+// BlameEnrichmentReader reads blame rows; empty repoPrefix → all.
+type BlameEnrichmentReader interface {
+	BlameRows(repoPrefix string) []BlameEnrichment
+}
+
 // EdgesByKindsScanner is an optional capability backends MAY
 // implement to stream every edge whose Kind is in the supplied set,
 // in a single backend round-trip. The fallback iterates AllEdges()

@@ -101,6 +101,7 @@ func RunConformance(t *testing.T, factory Factory) {
 	t.Run("ChurnEnrichmentSidecar", func(t *testing.T) { testChurnEnrichmentSidecar(t, factory) })
 	t.Run("CoverageEnrichmentSidecar", func(t *testing.T) { testCoverageEnrichmentSidecar(t, factory) })
 	t.Run("ReleaseEnrichmentSidecar", func(t *testing.T) { testReleaseEnrichmentSidecar(t, factory) })
+	t.Run("BlameEnrichmentSidecar", func(t *testing.T) { testBlameEnrichmentSidecar(t, factory) })
 }
 
 // -- fixture helpers ---------------------------------------------------
@@ -3595,6 +3596,52 @@ func testReleaseEnrichmentSidecar(t *testing.T, factory Factory) {
 		t.Fatalf("after delete repoA = %d, want 0", len(got))
 	}
 	if got := r.ReleaseRows("repoB"); len(got) != 1 {
+		t.Fatalf("delete must not touch repoB: %d", len(got))
+	}
+}
+
+// testBlameEnrichmentSidecar mirrors the other enrichment sidecars.
+func testBlameEnrichmentSidecar(t *testing.T, factory Factory) {
+	t.Helper()
+	s := factory(t)
+	w, ok := s.(graph.BlameEnrichmentWriter)
+	if !ok {
+		t.Skip("backend does not implement graph.BlameEnrichmentWriter")
+	}
+	r := s.(graph.BlameEnrichmentReader)
+	if err := w.BulkSetBlame("repoA", nil); err != nil {
+		t.Fatalf("BulkSetBlame(nil): %v", err)
+	}
+	if err := w.BulkSetBlame("repoA", []graph.BlameEnrichment{
+		{NodeID: "a.go::Foo", Commit: "abc", Email: "x@y", Timestamp: 1700000000},
+		{NodeID: "a.go::Bar", Commit: "def", Email: "z@y", Timestamp: 1700001000},
+	}); err != nil {
+		t.Fatalf("BulkSetBlame(repoA): %v", err)
+	}
+	if err := w.BulkSetBlame("repoB", []graph.BlameEnrichment{{NodeID: "b.go::Baz", Commit: "ghi", Email: "q@y", Timestamp: 1700002000}}); err != nil {
+		t.Fatalf("BulkSetBlame(repoB): %v", err)
+	}
+	if got := r.BlameRows("repoA"); len(got) != 2 {
+		t.Fatalf("BlameRows(repoA) = %d, want 2", len(got))
+	}
+	if got := r.BlameRows(""); len(got) != 3 {
+		t.Fatalf("BlameRows(all) = %d, want 3", len(got))
+	}
+	byID := map[string]graph.BlameEnrichment{}
+	for _, e := range r.BlameRows("") {
+		byID[e.NodeID] = e
+	}
+	foo := byID["a.go::Foo"]
+	if foo.RepoPrefix != "repoA" || foo.Commit != "abc" || foo.Email != "x@y" || foo.Timestamp != 1700000000 {
+		t.Fatalf("round-trip mismatch: %+v", foo)
+	}
+	if err := w.DeleteBlame([]string{"a.go::Foo", "a.go::Bar"}); err != nil {
+		t.Fatalf("DeleteBlame: %v", err)
+	}
+	if got := r.BlameRows("repoA"); len(got) != 0 {
+		t.Fatalf("after delete repoA = %d, want 0", len(got))
+	}
+	if got := r.BlameRows("repoB"); len(got) != 1 {
 		t.Fatalf("delete must not touch repoB: %d", len(got))
 	}
 }

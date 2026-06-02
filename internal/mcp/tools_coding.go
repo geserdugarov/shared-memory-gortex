@@ -1956,6 +1956,15 @@ func (s *Server) handleSmartContext(ctx context.Context, req mcp.CallToolRequest
 	}
 	result["files_to_edit"] = filesToEdit
 
+	// 9. Fused blast radius — computed for every call, not just when an
+	// entry point is named. Groups the working set's callers by their
+	// source file and lists the tests that cover the working set via
+	// the exact EdgeTests inverse walk, so an agent sees what its edit
+	// can break and what guards it before it touches a line.
+	if br := s.buildBlastRadius(ctx, relevantSymbols); br != nil {
+		result["blast_radius"] = br
+	}
+
 	// Pack-root dedup: hash the assembled context pack. When the
 	// caller passes back the pack root it already holds and nothing
 	// the pack covers has changed, return not_modified instead of
@@ -1973,6 +1982,103 @@ func (s *Server) handleSmartContext(ctx context.Context, req mcp.CallToolRequest
 		return returnTOON(result)
 	}
 	return s.respondJSONOrTOON(ctx, req, result)
+}
+
+// buildBlastRadius assembles the always-on blast-radius block for a
+// smart_context working set: callers grouped by their source file and
+// the tests that cover the set. Callers come from a one-hop GetCallers
+// walk; covering tests come from the exact EdgeTests inverse walk
+// (Engine.GetTesters) — the same edge get_test_targets trusts — not the
+// path-name heuristic. Every list is sorted so the block is byte-stable
+// and feeds a deterministic pack root. Returns nil when there is no
+// graph/engine to walk.
+func (s *Server) buildBlastRadius(ctx context.Context, workingSet []*graph.Node) map[string]any {
+	eng := s.engineFor(ctx)
+	if eng == nil || s.graph == nil || len(workingSet) == 0 {
+		return nil
+	}
+
+	// Callers grouped by the file each caller lives in.
+	callersByFile := make(map[string]map[string]bool)
+	for _, sym := range workingSet {
+		if sym == nil {
+			continue
+		}
+		callers := eng.GetCallers(sym.ID, query.QueryOptions{Depth: 1, Limit: ringScanLimit, Detail: "brief"})
+		for _, cn := range callers.Nodes {
+			if cn.ID == sym.ID || cn.Kind == graph.KindFile {
+				continue
+			}
+			set, ok := callersByFile[cn.FilePath]
+			if !ok {
+				set = make(map[string]bool)
+				callersByFile[cn.FilePath] = set
+			}
+			set[cn.ID] = true
+		}
+	}
+	callerFiles := make([]string, 0, len(callersByFile))
+	for f := range callersByFile {
+		callerFiles = append(callerFiles, f)
+	}
+	sort.Strings(callerFiles)
+	callerGroups := make([]map[string]any, 0, len(callerFiles))
+	for _, f := range callerFiles {
+		ids := make([]string, 0, len(callersByFile[f]))
+		for id := range callersByFile[f] {
+			ids = append(ids, id)
+		}
+		sort.Strings(ids)
+		callerGroups = append(callerGroups, map[string]any{
+			"file":    f,
+			"callers": ids,
+		})
+	}
+
+	// Covering tests via the exact EdgeTests inverse walk.
+	type testRef struct{ file, function string }
+	testSeen := make(map[string]bool)
+	var tests []testRef
+	anyTesters := false
+	for _, sym := range workingSet {
+		if sym == nil {
+			continue
+		}
+		for _, tn := range eng.GetTesters(sym.ID) {
+			if tn == nil {
+				continue
+			}
+			anyTesters = true
+			key := tn.FilePath + "\x1f" + tn.Name
+			if testSeen[key] {
+				continue
+			}
+			testSeen[key] = true
+			tests = append(tests, testRef{file: tn.FilePath, function: tn.Name})
+		}
+	}
+	sort.Slice(tests, func(i, j int) bool {
+		if tests[i].file != tests[j].file {
+			return tests[i].file < tests[j].file
+		}
+		return tests[i].function < tests[j].function
+	})
+	coveringTests := make([]map[string]any, 0, len(tests))
+	for _, tr := range tests {
+		coveringTests = append(coveringTests, map[string]any{
+			"file":     tr.file,
+			"function": tr.function,
+		})
+	}
+
+	br := map[string]any{
+		"callers_by_file": callerGroups,
+		"covering_tests":  coveringTests,
+	}
+	if !anyTesters {
+		br["warning"] = "no covering tests found"
+	}
+	return br
 }
 
 // extractKeywords splits a task description into searchable keywords.

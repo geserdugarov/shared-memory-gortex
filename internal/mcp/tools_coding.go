@@ -1610,7 +1610,18 @@ func (s *Server) handleSmartContext(ctx context.Context, req mcp.CallToolRequest
 	}
 
 	entryPoint := req.GetString("entry_point", "")
+	// Seed count defaults adaptively to repo size — req.GetInt can't
+	// tell an absent argument from an explicit value, so detect
+	// presence on the raw arguments map and only scale when the caller
+	// left it out.
 	maxSymbols := req.GetInt("max_symbols", 5)
+	if _, present := req.GetArguments()["max_symbols"]; !present {
+		nodes := 0
+		if s.graph != nil {
+			nodes = s.graph.NodeCount()
+		}
+		maxSymbols = smartContextSeedCount(nodes)
+	}
 	graded := req.GetString("fidelity", "") == "graded"
 
 	result := map[string]any{

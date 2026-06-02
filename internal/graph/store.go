@@ -992,6 +992,29 @@ type ChurnEnrichmentReader interface {
 	ChurnRows(repoPrefix string) []ChurnEnrichment
 }
 
+// CoverageEnrichment is one node's coverage enrichment (change A),
+// moved out of nodes.meta into a typed sidecar.
+type CoverageEnrichment struct {
+	NodeID      string
+	RepoPrefix  string
+	CoveragePct float64
+	NumStmt     int
+	Hit         int
+}
+
+// CoverageEnrichmentWriter persists coverage enrichment in a typed
+// sidecar. Optional capability; absent → enricher falls back to Meta.
+type CoverageEnrichmentWriter interface {
+	BulkSetCoverage(repoPrefix string, rows []CoverageEnrichment) error
+	DeleteCoverage(nodeIDs []string) error
+}
+
+// CoverageEnrichmentReader reads coverage rows; empty repoPrefix returns
+// ALL rows across repos.
+type CoverageEnrichmentReader interface {
+	CoverageRows(repoPrefix string) []CoverageEnrichment
+}
+
 // EdgesByKindsScanner is an optional capability backends MAY
 // implement to stream every edge whose Kind is in the supplied set,
 // in a single backend round-trip. The fallback iterates AllEdges()

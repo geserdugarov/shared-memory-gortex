@@ -193,6 +193,8 @@ func EnrichGraph(g graph.Store, segments []Segment, modulePath string) int {
 	// the reach index, which already round-trip Meta through
 	// AddNode/AddBatch.
 	var stamped []*graph.Node
+	covWriter, useCovSidecar := g.(graph.CoverageEnrichmentWriter)
+	var covRows []graph.CoverageEnrichment
 	for _, n := range g.AllNodes() {
 		if !shouldEnrichCoverage(n.Kind) {
 			continue
@@ -218,6 +220,12 @@ func EnrichGraph(g graph.Store, segments []Segment, modulePath string) int {
 			"hit":      stats.Hit,
 		}
 		stamped = append(stamped, n)
+		if useCovSidecar {
+			covRows = append(covRows, graph.CoverageEnrichment{
+				NodeID: n.ID, RepoPrefix: n.RepoPrefix,
+				CoveragePct: pct, NumStmt: stats.NumStmt, Hit: stats.Hit,
+			})
+		}
 		enriched++
 
 		// EdgeCoveredBy: invert each EdgeTests pointing at this
@@ -256,7 +264,32 @@ func EnrichGraph(g graph.Store, segments []Segment, modulePath string) int {
 	// (a no-op-ish re-insert on the in-memory backend, the durable write
 	// on disk backends). Without this the coverage_pct stamps never
 	// survive on the disk backend.
-	if len(stamped) > 0 {
+	// Persist coverage. Prefer the typed sidecar (change A); on success
+	// strip the Meta stamps so the node blob stays lean and skip the
+	// AddBatch. On sidecar write failure, fall back to persisting Meta via
+	// AddBatch so coverage is never lost (the readers' Meta fallback then
+	// serves it).
+	if useCovSidecar && len(covRows) > 0 {
+		persisted := true
+		byPrefix := map[string][]graph.CoverageEnrichment{}
+		for _, r := range covRows {
+			byPrefix[r.RepoPrefix] = append(byPrefix[r.RepoPrefix], r)
+		}
+		for prefix, rr := range byPrefix {
+			if err := covWriter.BulkSetCoverage(prefix, rr); err != nil {
+				persisted = false
+				break
+			}
+		}
+		if persisted {
+			for _, n := range stamped {
+				delete(n.Meta, "coverage_pct")
+				delete(n.Meta, "coverage")
+			}
+		} else if len(stamped) > 0 {
+			g.AddBatch(stamped, nil)
+		}
+	} else if len(stamped) > 0 {
 		g.AddBatch(stamped, nil)
 	}
 	return enriched

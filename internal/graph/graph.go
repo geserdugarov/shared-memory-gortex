@@ -482,6 +482,10 @@ type Graph struct {
 	// churnEnrich is the in-memory churn-enrichment sidecar (change A).
 	churnEnrichMu sync.Mutex
 	churnEnrich   map[string]ChurnEnrichment
+
+	// coverageEnrich is the in-memory coverage-enrichment sidecar.
+	coverageEnrichMu sync.Mutex
+	coverageEnrich   map[string]CoverageEnrichment
 }
 
 // cloneShingleEntry is one in-memory clone_shingles row: the owning
@@ -495,10 +499,12 @@ type cloneShingleEntry struct {
 // optional per-symbol clone-shingle persistence capabilities, so the
 // conformance suite exercises the same code path against both backends.
 var (
-	_ CloneShingleWriter    = (*Graph)(nil)
-	_ CloneShingleReader    = (*Graph)(nil)
-	_ ChurnEnrichmentWriter = (*Graph)(nil)
-	_ ChurnEnrichmentReader = (*Graph)(nil)
+	_ CloneShingleWriter       = (*Graph)(nil)
+	_ CloneShingleReader       = (*Graph)(nil)
+	_ ChurnEnrichmentWriter    = (*Graph)(nil)
+	_ ChurnEnrichmentReader    = (*Graph)(nil)
+	_ CoverageEnrichmentWriter = (*Graph)(nil)
+	_ CoverageEnrichmentReader = (*Graph)(nil)
 )
 
 // New creates an empty graph.
@@ -631,6 +637,52 @@ func (g *Graph) ChurnRows(repoPrefix string) []ChurnEnrichment {
 	defer g.churnEnrichMu.Unlock()
 	out := make([]ChurnEnrichment, 0, len(g.churnEnrich))
 	for _, r := range g.churnEnrich {
+		if repoPrefix != "" && r.RepoPrefix != repoPrefix {
+			continue
+		}
+		out = append(out, r)
+	}
+	return out
+}
+
+// BulkSetCoverage is the in-memory CoverageEnrichmentWriter.
+func (g *Graph) BulkSetCoverage(repoPrefix string, rows []CoverageEnrichment) error {
+	if len(rows) == 0 {
+		return nil
+	}
+	g.coverageEnrichMu.Lock()
+	defer g.coverageEnrichMu.Unlock()
+	if g.coverageEnrich == nil {
+		g.coverageEnrich = make(map[string]CoverageEnrichment, len(rows))
+	}
+	for _, r := range rows {
+		r.RepoPrefix = repoPrefix
+		g.coverageEnrich[r.NodeID] = r
+	}
+	return nil
+}
+
+// DeleteCoverage is the in-memory CoverageEnrichmentWriter delete side.
+func (g *Graph) DeleteCoverage(nodeIDs []string) error {
+	if len(nodeIDs) == 0 {
+		return nil
+	}
+	g.coverageEnrichMu.Lock()
+	defer g.coverageEnrichMu.Unlock()
+	for _, id := range nodeIDs {
+		if id != "" {
+			delete(g.coverageEnrich, id)
+		}
+	}
+	return nil
+}
+
+// ChurnRows-style reader for coverage; empty repoPrefix returns all.
+func (g *Graph) CoverageRows(repoPrefix string) []CoverageEnrichment {
+	g.coverageEnrichMu.Lock()
+	defer g.coverageEnrichMu.Unlock()
+	out := make([]CoverageEnrichment, 0, len(g.coverageEnrich))
+	for _, r := range g.coverageEnrich {
 		if repoPrefix != "" && r.RepoPrefix != repoPrefix {
 			continue
 		}

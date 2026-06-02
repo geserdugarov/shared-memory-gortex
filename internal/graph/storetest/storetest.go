@@ -99,6 +99,7 @@ func RunConformance(t *testing.T, factory Factory) {
 	t.Run("NodeDegreeByKinds", func(t *testing.T) { testNodeDegreeByKinds(t, factory) })
 	t.Run("CloneShingleSidecar", func(t *testing.T) { testCloneShingleSidecar(t, factory) })
 	t.Run("ChurnEnrichmentSidecar", func(t *testing.T) { testChurnEnrichmentSidecar(t, factory) })
+	t.Run("CoverageEnrichmentSidecar", func(t *testing.T) { testCoverageEnrichmentSidecar(t, factory) })
 }
 
 // -- fixture helpers ---------------------------------------------------
@@ -3486,5 +3487,68 @@ func testChurnEnrichmentSidecar(t *testing.T, factory Factory) {
 	}
 	if got := r.ChurnRows("repoB"); len(got) != 1 {
 		t.Fatalf("DeleteChurn must not touch repoB: len = %d, want 1", len(got))
+	}
+}
+
+// testCoverageEnrichmentSidecar mirrors the churn sidecar conformance.
+func testCoverageEnrichmentSidecar(t *testing.T, factory Factory) {
+	t.Helper()
+	s := factory(t)
+	w, ok := s.(graph.CoverageEnrichmentWriter)
+	if !ok {
+		t.Skip("backend does not implement graph.CoverageEnrichmentWriter")
+	}
+	r, ok := s.(graph.CoverageEnrichmentReader)
+	if !ok {
+		t.Skip("backend implements CoverageEnrichmentWriter but not Reader")
+	}
+	if got := r.CoverageRows("repoA"); len(got) != 0 {
+		t.Fatalf("CoverageRows(empty) = %v, want empty", got)
+	}
+	if err := w.BulkSetCoverage("repoA", nil); err != nil {
+		t.Fatalf("BulkSetCoverage(nil): %v", err)
+	}
+	rowsA := []graph.CoverageEnrichment{
+		{NodeID: "a.go::Foo", CoveragePct: 87.5, NumStmt: 8, Hit: 7},
+		{NodeID: "a.go::Bar", CoveragePct: 0, NumStmt: 3, Hit: 0},
+	}
+	rowsB := []graph.CoverageEnrichment{{NodeID: "b.go::Baz", CoveragePct: 100, NumStmt: 1, Hit: 1}}
+	if err := w.BulkSetCoverage("repoA", rowsA); err != nil {
+		t.Fatalf("BulkSetCoverage(repoA): %v", err)
+	}
+	if err := w.BulkSetCoverage("repoB", rowsB); err != nil {
+		t.Fatalf("BulkSetCoverage(repoB): %v", err)
+	}
+	if got := r.CoverageRows("repoA"); len(got) != 2 {
+		t.Fatalf("CoverageRows(repoA) = %d, want 2", len(got))
+	}
+	if got := r.CoverageRows(""); len(got) != 3 {
+		t.Fatalf("CoverageRows(all) = %d, want 3", len(got))
+	}
+	byID := map[string]graph.CoverageEnrichment{}
+	for _, e := range r.CoverageRows("") {
+		byID[e.NodeID] = e
+	}
+	foo := byID["a.go::Foo"]
+	if foo.RepoPrefix != "repoA" || foo.CoveragePct != 87.5 || foo.NumStmt != 8 || foo.Hit != 7 {
+		t.Fatalf("round-trip mismatch: %+v", foo)
+	}
+	rowsA[0].CoveragePct = 12.0
+	if err := w.BulkSetCoverage("repoA", rowsA[:1]); err != nil {
+		t.Fatalf("overwrite: %v", err)
+	}
+	for _, e := range r.CoverageRows("repoA") {
+		if e.NodeID == "a.go::Foo" && e.CoveragePct != 12.0 {
+			t.Fatalf("overwrite failed: %v", e.CoveragePct)
+		}
+	}
+	if err := w.DeleteCoverage([]string{"a.go::Foo", "a.go::Bar"}); err != nil {
+		t.Fatalf("DeleteCoverage: %v", err)
+	}
+	if got := r.CoverageRows("repoA"); len(got) != 0 {
+		t.Fatalf("after delete repoA = %d, want 0", len(got))
+	}
+	if got := r.CoverageRows("repoB"); len(got) != 1 {
+		t.Fatalf("delete must not touch repoB: %d", len(got))
 	}
 }

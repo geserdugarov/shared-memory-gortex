@@ -63,11 +63,22 @@ example.test/repo/main.go:11.13,11.16 1 0
 
 	// Spot-check the function node got coverage_pct.
 	hasCovered, hasUncovered := false, false
+	covByID := map[string]float64{}
+	if r, ok := srv.graph.(graph.CoverageEnrichmentReader); ok {
+		for _, e := range r.CoverageRows("") {
+			covByID[e.NodeID] = e.CoveragePct
+		}
+	}
 	for _, n := range srv.graph.AllNodes() {
 		if n.Kind != graph.KindFunction {
 			continue
 		}
-		pct, ok := n.Meta["coverage_pct"].(float64)
+		pct, ok := covByID[n.ID]
+		if !ok {
+			if p, has := n.Meta["coverage_pct"].(float64); has {
+				pct, ok = p, true
+			}
+		}
 		if !ok {
 			continue
 		}

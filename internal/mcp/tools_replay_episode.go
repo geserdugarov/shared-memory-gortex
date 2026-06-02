@@ -251,13 +251,14 @@ func (s *Server) replayCoverageGaps(radius map[string]int, limit int) []replayCo
 		ids = append(ids, id)
 	}
 	nodeByID := s.graph.GetNodesByIDs(ids)
+	covRows := s.coverageByID()
 	rows := make([]replayCoverageRow, 0)
 	for id := range radius {
 		n := nodeByID[id]
 		if n == nil {
 			continue
 		}
-		pct, has := n.Meta["coverage_pct"].(float64)
+		pct, has := coveragePctFrom(covRows, n)
 		if has && pct >= 100.0 {
 			continue
 		}

@@ -1309,13 +1309,14 @@ func (s *Server) handleAnalyzeCoverageGaps(ctx context.Context, req mcp.CallTool
 		Hit     int     `json:"hit"`
 	}
 	var rows []gapRow
+	covRows := s.coverageByID()
 	// Kind pushdown — coverage_pct only ever lands on executable
 	// kinds, so the IN-list IS the candidate set.
 	for _, n := range s.scopedNodesByKinds(ctx, allowedKindsSlice(allowedKinds)) {
 		if pathPrefix != "" && !strings.HasPrefix(n.FilePath, pathPrefix) {
 			continue
 		}
-		pct, ok := n.Meta["coverage_pct"].(float64)
+		pct, ok := coveragePctFrom(covRows, n)
 		if !ok {
 			continue
 		}
@@ -1328,7 +1329,10 @@ func (s *Server) handleAnalyzeCoverageGaps(ctx context.Context, req mcp.CallTool
 			Line: n.StartLine,
 			Pct:  pct,
 		}
-		if cov, ok := n.Meta["coverage"].(map[string]any); ok {
+		if e, ok := covRows[n.ID]; ok {
+			row.NumStmt = e.NumStmt
+			row.Hit = e.Hit
+		} else if cov, ok := n.Meta["coverage"].(map[string]any); ok {
 			if v, ok := cov["num_stmt"].(int); ok {
 				row.NumStmt = v
 			} else if f, ok := cov["num_stmt"].(float64); ok {
@@ -1724,13 +1728,14 @@ func (s *Server) handleAnalyzeCoverageSummary(ctx context.Context, req mcp.CallT
 		sumPct float64 // running sum, hidden from JSON
 	}
 	byDir := map[string]*dirStats{}
+	covRows := s.coverageByID()
 
 	// Kind pushdown — coverage_pct only lives on executable kinds.
 	for _, n := range s.scopedNodesByKinds(ctx, allowedKindsSlice(allowedKinds)) {
 		if pathPrefix != "" && !strings.HasPrefix(n.FilePath, pathPrefix) {
 			continue
 		}
-		pct, ok := n.Meta["coverage_pct"].(float64)
+		pct, ok := coveragePctFrom(covRows, n)
 		if !ok {
 			continue
 		}
@@ -3837,4 +3842,32 @@ func (s *Server) handleAuditAgentConfig(ctx context.Context, req mcp.CallToolReq
 	}
 
 	return s.respondJSONOrTOON(ctx, req, report)
+}
+
+// coverageByID batch-loads the coverage sidecar (change A) into an
+// id->row map; nil when the backend lacks the capability (callers then
+// fall back to Node.Meta). One read per handler call, not per-node.
+func (s *Server) coverageByID() map[string]graph.CoverageEnrichment {
+	r, ok := s.graph.(graph.CoverageEnrichmentReader)
+	if !ok {
+		return nil
+	}
+	rows := r.CoverageRows("")
+	m := make(map[string]graph.CoverageEnrichment, len(rows))
+	for _, e := range rows {
+		m[e.NodeID] = e
+	}
+	return m
+}
+
+// coveragePctFrom returns a node's coverage %, preferring the sidecar map
+// and falling back to Meta["coverage_pct"] for un-migrated DBs.
+func coveragePctFrom(cov map[string]graph.CoverageEnrichment, n *graph.Node) (float64, bool) {
+	if e, ok := cov[n.ID]; ok {
+		return e.CoveragePct, true
+	}
+	if pct, ok := n.Meta["coverage_pct"].(float64); ok {
+		return pct, true
+	}
+	return 0, false
 }

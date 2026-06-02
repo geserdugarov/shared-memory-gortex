@@ -218,6 +218,7 @@ func (s *Server) handleAnalyzeHealthScore(ctx context.Context, req mcp.CallToolR
 
 	now := time.Now()
 
+	covRows := s.coverageByID()
 	rows := make([]healthScoreRow, 0, 128)
 	for _, n := range scoped {
 		if n == nil {
@@ -243,7 +244,7 @@ func (s *Server) handleAnalyzeHealthScore(ctx context.Context, req mcp.CallToolR
 
 		// Coverage axis — direct mapping (coverage_pct is already
 		// 0..100, higher is healthier).
-		if pct, ok := n.Meta["coverage_pct"].(float64); ok {
+		if pct, ok := coveragePctFrom(covRows, n); ok {
 			covHealth := clamp01(pct)
 			row.CoveragePct = &covHealth
 			weighted += covHealth * healthWeightCoverage

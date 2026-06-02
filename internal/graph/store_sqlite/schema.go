@@ -122,6 +122,17 @@ CREATE TABLE IF NOT EXISTS churn_enrichment (
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS churn_by_repo ON churn_enrichment(repo_prefix) WHERE repo_prefix <> '';
 
+-- coverage_enrichment: per-symbol coverage sidecar (change A). Typed
+-- columns keyed by node_id; repo_prefix scopes per-repo wipes.
+CREATE TABLE IF NOT EXISTS coverage_enrichment (
+    node_id      TEXT PRIMARY KEY,
+    repo_prefix  TEXT NOT NULL DEFAULT '',
+    coverage_pct REAL NOT NULL DEFAULT 0,
+    num_stmt     INTEGER NOT NULL DEFAULT 0,
+    hit          INTEGER NOT NULL DEFAULT 0
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS coverage_by_repo ON coverage_enrichment(repo_prefix) WHERE repo_prefix <> '';
+
 -- symbol_fts is the FTS5 full-text index over pre-tokenised symbol
 -- names. It replaces the multi-GB in-heap Bleve/BM25 index with an
 -- on-disk inverted index the SymbolSearcher / SymbolBundleSearcher

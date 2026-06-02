@@ -327,6 +327,7 @@ func (s *Server) collectUntestedHotspots(scoped []*graph.Node, pathPrefix string
 	}
 
 	out := make([]gapUntestedHotspot, 0)
+	covRows := s.coverageByID()
 	for _, c := range candidates {
 		// A "hotspot" with zero callers isn't a hotspot — drop it.
 		// Disconnected functions are already covered by the
@@ -334,7 +335,7 @@ func (s *Server) collectUntestedHotspots(scoped []*graph.Node, pathPrefix string
 		if c.fanIn == 0 {
 			continue
 		}
-		pct, has := c.node.Meta["coverage_pct"].(float64)
+		pct, has := coveragePctFrom(covRows, c.node)
 		if has && pct >= minCov {
 			continue
 		}

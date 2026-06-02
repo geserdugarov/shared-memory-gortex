@@ -107,6 +107,16 @@ type Controller interface {
 	// daemon's in-process graph. Same routing rationale as
 	// EnrichChurn — keeps the on-disk store's write lock with the daemon.
 	EnrichReleases(ctx context.Context, params EnrichReleasesParams) (EnrichReleasesResult, error)
+	// EnrichBlame runs the git-blame authorship enricher against the
+	// daemon's in-process graph. Same routing rationale as EnrichChurn.
+	EnrichBlame(ctx context.Context, params EnrichBlameParams) (EnrichBlameResult, error)
+	// EnrichCoverage projects pre-parsed Go cover-profile segments onto
+	// the daemon's in-process graph. The CLI parses the profile so the
+	// daemon never reads the caller's filesystem.
+	EnrichCoverage(ctx context.Context, params EnrichCoverageParams) (EnrichCoverageResult, error)
+	// EnrichCochange mines co-change edges against the daemon's
+	// in-process graph. Same routing rationale as EnrichChurn.
+	EnrichCochange(ctx context.Context, params EnrichCochangeParams) (EnrichCochangeResult, error)
 	// Shutdown is invoked via the control surface and should return
 	// quickly; the daemon's actual shutdown work happens after the
 	// response is written.
@@ -555,6 +565,51 @@ func (s *Server) handleControl(_ *Session, req ControlRequest) ControlResponse {
 		buf, err := json.Marshal(result)
 		if err != nil {
 			return controlErr(ErrInternal, "marshal enrich_releases result: "+err.Error())
+		}
+		return ControlResponse{OK: true, Result: buf}
+
+	case ControlEnrichBlame:
+		var p EnrichBlameParams
+		if err := unmarshalParams(req.Params, &p); err != nil {
+			return controlErr(ErrInternal, err.Error())
+		}
+		result, err := s.Controller.EnrichBlame(ctx, p)
+		if err != nil {
+			return controlErr(ErrInternal, err.Error())
+		}
+		buf, err := json.Marshal(result)
+		if err != nil {
+			return controlErr(ErrInternal, "marshal enrich_blame result: "+err.Error())
+		}
+		return ControlResponse{OK: true, Result: buf}
+
+	case ControlEnrichCoverage:
+		var p EnrichCoverageParams
+		if err := unmarshalParams(req.Params, &p); err != nil {
+			return controlErr(ErrInternal, err.Error())
+		}
+		result, err := s.Controller.EnrichCoverage(ctx, p)
+		if err != nil {
+			return controlErr(ErrInternal, err.Error())
+		}
+		buf, err := json.Marshal(result)
+		if err != nil {
+			return controlErr(ErrInternal, "marshal enrich_coverage result: "+err.Error())
+		}
+		return ControlResponse{OK: true, Result: buf}
+
+	case ControlEnrichCochange:
+		var p EnrichCochangeParams
+		if err := unmarshalParams(req.Params, &p); err != nil {
+			return controlErr(ErrInternal, err.Error())
+		}
+		result, err := s.Controller.EnrichCochange(ctx, p)
+		if err != nil {
+			return controlErr(ErrInternal, err.Error())
+		}
+		buf, err := json.Marshal(result)
+		if err != nil {
+			return controlErr(ErrInternal, "marshal enrich_cochange result: "+err.Error())
 		}
 		return ControlResponse{OK: true, Result: buf}
 	}

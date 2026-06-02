@@ -101,6 +101,18 @@ const (
 	// enrichment to the daemon when one is up so the write lock stays
 	// uncontested.
 	ControlEnrichReleases = "enrich_releases"
+	// ControlEnrichBlame dispatches to Controller.EnrichBlame — git-blame
+	// authorship stamping against the daemon's in-process graph. Same
+	// routing rationale as ControlEnrichChurn.
+	ControlEnrichBlame = "enrich_blame"
+	// ControlEnrichCoverage dispatches to Controller.EnrichCoverage —
+	// Go cover-profile projection onto the daemon's in-process graph.
+	// The CLI parses the profile and hands the raw segments to the
+	// daemon so the daemon never has to read the caller's filesystem.
+	ControlEnrichCoverage = "enrich_coverage"
+	// ControlEnrichCochange dispatches to Controller.EnrichCochange —
+	// co-change edge mining against the daemon's in-process graph.
+	ControlEnrichCochange = "enrich_cochange"
 )
 
 // TrackParams is the payload for ControlTrack.
@@ -292,6 +304,73 @@ type EnrichReleasesResult struct {
 	Files      int    `json:"files"`
 	Branch     string `json:"branch,omitempty"`
 	DurationMS int64  `json:"duration_ms"`
+}
+
+// EnrichBlameParams is the payload for ControlEnrichBlame.
+//
+// Path scopes the enrichment to a single tracked repo (matched by
+// prefix, abs path, or "" for "every tracked repo").
+type EnrichBlameParams struct {
+	Path string `json:"path,omitempty"`
+}
+
+// EnrichBlameResult is the payload returned under Result for a
+// successful ControlEnrichBlame call. Nodes is the count of symbol /
+// file nodes stamped with meta.last_authored across every repo that
+// participated.
+type EnrichBlameResult struct {
+	Nodes      int   `json:"nodes"`
+	DurationMS int64 `json:"duration_ms"`
+}
+
+// EnrichCoverageSegment mirrors coverage.Segment on the wire so the
+// CLI can parse the cover profile against its own filesystem (the
+// profile path is relative to the caller, not the daemon) and hand the
+// parsed segments to the daemon. Field shape matches coverage.Segment
+// exactly.
+type EnrichCoverageSegment struct {
+	File      string `json:"file"`
+	StartLine int    `json:"start_line"`
+	EndLine   int    `json:"end_line"`
+	NumStmt   int    `json:"num_stmt"`
+	Count     int    `json:"count"`
+}
+
+// EnrichCoverageParams is the payload for ControlEnrichCoverage.
+//
+// Path scopes the enrichment to a single tracked repo (matched by
+// prefix, abs path, or "" for "every tracked repo"). Segments are the
+// pre-parsed cover-profile entries; the CLI parses the profile so the
+// daemon never has to read the caller's filesystem.
+type EnrichCoverageParams struct {
+	Path     string                  `json:"path,omitempty"`
+	Segments []EnrichCoverageSegment `json:"segments"`
+}
+
+// EnrichCoverageResult is the payload returned under Result for a
+// successful ControlEnrichCoverage call. Symbols is the count of nodes
+// stamped with meta.coverage_pct across every repo that participated;
+// Segments echoes how many profile segments were supplied.
+type EnrichCoverageResult struct {
+	Symbols    int   `json:"symbols"`
+	Segments   int   `json:"segments"`
+	DurationMS int64 `json:"duration_ms"`
+}
+
+// EnrichCochangeParams is the payload for ControlEnrichCochange.
+//
+// Path scopes the enrichment to a single tracked repo (matched by
+// prefix, abs path, or "" for "every tracked repo").
+type EnrichCochangeParams struct {
+	Path string `json:"path,omitempty"`
+}
+
+// EnrichCochangeResult is the payload returned under Result for a
+// successful ControlEnrichCochange call. Edges is the count of
+// co_change edges added across every repo that participated.
+type EnrichCochangeResult struct {
+	Edges      int   `json:"edges"`
+	DurationMS int64 `json:"duration_ms"`
 }
 
 // TrackedRepoStatus is one row in StatusResponse.TrackedRepos.

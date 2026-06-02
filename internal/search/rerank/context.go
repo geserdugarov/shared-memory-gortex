@@ -26,6 +26,16 @@ type Context struct {
 	// search_symbols query_class argument — may pin it instead.
 	QueryClass QueryClass
 
+	// Alpha, when > 0, switches the bm25/semantic weight scaling from
+	// the discrete per-class classWeightTable to the continuous
+	// interpolation continuousClassMultiplier(Alpha, …). Callers set
+	// it to AlphaForContinuous(query) so a half-identifier query gets
+	// an in-between blend instead of a hard class bucket. The zero
+	// value preserves the legacy discrete behaviour, so any caller
+	// that does not opt in (and every direct-Rerank test) is
+	// unaffected.
+	Alpha float64
+
 	// CommunityOf maps a node ID to its detected community ID. When
 	// nil, the community signal contributes 0.
 	CommunityOf func(nodeID string) string

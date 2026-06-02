@@ -1220,6 +1220,7 @@ func (s *Server) handleSearchSymbols(ctx context.Context, req mcp.CallToolReques
 	// gating uses the same validated value the rerank below uses;
 	// invalid input is rejected before the engine runs.
 	queryClass := rerank.ClassifyQuery(q)
+	qcPinned := false
 	if qcArg := strings.TrimSpace(req.GetString("query_class", "")); qcArg != "" {
 		parsed, ok := rerank.ParseQueryClass(qcArg)
 		if !ok {
@@ -1227,6 +1228,7 @@ func (s *Server) handleSearchSymbols(ctx context.Context, req mcp.CallToolReques
 		}
 		if parsed != rerank.QueryClassUnknown {
 			queryClass = parsed
+			qcPinned = true
 		}
 	}
 	identifierFastPath := !isSoup && isIdentifierClass(queryClass)
@@ -1411,6 +1413,14 @@ func (s *Server) handleSearchSymbols(ctx context.Context, req mcp.CallToolReques
 	}
 	if rctx != nil {
 		rctx.QueryClass = queryClass
+		// Continuous α lever: when the class was auto-detected — not
+		// pinned by the caller and not a keyword-soup (which keeps its
+		// discrete split-disjunct treatment) — score the bm25↔semantic
+		// balance on a continuous query-shape axis instead of snapping
+		// to a discrete class bucket.
+		if !qcPinned && !isSoup {
+			rctx.Alpha = rerank.AlphaForContinuous(q)
+		}
 	}
 	candsAfterFilter := len(nodes)
 	// Capture the post-filter candidate ID set so we can ask the rctx

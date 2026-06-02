@@ -124,7 +124,16 @@ func (p *Pipeline) Rerank(query string, cands []*Candidate, ctx *Context) []*Can
 				raw = 1
 			}
 			c.Signals[sig.Name()] = raw
-			total += w * ClassWeightMultiplier(ctx.QueryClass, sig.Name()) * raw
+			// The bm25↔semantic balance uses the continuous α lever
+			// when the caller set Context.Alpha, else the discrete
+			// per-class table. classMult is 1.0 for every other signal.
+			var classMult float64
+			if ctx.Alpha > 0 {
+				classMult = continuousClassMultiplier(ctx.Alpha, sig.Name())
+			} else {
+				classMult = ClassWeightMultiplier(ctx.QueryClass, sig.Name())
+			}
+			total += w * classMult * raw
 		}
 		c.Score = total
 	}

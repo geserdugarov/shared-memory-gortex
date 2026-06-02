@@ -122,6 +122,12 @@ type Context struct {
 	// the candidate set's file count.
 	pathPenaltyCache map[string]float64
 
+	// testNameStems holds the normalised name stems of every test
+	// candidate in the batch (TestValidateToken -> validatetoken).
+	// SourceBiasSignal reads it to promote a production symbol over
+	// its test only when both co-occur in the result set.
+	testNameStems map[string]struct{}
+
 	// outEdgeCache / inEdgeCache hold the per-candidate edge slices
 	// fetched in one batched round-trip from Graph at prepare() time.
 	// FanInSignal / FanOutSignal / MinHashSignal read from these
@@ -285,6 +291,7 @@ func (c *Context) prepare(cands []*Candidate) {
 	c.fileScoreSum = make(map[string]float64, len(cands))
 	c.maxFileScoreSum = 0
 	c.pathPenaltyCache = make(map[string]float64, len(cands))
+	c.testNameStems = make(map[string]struct{}, len(cands))
 	// Preserve the seeded edge caches when the caller signaled
 	// cachePreSeeded; the legacy reset path below the candidate walk
 	// only runs when the caches are NOT authoritative.
@@ -329,6 +336,13 @@ func (c *Context) prepare(cands []*Candidate) {
 				c.fileScoreSum[fp] += w
 				if c.fileScoreSum[fp] > c.maxFileScoreSum {
 					c.maxFileScoreSum = c.fileScoreSum[fp]
+				}
+			}
+			// Record test-candidate name stems so SourceBiasSignal can
+			// detect a co-occurring source/test pair without re-scanning.
+			if isTestPath(fp) {
+				if stem := testNameStem(cand.Node.Name); stem != "" {
+					c.testNameStems[stem] = struct{}{}
 				}
 			}
 		}

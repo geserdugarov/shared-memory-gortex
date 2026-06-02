@@ -190,6 +190,7 @@ func DefaultSignals() []Signal {
 		FileCoherenceSignal{},
 		PathPenaltySignal{},
 		DefinitionBiasSignal{},
+		SourceBiasSignal{},
 	}
 }
 
@@ -224,6 +225,7 @@ func DefaultWeights() map[string]float64 {
 		SignalFileCoherence:  0.30,
 		SignalPathPenalty:    0.40,
 		SignalDefinitionBias: 0.60,
+		SignalSourceBias:     0.25,
 	}
 }
 
@@ -246,6 +248,7 @@ const (
 	SignalFileCoherence  = "file_coherence"
 	SignalPathPenalty    = "path_penalty"
 	SignalDefinitionBias = "definition_bias"
+	SignalSourceBias     = "source_bias"
 )
 
 // AllSignalNames lists every canonical signal name. Useful for config
@@ -268,5 +271,6 @@ func AllSignalNames() []string {
 		SignalFileCoherence,
 		SignalPathPenalty,
 		SignalDefinitionBias,
+		SignalSourceBias,
 	}
 }

@@ -164,6 +164,10 @@ func (e *SwiftExtractor) Extract(filePath string, src []byte) (*parser.Extractio
 		})
 	}
 
+	// Expo Modules native DSL (Name/Function/AsyncFunction) → synthetic
+	// JS-callable method nodes for the Expo bridge synthesizer.
+	emitExpoModuleNodes(src, filePath, "swift", fileID, result, seen)
+
 	return result, nil
 }
 

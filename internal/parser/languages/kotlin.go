@@ -293,6 +293,10 @@ func (e *KotlinExtractor) Extract(filePath string, src []byte) (*parser.Extracti
 		result.Edges = append(result.Edges, edge)
 	}
 
+	// Expo Modules native DSL (Name/Function/AsyncFunction) → synthetic
+	// JS-callable method nodes for the Expo bridge synthesizer.
+	emitExpoModuleNodes(src, filePath, "kotlin", fileID, result, seen)
+
 	return result, nil
 }
 

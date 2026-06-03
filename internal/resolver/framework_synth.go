@@ -61,6 +61,7 @@ const (
 	SynthExpoModules  = "expo-modules-bridge"
 	SynthFabric       = "fabric-codegen"
 	SynthMyBatis      = "mybatis"
+	SynthRustScope    = "rust-scope"
 )
 
 // StampSynthesized marks an edge as the product of a framework
@@ -117,6 +118,11 @@ func defaultFrameworkSynthesizers() []FrameworkSynthesizer {
 		synthFunc{name: SynthExpoModules, fn: ResolveExpoModuleBridge},
 		synthFunc{name: SynthFabric, fn: ResolveFabricComponents},
 		synthFunc{name: SynthMyBatis, fn: ResolveMyBatisCalls},
+		// Rust impl-block / self-receiver / module-path resolution
+		// completion. Runs in the same settle window so residual
+		// unresolved Rust calls land before external-call synthesis
+		// classifies the rest as external.
+		synthFunc{name: SynthRustScope, fn: ResolveRustScopeCalls},
 	}
 }
 

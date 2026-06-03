@@ -189,15 +189,20 @@ func (s *Server) handleContextClosure(ctx context.Context, req mcp.CallToolReque
 // closureProximity returns a per-node seeded random-walk-with-restart
 // score for ranking closure members by their proximity to the seed
 // set. A nil result means "no proximity signal available" — the caller
-// then orders purely by graph distance. The seeded-random-walk backing
-// is supplied by the precomputed adjacency snapshot; until that snapshot
-// exists this returns nil and "proximity" ranking degrades to distance
-// ranking.
+// then orders purely by graph distance. The seeded random walk runs
+// over the precomputed CSR adjacency snapshot; until that snapshot
+// exists (analysis has not run) this returns nil and "proximity"
+// ranking degrades to distance ranking.
 func (s *Server) closureProximity(rankMode string, seeds []string) map[string]float64 {
 	if rankMode != "proximity" {
 		return nil
 	}
-	return nil
+	snap := s.getAdjacency()
+	if snap == nil {
+		return nil
+	}
+	// restart 0 -> the snapshot's default restart probability.
+	return snap.PersonalizedPageRank(seeds, 0)
 }
 
 // normalizeClosureFilePath converts a seed file argument into the

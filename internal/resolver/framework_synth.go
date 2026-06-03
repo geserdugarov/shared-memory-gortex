@@ -111,6 +111,7 @@ func defaultFrameworkSynthesizers() []FrameworkSynthesizer {
 		synthFunc{name: SynthGRPCStub, fn: ResolveGRPCStubCalls},
 		synthFunc{name: SynthTemporalStub, fn: ResolveTemporalCalls},
 		synthFunc{name: SynthEventChannel, fn: ResolveEventChannelCalls},
+		synthFunc{name: SynthSwiftObjC, fn: ResolveSwiftObjCBridge},
 	}
 }
 

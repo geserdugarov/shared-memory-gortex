@@ -334,6 +334,9 @@ func (e *SwiftExtractor) emitFunction(m parser.QueryResult, filePath, fileID str
 		if doc != "" {
 			meta["doc"] = doc
 		}
+		if sel := swiftObjCSelector(def.Node, name, src); sel != "" {
+			meta["objc_selector"] = sel
+		}
 		result.Nodes = append(result.Nodes, &graph.Node{
 			ID: id, Kind: graph.KindMethod, Name: name,
 			FilePath: filePath, StartLine: def.StartLine + 1, EndLine: def.EndLine + 1,

@@ -33,6 +33,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strings"
 
 	"github.com/zzet/gortex/internal/agents"
 	"github.com/zzet/gortex/internal/agents/internalutil"
@@ -111,7 +112,12 @@ func (a *Adapter) Apply(env agents.Env, opts agents.ApplyOpts) (*agents.Result, 
 	for _, profilePath := range profileConfigPaths(env.Home) {
 		profileAction, perr := upsertGortexServer(env.Stderr, profilePath, command, opts)
 		if perr != nil {
+			// Non-fatal: the global stanza still covers profiles that
+			// inherit. But this profile does NOT inherit, so record the
+			// failure on the result — not just stderr — otherwise a
+			// Configured=true silently masks a profile left unconfigured.
 			internalutil.Warnf(env.Stderr, "hermes profile %s: %v", profilePath, perr)
+			res.Warnings = append(res.Warnings, fmt.Sprintf("profile %s not configured: %v", profilePath, perr))
 			continue
 		}
 		res.Files = append(res.Files, profileAction)
@@ -121,7 +127,7 @@ func (a *Adapter) Apply(env agents.Env, opts agents.ApplyOpts) (*agents.Result, 
 	//    per-task routing playbooks (explore / impact / refactor / …),
 	//    mirroring the Claude Code user-level skill set. Each is skipped
 	//    when it already exists so user edits survive a re-install.
-	masterAction, err := agents.WriteIfNotExists(env.Stderr, skillPath(env.Home, SkillName), SkillBody, opts)
+	masterAction, err := agents.WriteIfNotExists(env.Stderr, skillPath(env.Home, SkillName), SkillBody(), opts)
 	if err != nil {
 		return res, fmt.Errorf("hermes skill: %w", err)
 	}
@@ -150,13 +156,28 @@ func upsertGortexServer(w io.Writer, path, command string, opts agents.ApplyOpts
 	}, opts)
 }
 
-// resolveGortexCommand returns the absolute path to the running gortex
-// binary so Hermes can launch it regardless of how its subprocess PATH
-// is set up, falling back to the bare "gortex" name (homebrew /
-// go install deployments put it on PATH).
+// resolveGortexCommand returns the command Hermes should launch for the
+// gortex MCP server. It prefers a stable absolute path so the entry
+// works regardless of how Hermes' subprocess PATH is set up:
+//
+//  1. os.Executable() — but only when it actually points at an installed
+//     `gortex` binary. Under `go run`, os.Executable() is a temp build
+//     that is deleted on exit (and may even be *named* gortex), so we
+//     additionally reject any path under the temp dir.
+//  2. exec.LookPath("gortex") — a stable PATH install (homebrew / go
+//     install).
+//  3. the bare "gortex" name as a last resort.
 func resolveGortexCommand() string {
 	if exe, err := os.Executable(); err == nil && exe != "" {
-		return exe
+		base := filepath.Base(exe)
+		base = strings.TrimSuffix(base, filepath.Ext(base)) // drop .exe on Windows
+		underTemp := strings.HasPrefix(exe, filepath.Clean(os.TempDir())+string(os.PathSeparator))
+		if base == "gortex" && !underTemp {
+			return exe
+		}
+	}
+	if p, err := exec.LookPath("gortex"); err == nil && p != "" {
+		return p
 	}
 	return "gortex"
 }
@@ -167,9 +188,24 @@ func hermesDir(home string) string { return filepath.Join(home, ".hermes") }
 // globalConfigPath is ~/.hermes/config.yaml.
 func globalConfigPath(home string) string { return filepath.Join(hermesDir(home), "config.yaml") }
 
-// skillPath is ~/.hermes/skills/<name>/SKILL.md.
+// skillPath is ~/.hermes/skills/<category>/<name>/SKILL.md. Hermes
+// discovers SKILL.md files recursively, and its convention is to group
+// skills under a category folder rather than at the skills root.
 func skillPath(home, name string) string {
-	return filepath.Join(hermesDir(home), "skills", name, "SKILL.md")
+	return filepath.Join(hermesDir(home), "skills", skillCategory(name), name, "SKILL.md")
+}
+
+// skillCategory returns the ~/.hermes/skills subdirectory a gortex skill
+// lives under. We reuse the routing-skill taxonomy so each playbook
+// lands in its topical folder (navigation / analysis / debugging / …)
+// and the master guide under code-intelligence — keeping the skills root
+// uncluttered and matching how Hermes' own skills are organised.
+func skillCategory(name string) string {
+	if name == SkillName {
+		return masterSkillCategory
+	}
+	_, category := routingSkillTaxonomy(name)
+	return category
 }
 
 // profileConfigPaths returns the config.yaml of every existing Hermes

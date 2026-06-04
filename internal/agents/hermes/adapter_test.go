@@ -83,7 +83,13 @@ func TestHermesApplyWritesGlobalConfigAndSkill(t *testing.T) {
 	if err != nil {
 		t.Fatalf("skill missing: %v", err)
 	}
-	for _, want := range []string{"name: gortex", "metadata:", "hermes:", "set_active_project"} {
+	for _, want := range []string{
+		"name: gortex", "metadata:", "hermes:", "set_active_project",
+		"platforms: [linux, macos, windows]", // standard Hermes frontmatter
+		"related_skills:",                    // links to the routing playbooks
+		"## Task playbooks",                  // slash-command discoverability
+		"/gortex-explore",                    // a representative routing command
+	} {
 		if !strings.Contains(string(skill), want) {
 			t.Errorf("skill missing %q", want)
 		}
@@ -129,8 +135,10 @@ func TestHermesInstallsRoutingSkills(t *testing.T) {
 			Version     string `yaml:"version"`
 			Metadata    struct {
 				Hermes struct {
-					Tags     []string `yaml:"tags"`
-					Category string   `yaml:"category"`
+					Tags          []string `yaml:"tags"`
+					Category      string   `yaml:"category"`
+					Platforms     []string `yaml:"platforms"`
+					RelatedSkills []string `yaml:"related_skills"`
 				} `yaml:"hermes"`
 			} `yaml:"metadata"`
 		}
@@ -143,6 +151,9 @@ func TestHermesInstallsRoutingSkills(t *testing.T) {
 		}
 		if meta.Description == "" || meta.Version == "" || meta.Metadata.Hermes.Category == "" || len(meta.Metadata.Hermes.Tags) == 0 {
 			t.Errorf("%s: incomplete Hermes frontmatter: %+v", name, meta)
+		}
+		if len(meta.Metadata.Hermes.Platforms) == 0 || len(meta.Metadata.Hermes.RelatedSkills) == 0 {
+			t.Errorf("%s: missing platforms/related_skills: %+v", name, meta.Metadata.Hermes)
 		}
 	}
 
@@ -198,6 +209,40 @@ func TestHermesUpsertsEveryProfileConfig(t *testing.T) {
 	}
 
 	agentstest.AssertIdempotent(t, a, env)
+}
+
+// TestHermesProfileFailureSurfacedAsWarning verifies that a profile that
+// fails to write is reported on the Result (not just stderr): the global
+// stanza covers inheriting profiles, but a non-inheriting one left
+// unconfigured must not hide behind Configured=true.
+func TestHermesProfileFailureSurfacedAsWarning(t *testing.T) {
+	env, _ := agentstest.NewEnv(t)
+	seedHermesHome(t, env.Home)
+
+	// A profile whose config.yaml is actually a directory — the merge's
+	// read/write fails, exercising the per-profile error path.
+	badProfile := filepath.Join(env.Home, ".hermes", "profiles", "broken", "config.yaml")
+	if err := os.MkdirAll(badProfile, 0o755); err != nil {
+		t.Fatalf("seed bad profile: %v", err)
+	}
+
+	a := New()
+	res, err := a.Apply(env, agents.ApplyOpts{})
+	if err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	if len(res.Warnings) == 0 {
+		t.Fatal("expected a warning for the failed profile, got none")
+	}
+	found := false
+	for _, w := range res.Warnings {
+		if strings.Contains(w, "broken") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("warning should name the failed profile: %#v", res.Warnings)
+	}
 }
 
 // TestHermesPreservesGlobalConfigComments guards the comment-rich

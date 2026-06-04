@@ -71,13 +71,21 @@ func yamlInt(n int) *yaml.Node {
 // of the per-version layout.
 const SkillName = "gortex"
 
-// SkillBody is the user-level Hermes skill that teaches the agent to
-// prefer gortex graph tools over raw file reads / text search, mirrors
-// the Claude Code / Antigravity user-level instruction surface, and
-// documents multi-repo scoping. It follows the Hermes SKILL.md
-// frontmatter schema (name / description / version / metadata.hermes)
-// and the documented section order.
-const SkillBody = `---
+// masterSkillCategory is the Hermes skills category the master gortex
+// guide is filed under (skills/<category>/gortex/SKILL.md). Shared with
+// skillCategory so the on-disk folder and the frontmatter agree.
+const masterSkillCategory = "code-intelligence"
+
+// masterSkillRaw is the static body of the user-level Hermes master
+// skill: it teaches the agent to prefer gortex graph tools over raw file
+// reads / text search, mirrors the Claude Code / Antigravity user-level
+// instruction surface, and documents multi-repo scoping. It follows the
+// Hermes SKILL.md frontmatter schema (name / description / version /
+// metadata.hermes) and the documented section order. SkillBody() wraps
+// it with the dynamic frontmatter fields (platforms, related_skills) and
+// the slash-command index, both derived from RoutingSkillNames() so they
+// never drift from the installed routing set.
+const masterSkillRaw = `---
 name: gortex
 description: "Use for any task on a codebase indexed by the gortex daemon — searching symbols, finding usages/callers, reading code, tracing impact, refactoring, and multi-repo navigation. Prefer these graph tools over raw file reads or text search."
 version: 1.0.0
@@ -175,6 +183,37 @@ For list-shaped responses (` + "`search_symbols`" + `, ` + "`find_usages`" + `, 
 After edits, call ` + "`verify_change`" + ` (broken callers + interface implementors, cross-repo) and ` + "`get_test_targets`" + ` (the tests that cover what you touched) before declaring the task done.
 `
 
+// SkillBody renders the master gortex skill: the static guide
+// (masterSkillRaw) with the dynamic frontmatter fields (platforms,
+// related_skills) injected and the slash-command index appended. The
+// dynamic parts derive from RoutingSkillNames() so they stay in sync
+// with the routing skills actually installed.
+func SkillBody() string {
+	const fmClose = "    category: " + masterSkillCategory + "\n---\n"
+	inject := "    category: " + masterSkillCategory + "\n" +
+		"    platforms: [linux, macos, windows]\n" +
+		"    related_skills: [" + strings.Join(RoutingSkillNames(), ", ") + "]\n---\n"
+	return strings.Replace(masterSkillRaw, fmClose, inject, 1) + masterSkillCommands()
+}
+
+// masterSkillCommands renders a discoverability section listing the
+// /gortex-* slash commands that `gortex install` registers (Hermes turns
+// every installed skill into a /<name> command). Derived from
+// RoutingSkillNames() so the list can't drift from what is installed.
+func masterSkillCommands() string {
+	names := RoutingSkillNames()
+	if len(names) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("\n## Task playbooks (slash commands)\n\n")
+	b.WriteString("`gortex install` also registers these per-task playbooks as Hermes slash commands. Reach for the one that matches your task:\n\n")
+	for _, n := range names {
+		b.WriteString("- `/" + n + "`\n")
+	}
+	return b.String()
+}
+
 // RoutingSkills returns the per-task routing skills, keyed by the
 // directory under ~/.hermes/skills/. They mirror Claude Code's curated
 // user-level skill set so a Hermes user gets the same task-routing
@@ -234,6 +273,8 @@ func hermesSkillFromClaude(name, claudeContent string) string {
 	b.WriteString("  hermes:\n")
 	b.WriteString("    tags: [" + strings.Join(tags, ", ") + "]\n")
 	b.WriteString("    category: " + category + "\n")
+	b.WriteString("    platforms: [linux, macos, windows]\n")
+	b.WriteString("    related_skills: [" + SkillName + "]\n")
 	b.WriteString("---\n")
 	b.WriteString(body)
 	return b.String()

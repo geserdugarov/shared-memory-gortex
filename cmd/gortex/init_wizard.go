@@ -48,7 +48,7 @@ var agentDetails = map[string]string{
 	"codex":       "AGENTS.md + config.toml",
 	"continue":    ".continue/config.json",
 	"gemini":      ".gemini/settings.json",
-	"hermes":      "~/.hermes/ config.yaml + profiles + skill",
+	"hermes":      "~/.hermes/config.yaml + profiles + skills",
 	"kilocode":    ".kilocode/mcp.json",
 	"kiro":        ".kiro/settings/mcp.json",
 	"opencode":    "opencode.json",

@@ -122,6 +122,13 @@ func RegisterAll(reg *parser.Registry) {
 	reg.Register(NewDExtractor())
 	reg.Register(NewValaExtractor())
 	reg.Register(NewGroovyExtractor())
+	// MCP server config files (.mcp.json / mcp.json /
+	// claude_desktop_config.json) share the .json extension with the
+	// generic JSON extractor. Registered before NewJSONExtractor so its
+	// basename / compound-extension claims win; it never claims the bare
+	// .json extension, so package.json / tsconfig.json still route to the
+	// JSON extractor.
+	reg.Register(NewMCPConfigExtractor())
 	reg.Register(NewJSONExtractor())
 
 	// Notebooks

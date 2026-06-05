@@ -212,7 +212,7 @@ func emitUninstallSummary(w io.Writer, removed int, failures []string, totalPres
 		_, _ = fmt.Fprintln(w, "Note: CLAUDE.md was not modified — remove the Gortex block manually if needed.")
 		_, _ = fmt.Fprintln(w, "Note: .kiro/steering/ files with 'gortex-' prefix were removed. Other .kiro/ files were preserved.")
 		_, _ = fmt.Fprintln(w, "Note: Antigravity KIs are global and were not removed. Manually delete ~/.gemini/antigravity/knowledge/gortex-workflow if desired.")
-		_, _ = fmt.Fprintln(w, "Note: Hermes config is global and was not removed. Manually delete the gortex entry in ~/.hermes/config.yaml (+ profiles) and the gortex / gortex-* skill directories under ~/.hermes/skills/ if desired.")
+		_, _ = fmt.Fprintln(w, "Note: Hermes config is global and was not removed. Manually delete the gortex entry in ~/.hermes/config.yaml (+ profiles), the gortex pre_tool_call / pre_llm_call entries under its `hooks:` block, and the gortex / gortex-* skill directories under ~/.hermes/skills/ if desired.")
 		return
 	}
 

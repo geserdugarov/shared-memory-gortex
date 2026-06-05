@@ -69,8 +69,15 @@ func (a *Adapter) Plan(env agents.Env) (*agents.Plan, error) {
 	if env.Home == "" {
 		return &agents.Plan{}, nil
 	}
+	// The global config carries mcp_servers always, and the gortex
+	// pre_tool_call / pre_llm_call hooks when hook installation is on —
+	// so `init doctor` (which runs Plan) reports the hooks surface too.
+	globalKeys := []string{"mcp_servers"}
+	if env.InstallHooks {
+		globalKeys = append(globalKeys, "hooks")
+	}
 	files := []agents.FileAction{
-		{Path: globalConfigPath(env.Home), Action: agents.ActionWouldMerge, Keys: []string{"mcp_servers"}},
+		{Path: globalConfigPath(env.Home), Action: agents.ActionWouldMerge, Keys: globalKeys},
 	}
 	for _, p := range profileConfigPaths(env.Home) {
 		files = append(files, agents.FileAction{Path: p, Action: agents.ActionWouldMerge, Keys: []string{"mcp_servers"}})
@@ -98,12 +105,19 @@ func (a *Adapter) Apply(env agents.Env, opts agents.ApplyOpts) (*agents.Result, 
 	command := resolveGortexCommand()
 
 	// 1. Global config — the entry every profile inherits when it
-	//    doesn't re-declare its own server map.
-	globalAction, err := upsertGortexServer(env.Stderr, globalConfigPath(env.Home), command, opts)
+	//    doesn't re-declare its own server map, plus (when hooks are
+	//    enabled) the gortex pre_tool_call / pre_llm_call hooks. Both
+	//    ride one comment-preserving merge of ~/.hermes/config.yaml.
+	globalAction, err := upsertGlobalConfig(env.Stderr, globalConfigPath(env.Home), command, env.HookMode, env.InstallHooks, opts)
 	if err != nil {
 		return res, fmt.Errorf("hermes global config: %w", err)
 	}
 	res.Files = append(res.Files, globalAction)
+	if env.InstallHooks {
+		internalutil.Logf(env.Stderr, "[gortex init] wired Hermes pre_tool_call + pre_llm_call hooks (posture: %s)", hermesHookModeLabel(env.HookMode))
+	} else {
+		internalutil.Logf(env.Stderr, "[gortex init] skipping Hermes hook installation (--no-hooks)")
+	}
 
 	// 2. Per-profile configs — Hermes profiles may carry their own
 	//    mcp_servers block, so upsert into each existing one too. A
@@ -149,11 +163,49 @@ func (a *Adapter) Apply(env agents.Env, opts agents.ApplyOpts) (*agents.Result, 
 
 // upsertGortexServer merges the gortex stdio stanza into the
 // `mcp_servers` map of a Hermes YAML config, preserving comments and
-// unrelated keys.
+// unrelated keys. Used for per-profile configs, which carry only the
+// server stanza.
 func upsertGortexServer(w io.Writer, path, command string, opts agents.ApplyOpts) (agents.FileAction, error) {
 	return agents.MergeYAML(w, path, func(root *yaml.Node, _ bool) (bool, error) {
 		return agents.UpsertYAMLMapEntry(root, "mcp_servers", gortexServerName, gortexMCPEntry(command), opts.Force)
 	}, opts)
+}
+
+// upsertGlobalConfig merges the gortex MCP server stanza — and, when
+// hook installation is enabled, the gortex pre_tool_call / pre_llm_call
+// hook entries — into the global ~/.hermes/config.yaml in a single
+// comment-preserving pass. Hooks are global-only: unlike mcp_servers
+// (which a profile can re-declare), Hermes documents shell hooks only at
+// global scope, so this is the one place they're written.
+func upsertGlobalConfig(w io.Writer, path, command, hookMode string, installHooks bool, opts agents.ApplyOpts) (agents.FileAction, error) {
+	return agents.MergeYAML(w, path, func(root *yaml.Node, _ bool) (bool, error) {
+		serverChanged, err := agents.UpsertYAMLMapEntry(root, "mcp_servers", gortexServerName, gortexMCPEntry(command), opts.Force)
+		if err != nil {
+			return false, err
+		}
+		if !installHooks {
+			return serverChanged, nil
+		}
+		hooksChanged, err := upsertGortexHooks(root, hookMode, opts.Force)
+		if err != nil {
+			return false, err
+		}
+		return serverChanged || hooksChanged, nil
+	}, opts)
+}
+
+// hermesHookModeLabel renders the posture name for the install log,
+// normalising the empty / unknown default to "deny".
+func hermesHookModeLabel(mode string) string {
+	m := strings.ToLower(strings.TrimSpace(mode))
+	switch m {
+	case "enrich", "consult-unlock", "nudge":
+		return m
+	case "adaptive-nudge":
+		return "nudge"
+	default:
+		return "deny"
+	}
 }
 
 // resolveGortexCommand returns the command Hermes should launch for the

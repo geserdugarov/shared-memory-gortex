@@ -2295,6 +2295,22 @@ func (s *Server) buildGraphStatsPayload(ctx context.Context) map[string]any {
 		result["notifications"] = ns
 	}
 
+	// Merkle-keyed RWR walk cache performance — surfaces whether the
+	// incremental centrality cache is earning its keep (hit rate) and
+	// how many distinct walks it retains.
+	if hits, misses, size, capacity, enabled := s.pprCache.stats(); enabled && (hits+misses) > 0 {
+		ppr := map[string]any{
+			"hits":     hits,
+			"misses":   misses,
+			"size":     size,
+			"capacity": capacity,
+		}
+		if total := hits + misses; total > 0 {
+			ppr["hit_rate"] = round4(float64(hits) / float64(total))
+		}
+		result["ppr_cache"] = ppr
+	}
+
 	return result
 }
 

@@ -220,6 +220,13 @@ type Server struct {
 	combo    *comboManager
 	frecency *frecencyTracker
 
+	// pprCache memoizes seeded Random-Walk-with-Restart (Personalized
+	// PageRank) results, keyed by content-addressed per-package Merkle
+	// roots so only walks touching a changed package recompute. Shared
+	// by the rerank ProximitySignal and context_closure. Always
+	// non-nil after NewServer.
+	pprCache *pprWalkCache
+
 	// queryLog is the append-only retrieval query log (JSONL). It
 	// records every retrieval-shaped tool call so offline recall
 	// tuning and the eval harness have a substrate to measure. Always
@@ -773,6 +780,7 @@ func NewServer(engine *query.Engine, g graph.Store, idx *indexer.Indexer, watche
 		toolScopes: newScopeRegistry(),
 		agentReg:   newAgentRegistry(),
 		queryLog:   newQueryLogger(),
+		pprCache:   newPPRWalkCache(),
 	}
 	// Wire the process-wide tokenStats as the parent of every
 	// per-session counter so record() fanout aggregates daemon-wide.

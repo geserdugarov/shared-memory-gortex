@@ -36,9 +36,11 @@ type WorktreeInfo struct {
 // repository, not a worktree. A main checkout or a non-git directory
 // likewise resolves to itself.
 //
-// Keying the index cache by MainRepoPath lets every worktree of one
-// repo share a base identity; combined with branch-keyed snapshots
-// each worktree still gets its own slot.
+// A worktree can be tracked either as part of its canonical repo (the
+// default) or, via WorktreeInstanceName, as an independent instance
+// keyed by its own working-directory path — letting one underlying
+// repository have multiple checkouts, each assigned to its own
+// workspace and indexed from its own branch / working tree.
 func ResolveWorktree(path string) WorktreeInfo {
 	abs, err := filepath.Abs(path)
 	if err != nil {

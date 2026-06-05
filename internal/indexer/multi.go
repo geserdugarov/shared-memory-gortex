@@ -1622,13 +1622,25 @@ func (mi *MultiIndexer) ResolveFilePath(prefixedPath string) string {
 	mi.mu.RLock()
 	defer mi.mu.RUnlock()
 
+	// Longest matching prefix wins. With worktree instances two prefixes
+	// can share a leading segment (`oas-orm` vs `oas-orm@task-ws`); map
+	// iteration order is random, so a plain first-match could resolve a
+	// `oas-orm@task-ws/...` path against the shorter `oas-orm` root. The
+	// "/"-boundary check already keeps the two disjoint, but ranking by
+	// length makes that robust regardless of any future prefix shapes.
+	var bestPrefix, bestRoot string
 	for prefix, meta := range mi.repos {
-		if strings.HasPrefix(prefixedPath, prefix+"/") {
-			relPath := strings.TrimPrefix(prefixedPath, prefix+"/")
-			return filepath.Join(meta.RootPath, relPath)
+		if meta == nil {
+			continue
+		}
+		if strings.HasPrefix(prefixedPath, prefix+"/") && len(prefix) > len(bestPrefix) {
+			bestPrefix, bestRoot = prefix, meta.RootPath
 		}
 	}
-	return ""
+	if bestPrefix == "" {
+		return ""
+	}
+	return filepath.Join(bestRoot, strings.TrimPrefix(prefixedPath, bestPrefix+"/"))
 }
 
 // RepoPrefixes returns the set of registered repo prefixes. The returned

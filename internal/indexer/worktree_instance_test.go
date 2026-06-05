@@ -107,6 +107,14 @@ func TestWorktreeInstance_IndexAll_AutoSeparatesByWorkspace(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, "task-ws", ws)
 	assert.Equal(t, "oas-orm@task-ws", prefix)
+
+	// ResolveFilePath disambiguates the two overlapping prefixes
+	// (`oas-orm` vs `oas-orm@task-ws`) by longest match, mapping each
+	// prefixed graph path back to its own checkout.
+	assert.Equal(t, realpath(t, filepath.Join(wt, "feature.go")),
+		realpath(t, mi.ResolveFilePath("oas-orm@task-ws/feature.go")))
+	assert.Equal(t, realpath(t, filepath.Join(canon, "lib.go")),
+		realpath(t, mi.ResolveFilePath("oas-orm/lib.go")))
 }
 
 // TestWorktreeInstance_PlainWorktreeStillCoalesces guards the opposite

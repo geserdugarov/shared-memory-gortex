@@ -1,0 +1,51 @@
+name: Skill drift
+
+# Fences every agent integration's generated output against what is
+# checked in — across all platforms, on every PR (not Claude-only and
+# not release-only). Two complementary checks run:
+#
+#   1. The all-platform render golden (go test) byte-compares every
+#      adapter's rendered MCP config / instructions / hooks / routing
+#      blocks against committed goldens, plus a structural --check that
+#      every adapter still emits a gortex registration.
+#   2. The Claude marketplace bundle fence (make claude-plugin-check),
+#      lifted here from its release-only trigger so a stale bundle is
+#      caught at PR time.
+#
+# When a check fails on an intended change, regenerate and commit:
+#   go test ./cmd/gortex -run TestAgentsRenderGolden -update-agent-render
+#   make claude-plugin
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'internal/agents/**'
+      - 'internal/hooks/**'
+      - 'internal/mcp/**'
+      - 'cmd/gortex/**'
+      - 'claude-plugin/**'
+      - '.github/workflows/skill-drift.yml'
+  workflow_dispatch:
+
+jobs:
+  skill-drift:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        with:
+          go-version-file: go.mod
+
+      - name: Build CLI
+        run: go build -o gortex ./cmd/gortex/
+
+      - name: All-platform render golden
+        run: go test ./cmd/gortex -run TestAgentsRenderGolden -count=1
+
+      - name: All-platform render structural check
+        run: ./gortex agents render --check
+
+      - name: Claude plugin bundle is up to date
+        run: make claude-plugin-check

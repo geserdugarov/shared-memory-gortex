@@ -21,17 +21,28 @@
 [![Linux](https://img.shields.io/badge/Linux-supported-blue.svg)](#)
 [![Windows](https://img.shields.io/badge/Windows-supported-blue.svg)](#)
 
-[![Claude Code](https://img.shields.io/badge/Claude_Code-supported-blueviolet.svg)](#)
-[![Cursor](https://img.shields.io/badge/Cursor-supported-blueviolet.svg)](#)
-[![Codex CLI](https://img.shields.io/badge/Codex_CLI-supported-blueviolet.svg)](#)
-[![opencode](https://img.shields.io/badge/opencode-supported-blueviolet.svg)](#)
-[![Kiro](https://img.shields.io/badge/Kiro-supported-blueviolet.svg)](#)
+[![Claude Code](https://img.shields.io/badge/Claude_Code-supported-blueviolet.svg)](docs/agents.md)
+[![Kiro](https://img.shields.io/badge/Kiro-supported-blueviolet.svg)](docs/agents.md)
+[![Cursor](https://img.shields.io/badge/Cursor-supported-blueviolet.svg)](docs/agents.md)
+[![Windsurf](https://img.shields.io/badge/Windsurf-supported-blueviolet.svg)](docs/agents.md)
+[![VS Code / Copilot](https://img.shields.io/badge/VS_Code-supported-blueviolet.svg)](docs/agents.md)
+[![Continue.dev](https://img.shields.io/badge/Continue.dev-supported-blueviolet.svg)](docs/agents.md)
+[![Cline](https://img.shields.io/badge/Cline-supported-blueviolet.svg)](docs/agents.md)
+[![opencode](https://img.shields.io/badge/opencode-supported-blueviolet.svg)](docs/agents.md)
+[![Antigravity](https://img.shields.io/badge/Antigravity-supported-blueviolet.svg)](docs/agents.md)
+[![Codex CLI](https://img.shields.io/badge/Codex_CLI-supported-blueviolet.svg)](docs/agents.md)
+[![Gemini CLI](https://img.shields.io/badge/Gemini_CLI-supported-blueviolet.svg)](docs/agents.md)
+[![Zed](https://img.shields.io/badge/Zed-supported-blueviolet.svg)](docs/agents.md)
+[![Aider](https://img.shields.io/badge/Aider-supported-blueviolet.svg)](docs/agents.md)
+[![Kilo Code](https://img.shields.io/badge/Kilo_Code-supported-blueviolet.svg)](docs/agents.md)
+[![OpenClaw](https://img.shields.io/badge/OpenClaw-supported-blueviolet.svg)](docs/agents.md)
+[![Hermes](https://img.shields.io/badge/Hermes-supported-blueviolet.svg)](docs/agents.md)
 
 **Up to 50× fewer tokens per response.** See [BENCHMARK.md](BENCHMARK.md) or reproduce it yourself.
 
 </div>
 
-> Built for 15 AI coding agents (Claude Code, Kiro, Cursor, Windsurf, VS Code / Copilot, Continue.dev, Cline, OpenCode, Antigravity, Codex CLI, Gemini CLI, Zed, Aider, Kilo Code, OpenClaw). One install configures every one detected on your machine — see [docs/agents.md](docs/agents.md).
+> Built for 16 AI coding agents (Claude Code, Kiro, Cursor, Windsurf, VS Code / Copilot, Continue.dev, Cline, OpenCode, Antigravity, Codex CLI, Gemini CLI, Zed, Aider, Kilo Code, OpenClaw, Hermes). One install configures every one detected on your machine — see [docs/agents.md](docs/agents.md).
 
 <details>
 <summary>Gortex Web UI — force-directed knowledge graph visualization</summary>
@@ -83,7 +94,7 @@ Your AI assistant now uses graph queries. Full 15-minute walkthrough: [docs/onbo
 - **9 LLM providers (optional)** — local llama.cpp, Anthropic, OpenAI, Ollama, Claude / Codex CLI subprocess, Gemini, Bedrock, DeepSeek → [docs/llm.md](docs/llm.md)
 - **HTTP server + Web UI** — versioned `/v1/*` API + MCP 2026 Streamable HTTP; standalone Next.js 15 UI with five 3D graph modes → [docs/server.md](docs/server.md)
 - **Composable safety** — `verify_change`, `check_guards`, `audit_agent_config` flag broken callers, guard violations, stale docs before they ship
-- **Agent integrations (15)** — `gortex init` configures every detected coding assistant on the machine → [docs/agents.md](docs/agents.md)
+- **Agent integrations (16)** — `gortex init` configures every detected coding assistant on the machine → [docs/agents.md](docs/agents.md)
 
 Full catalog of features: [docs/features.md](docs/features.md). Complete CLI reference: [docs/cli.md](docs/cli.md).
 

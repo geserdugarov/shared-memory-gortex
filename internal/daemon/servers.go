@@ -48,7 +48,34 @@ type ServerEntry struct {
 	// workspace context disambiguates" pick. Conflict (multiple
 	// entries marked Default=true) is rejected at load time.
 	Default bool `toml:"default,omitempty"`
+
+	// Enabled gates whether the daemon federates/proxies to this
+	// remote. Pointer-bool so absent-in-TOML (nil) is distinguished
+	// from an explicit false: absent ⇒ enabled (default-on, so a
+	// pre-existing roster that has no `enabled` key keeps working).
+	// `gortex proxy off <slug>` writes `enabled = false`; `on` deletes
+	// the key (back to default-on) — it never writes `enabled = true`
+	// so a hand-edited roster without the key stays clean.
+	Enabled *bool `toml:"enabled,omitempty"`
+
+	// ReadOnly marks the remote as accepting only read tools; the
+	// federation write-gate refuses to route a mutating tool to it.
+	// In v1 every remote is effectively read-only regardless; this
+	// field is the persisted intent and the surface for
+	// `--read-only`. An unadvertised capability is treated as
+	// read-only at runtime (fail-safe).
+	ReadOnly bool `toml:"read_only,omitempty"`
+
+	// Namespace is the origin-namespaced node-ID keying prefix used
+	// when minting proxy nodes for this remote. Keying field only —
+	// reserved here so the struct is edited exactly once.
+	Namespace string `toml:"namespace,omitempty"`
 }
+
+// IsEnabled reports the effective enabled state of the remote: a nil
+// Enabled (absent from TOML) means enabled, preserving backward
+// compatibility with rosters written before the key existed.
+func (e ServerEntry) IsEnabled() bool { return e.Enabled == nil || *e.Enabled }
 
 // ServersConfig is the on-disk schema for `~/.gortex/servers.toml`.
 type ServersConfig struct {
@@ -277,6 +304,33 @@ func (c *ServersConfig) DefaultServer() *ServerEntry {
 		}
 	}
 	return &c.Server[0]
+}
+
+// SetEnabled flips a remote's enabled state in the roster. enabled=true
+// CLEARS the key (back to default-on) rather than writing
+// `enabled = true`, so a hand-edited roster without the key stays
+// minimal and the default-on contract is the single source of truth;
+// enabled=false writes an explicit false. It returns whether the value
+// actually changed and errors on an unknown slug.
+func (c *ServersConfig) SetEnabled(slug string, enabled bool) (changed bool, err error) {
+	if c == nil {
+		return false, fmt.Errorf("no server roster loaded")
+	}
+	for i := range c.Server {
+		if c.Server[i].Slug != slug {
+			continue
+		}
+		was := c.Server[i].IsEnabled()
+		if enabled {
+			// Clear the key: nil ⇒ default-on.
+			c.Server[i].Enabled = nil
+		} else {
+			v := false
+			c.Server[i].Enabled = &v
+		}
+		return was != enabled, nil
+	}
+	return false, fmt.Errorf("unknown server slug %q", slug)
 }
 
 // ServerClient is the daemon-side HTTP client targeting one

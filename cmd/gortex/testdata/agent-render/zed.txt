@@ -1,4 +1,4 @@
-=== home/Library/Application Support/Zed/settings.json ===
+=== home/.config/zed/settings.json ===
 {
   "context_servers": {
     "gortex": {

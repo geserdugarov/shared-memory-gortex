@@ -93,7 +93,7 @@ func manifestForDirs(home, root string) (string, error) {
 				return err
 			}
 			entries = append(entries, entry{
-				key:     prefix + filepath.ToSlash(rel),
+				key:     canonicalManifestKey(prefix + filepath.ToSlash(rel)),
 				content: normalizeRender(string(data), home, root),
 			})
 			return nil
@@ -143,6 +143,22 @@ var gortexBinaryPaths = sync.OnceValue(func() []string {
 	}
 	return paths
 })
+
+// canonicalManifestKey rewrites the OS-specific user-config locations
+// in a manifest path to a single canonical (Linux/XDG) form, so the
+// manifest is identical regardless of the OS the render runs on.
+// Without this an adapter that uses OS-specific config dirs makes the
+// golden non-portable (e.g. zed writes ~/Library/Application Support/Zed
+// on macOS, ~/AppData/Roaming/Zed on Windows, and ~/.config/zed on
+// Linux). Only manifest keys are folded; file contents are compared
+// verbatim.
+func canonicalManifestKey(key string) string {
+	key = strings.ReplaceAll(key, "Library/Application Support/", ".config/")
+	key = strings.ReplaceAll(key, "AppData/Roaming/", ".config/")
+	// zed capitalises its directory on macOS/Windows but not on Linux.
+	key = strings.ReplaceAll(key, ".config/Zed/", ".config/zed/")
+	return key
+}
 
 // normalizeRender replaces machine-specific absolutes — the sandbox
 // HOME / repo root and the resolved gortex binary path — with stable

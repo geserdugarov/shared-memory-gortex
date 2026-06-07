@@ -5,12 +5,105 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest/observer"
 )
+
+// recordingSearchRemote serves find_usages (empty SubGraph) and a
+// search_symbols endpoint that records how many times it was hit, so a
+// test can prove the name-keyed fallback did or did not fire.
+func recordingSearchRemote(t *testing.T, searchJSON string) (*httptest.Server, *int32) {
+	t.Helper()
+	var searchCalls int32
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/health", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"status": "ok", "indexed": true, "schema_version": localSchemaMajor,
+			"api_version": 1, "read_only": true,
+		})
+	})
+	mux.HandleFunc("/v1/tools/search_symbols", func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&searchCalls, 1)
+		_, _ = w.Write(envelope(searchJSON))
+	})
+	mux.HandleFunc("/v1/tools/", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write(envelope(`{"nodes":[],"edges":[],"total_nodes":0,"total_edges":0}`))
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	return srv, &searchCalls
+}
+
+func nameKeyedFederator(on bool) *Federator {
+	return NewFederator(FederationConfig{
+		PerRemoteTimeout:  250 * time.Millisecond,
+		Budget:            2 * time.Second,
+		HealthTTL:         time.Millisecond,
+		NameKeyedFallback: on,
+	}, func(e ServerEntry) (*ServerClient, error) { return NewServerClient(e) }, nil)
+}
+
+// TestFederator_NameKeyedFallback_OffByDefault asserts that with the
+// fallback off, no bare-name search is issued.
+func TestFederator_NameKeyedFallback_OffByDefault(t *testing.T) {
+	remote, searchCalls := recordingSearchRemote(t, `{"results":[{"id":"r/a::ComputeChecksum"}],"total":1}`)
+	local := envelope(`{"nodes":[],"edges":[],"total_nodes":0,"total_edges":0}`)
+	out := nameKeyedFederator(false).Augment(context.Background(), "find_usages",
+		[]byte(`{"arguments":{"id":"l/a.go::ComputeChecksum"}}`), local,
+		[]ServerEntry{{Slug: "r2", URL: remote.URL}})
+	if atomic.LoadInt32(searchCalls) != 0 {
+		t.Fatalf("name-keyed fallback must not fire when off (search hit %d times)", *searchCalls)
+	}
+	m := decodeFederated(t, out)
+	if _, ok := m["name_hits"]; ok {
+		t.Error("no name_hits section when the fallback is off")
+	}
+}
+
+// TestFederator_NameKeyedFallback_OptInSeparateSection asserts that with
+// the fallback on and an eligible name, remote hits land in a separate
+// name_hits section tagged text_matched; a common/short name is skipped.
+func TestFederator_NameKeyedFallback_OptInSeparateSection(t *testing.T) {
+	remote, searchCalls := recordingSearchRemote(t, `{"results":[{"id":"r/a::ComputeChecksum","name":"ComputeChecksum"}],"total":1}`)
+	fed := nameKeyedFederator(true)
+	local := envelope(`{"nodes":[],"edges":[],"total_nodes":0,"total_edges":0}`)
+
+	// Eligible name => name_hits present, tagged text_matched.
+	out := fed.Augment(context.Background(), "find_usages",
+		[]byte(`{"arguments":{"id":"l/a.go::ComputeChecksum"}}`), local,
+		[]ServerEntry{{Slug: "r2", URL: remote.URL}})
+	if atomic.LoadInt32(searchCalls) == 0 {
+		t.Fatal("an eligible name must trigger the bare-name search")
+	}
+	m := decodeFederated(t, out)
+	hits, ok := m["name_hits"].([]any)
+	if !ok || len(hits) != 1 {
+		t.Fatalf("name_hits should carry the remote hit, got %v", m["name_hits"])
+	}
+	if first, _ := hits[0].(map[string]any); first["confidence"] != "text_matched" || first["origin"] != "remote:r2" {
+		t.Errorf("name hit must be tagged text_matched + remote origin, got %v", hits[0])
+	}
+	// The primary results are NOT polluted with name hits (SubGraph nodes stay empty).
+	if nodes, _ := m["nodes"].([]any); len(nodes) != 0 {
+		t.Error("name hits must stay in their own section, not the primary results")
+	}
+
+	// A short/common name is gated out even when on.
+	atomic.StoreInt32(searchCalls, 0)
+	out2 := fed.Augment(context.Background(), "find_usages",
+		[]byte(`{"arguments":{"id":"l/a.go::len"}}`), local,
+		[]ServerEntry{{Slug: "r2", URL: remote.URL}})
+	if atomic.LoadInt32(searchCalls) != 0 {
+		t.Error("a common/short name must be gated out of the fallback")
+	}
+	if _, ok := decodeFederated(t, out2)["name_hits"]; ok {
+		t.Error("a gated name must produce no name_hits section")
+	}
+}
 
 // TestAudit_RemoteRoutedCallLogged asserts a remote-routed call emits a
 // structured audit line carrying {session_id, cwd, tool, target_slug}.

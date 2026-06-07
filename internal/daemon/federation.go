@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -134,6 +135,21 @@ func (f *Federator) Augment(ctx context.Context, tool string, body, localResult 
 
 	merged, origins := f.merge(tool, localTool, results)
 	meta.Origins = origins
+
+	// Opt-in name-keyed fallback (OFF by default, D-15): a bare-name
+	// search on each remote, rendered in a SEPARATE name_hits section
+	// tagged text_matched — never merged into the primary id-keyed
+	// results (name hits have different native ids that ID-dedup cannot
+	// collapse). Rarity/length-gated so stdlib/builtin or too-short
+	// names don't surface plausible-but-wrong cross-repo hits.
+	if f.cfg.NameKeyedFallback && idKeyedTools[tool] {
+		if name := bareNameFromBody(body); nameEligible(name) {
+			if hits := f.nameKeyedFan(ctx, name, remotes); len(hits) > 0 {
+				merged = injectField(merged, "name_hits", hits)
+			}
+		}
+	}
+
 	if len(meta.RemotesFailed) > 0 && meta.Note == "" {
 		meta.Note = fmt.Sprintf("%d remote(s) did not answer; results are local%s.",
 			len(meta.RemotesFailed), remoteOnlyOrPartial(meta))
@@ -310,6 +326,121 @@ func mergeSubGraph(local []byte, remotes []remoteResult) ([]byte, map[string]str
 
 func edgeKey(e *graph.Edge) string {
 	return e.From + "\x00" + e.To + "\x00" + string(e.Kind)
+}
+
+// idKeyedTools are the SubGraph traversals whose primary query keys on a
+// node id; only these get the optional bare-name fallback fan.
+var idKeyedTools = map[string]bool{
+	"find_usages":    true,
+	"get_callers":    true,
+	"get_call_chain": true,
+}
+
+// commonNames are too-frequent identifiers a bare-name fan would
+// mis-match across repos; the fallback skips them even when enabled.
+var commonNames = map[string]bool{
+	"len": true, "set": true, "get": true, "new": true, "string": true,
+	"error": true, "close": true, "read": true, "write": true, "run": true,
+	"stop": true, "start": true, "init": true, "name": true, "value": true,
+	"key": true, "data": true, "result": true, "next": true, "size": true,
+}
+
+// bareNameFromBody extracts the symbol name from the {"arguments":{"id":...}}
+// body, stripping the repo/file prefix and the :: separator.
+func bareNameFromBody(body []byte) string {
+	var b struct {
+		Arguments struct {
+			ID string `json:"id"`
+		} `json:"arguments"`
+	}
+	if err := json.Unmarshal(body, &b); err != nil {
+		return ""
+	}
+	id := b.Arguments.ID
+	if i := strings.LastIndex(id, "::"); i >= 0 {
+		id = id[i+2:]
+	}
+	return id
+}
+
+// nameEligible gates the bare-name fallback on rarity/length so a common
+// or short identifier never fans out.
+func nameEligible(name string) bool {
+	if len(name) < 4 {
+		return false
+	}
+	return !commonNames[strings.ToLower(name)]
+}
+
+// nameKeyedFan issues a per-remote search_symbols query for the bare
+// name, capping each remote's contribution and tagging every hit with
+// its origin + the text_matched confidence tier.
+func (f *Federator) nameKeyedFan(ctx context.Context, name string, remotes []ServerEntry) []any {
+	const perRemoteCap = 5
+	body, _ := json.Marshal(map[string]any{
+		"arguments": map[string]any{"query": name, "limit": perRemoteCap, "format": "json"},
+	})
+	budgetCtx, cancel := context.WithTimeout(ctx, f.cfg.Budget)
+	defer cancel()
+	var (
+		mu   sync.Mutex
+		hits []any
+		wg   sync.WaitGroup
+	)
+	for _, rem := range remotes {
+		rem := rem
+		if f.breaker.isOpen(rem.Slug) {
+			continue
+		}
+		cli, err := f.clientFor(rem)
+		if err != nil {
+			continue
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			rctx, rcancel := context.WithTimeout(budgetCtx, f.cfg.PerRemoteTimeout)
+			defer rcancel()
+			out, status, err := cli.ProxyToolCtx(rctx, "search_symbols", body)
+			if err != nil || status >= 400 {
+				return
+			}
+			tj, _ := unwrapToolJSON(out)
+			var rp map[string]any
+			if json.Unmarshal(tj, &rp) != nil {
+				return
+			}
+			results, _ := rp["results"].([]any)
+			mu.Lock()
+			for i, r := range results {
+				if i >= perRemoteCap {
+					break
+				}
+				if m, ok := r.(map[string]any); ok {
+					m["origin"] = "remote:" + rem.Slug
+					m["confidence"] = "text_matched"
+					hits = append(hits, m)
+				}
+			}
+			mu.Unlock()
+		}()
+	}
+	wg.Wait()
+	return hits
+}
+
+// injectField adds a top-level key to a JSON object payload.
+func injectField(b []byte, key string, value any) []byte {
+	var m map[string]any
+	if err := json.Unmarshal(b, &m); err != nil {
+		return b
+	}
+	m[key] = value
+	out, err := json.Marshal(m)
+	if err != nil {
+		return b
+	}
+	return out
 }
 
 // mergeKeyedList merges a {<key>:[{id,...}], total} payload (search_symbols

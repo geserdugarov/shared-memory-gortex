@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -8,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"time"
 
 	"go.uber.org/zap"
@@ -35,8 +37,17 @@ func WireRemoteStitch(router *Router, mi *indexer.MultiIndexer, g graph.Store, c
 	prober := NewProxyEdgeProber(router.federator, remotes, timeout, logger)
 	mi.SetRemoteStitch(prober, cfg.MaxNodes())
 
-	return NewProxyHydrator(g, router.federator.clientFor, remotes,
+	hydrator := NewProxyHydrator(g, router.federator.clientFor, remotes,
 		cfg.TTL(), cfg.Depth(), cfg.MaxNodes(), timeout, logger)
+
+	// Subscribe to each subgraph-capable remote's event stream so a graph
+	// change there evicts our cached proxies for it (daemon-lifetime).
+	fed := router.federator
+	hydrator.SubscribeRemoteEvents(context.Background(), func(ctx context.Context, cli *ServerClient) bool {
+		h, err := fed.health.get(ctx, cli, timeout)
+		return err == nil && h.HasCapability("subgraph")
+	})
+	return hydrator
 }
 
 // ProxyEdgeProber implements resolver.RemoteDeclarationProber for the
@@ -360,4 +371,128 @@ func (h *ProxyHydrator) budgetExceeded() bool {
 		}
 	}
 	return false
+}
+
+// StreamEvents connects to the remote's GET /v1/events SSE stream and
+// calls onEvent for every graph-change frame, until ctx is cancelled or
+// the stream ends. SSE is long-lived, so it uses a request without the
+// client's 60s timeout (cancellation rides on ctx). Returns the
+// connection/read error so the caller can back off and reconnect.
+func (c *ServerClient) StreamEvents(ctx context.Context, onEvent func()) error {
+	u, err := url.JoinPath(c.BaseURL, "v1", "events")
+	if err != nil {
+		return fmt.Errorf("join events URL: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	if err != nil {
+		return fmt.Errorf("build events request: %w", err)
+	}
+	if tok := c.resolveAuthToken(); tok != "" {
+		req.Header.Set("Authorization", "Bearer "+tok)
+	}
+	req.Header.Set("Accept", "text/event-stream")
+
+	// Reuse the client's transport (so unix-socket remotes still work) but
+	// drop the request timeout — an SSE stream must outlive 60s.
+	sse := &http.Client{Transport: c.httpClient.Transport}
+	resp, err := sse.Do(req)
+	if err != nil {
+		return fmt.Errorf("subscribe events on %q: %w", c.Entry.Slug, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("events from %q: status %d", c.Entry.Slug, resp.StatusCode)
+	}
+
+	sc := bufio.NewScanner(resp.Body)
+	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	for sc.Scan() {
+		// Each graph-change SSE frame opens with `event: graph_change`.
+		if strings.HasPrefix(sc.Text(), "event: graph_change") {
+			onEvent()
+		}
+	}
+	return sc.Err()
+}
+
+// SubscribeRemoteEvents starts background per-remote /v1/events
+// subscriptions: whenever a subgraph-capable enabled remote's graph
+// changes, this daemon's cached proxy nodes for that remote are evicted
+// (marked stale) so the next access re-hydrates against fresh data. Runs
+// until ctx is cancelled; reconnects with backoff on a dropped stream and
+// reconciles the subscription set as the enabled-remote roster changes.
+// capable reports whether a remote advertises the subgraph capability.
+func (h *ProxyHydrator) SubscribeRemoteEvents(ctx context.Context, capable func(context.Context, *ServerClient) bool) {
+	if h == nil || h.remotes == nil {
+		return
+	}
+	go func() {
+		subs := map[string]context.CancelFunc{}
+		reconcile := func() {
+			want := map[string]ServerEntry{}
+			for _, r := range h.remotes() {
+				want[r.Slug] = r
+			}
+			for slug, cancel := range subs {
+				if _, ok := want[slug]; !ok {
+					cancel()
+					delete(subs, slug)
+				}
+			}
+			for slug, rem := range want {
+				if _, ok := subs[slug]; ok {
+					continue
+				}
+				cli, err := h.clientFor(rem)
+				if err != nil {
+					continue
+				}
+				if capable != nil && !capable(ctx, cli) {
+					continue
+				}
+				sctx, cancel := context.WithCancel(ctx)
+				subs[slug] = cancel
+				go h.runRemoteSubscription(sctx, rem)
+			}
+		}
+
+		reconcile()
+		t := time.NewTicker(30 * time.Second)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				for _, cancel := range subs {
+					cancel()
+				}
+				return
+			case <-t.C:
+				reconcile()
+			}
+		}
+	}()
+}
+
+// runRemoteSubscription holds one remote's event subscription open,
+// evicting that remote's proxies on every change, and reconnects after a
+// short backoff when the stream drops.
+func (h *ProxyHydrator) runRemoteSubscription(ctx context.Context, rem ServerEntry) {
+	for {
+		if ctx.Err() != nil {
+			return
+		}
+		if cli, err := h.clientFor(rem); err == nil {
+			_ = cli.StreamEvents(ctx, func() {
+				if n := h.EvictRemote(rem.Slug); n > 0 {
+					h.logger.Info("federation: evicted cached proxies on remote change",
+						zap.String("slug", rem.Slug), zap.Int("count", n))
+				}
+			})
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(2 * time.Second):
+		}
+	}
 }

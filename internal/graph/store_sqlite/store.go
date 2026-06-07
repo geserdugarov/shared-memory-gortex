@@ -528,6 +528,11 @@ func (s *Store) AddEdge(e *graph.Edge) {
 	if e == nil {
 		return
 	}
+	// D-29: an edge to/from a federation proxy node is volatile and
+	// never persisted (the proxy node itself is dropped at AddNode).
+	if graph.IsProxyID(e.From) || graph.IsProxyID(e.To) {
+		return
+	}
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 	if err := s.insertEdgeLocked(s.stmtInsertEdge, e); err != nil {

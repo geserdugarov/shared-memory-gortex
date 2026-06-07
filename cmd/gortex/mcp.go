@@ -6,28 +6,18 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
 
 	"github.com/zzet/gortex/internal/config"
-	"github.com/zzet/gortex/internal/contracts"
-	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/indexer"
-	gortexmcp "github.com/zzet/gortex/internal/mcp"
-	"github.com/zzet/gortex/internal/parser"
-	"github.com/zzet/gortex/internal/parser/languages"
 	"github.com/zzet/gortex/internal/persistence"
 	"github.com/zzet/gortex/internal/platform"
-	"github.com/zzet/gortex/internal/query"
 	"github.com/zzet/gortex/internal/savings"
-	"github.com/zzet/gortex/internal/semantic"
-	"github.com/zzet/gortex/internal/semantic/goanalysis"
-	"github.com/zzet/gortex/internal/semantic/lsp"
-	"github.com/zzet/gortex/internal/semantic/scip"
 	"github.com/zzet/gortex/internal/server"
 	"github.com/zzet/gortex/internal/server/hub"
+	"github.com/zzet/gortex/internal/serverstack"
 	"github.com/zzet/gortex/internal/workspace"
 )
 
@@ -168,198 +158,61 @@ func runMCP(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+	// Resolve the embedded semantic decision: --no-semantic forces off,
+	// --semantic forces on, otherwise semantic.enabled in config decides.
+	cfg.Semantic.Enabled = !mcpNoSemantic && (mcpSemantic || cfg.Semantic.Enabled)
 
-	g := graph.New()
-	reg := parser.NewRegistry()
-	languages.RegisterAll(reg)
-	languages.RegisterCustomGrammars(reg, cfg.Index.Grammars, logger)
-	languages.RegisterExtractorPlugins(reg, cfg.Index.ExtractorPlugins, logger)
-	languages.RegisterFallbackChunkers(reg, cfg.Index.FallbackChunkers, logger)
-
-	idx := indexer.New(g, reg, cfg.Index, logger)
-
-	// Set up embedding provider for semantic search. Held in a local
-	// variable so it can be plumbed into MultiIndexer below — without
-	// that, per-repo indexers created by MultiIndexer have embedder=nil
-	// and skip the vector pass. resolveEmbedder applies the precedence
-	// explicit flag/env > `embedding:` config > default-on static, so
-	// a stock install gets semantic search with no flags.
-	embedder, embDesc, embErr := resolveEmbedder(embedderRequest{
-		FlagChanged: cmd.Flags().Changed("embeddings"),
-		FlagEnabled: mcpEmbeddings,
-		FlagURL:     mcpEmbeddingsURL,
-		FlagModel:   mcpEmbeddingsModel,
-	}, cfg)
-	if embErr != nil {
-		fmt.Fprintf(os.Stderr, "[gortex] warning: embeddings disabled: %v\n", embErr)
-	} else if embedder != nil {
-		fmt.Fprintf(os.Stderr, "[gortex] semantic search enabled (%s)\n", embDesc)
+	// Side-store layout for the embedded path: every store partitions
+	// per-repo under the indexed repo path, and the notebook is repo-local
+	// (committed to git). When --cache-dir is unset, notes / memories still
+	// persist via the shared cache dir's sidecar.
+	sideStoreCacheDir := mcpCacheDir
+	if sideStoreCacheDir == "" {
+		sideStoreCacheDir = platform.CacheDir()
 	}
-	if embedder != nil {
-		idx.SetEmbedder(embedder)
-		idx.SetEmbeddingChunkOptions(embeddingChunkOptions(cfg))
-		idx.SetEmbeddingMaxSymbols(cfg.Embedding.MaxSymbols)
-		idx.SetEmbeddingAPIConcurrency(cfg.Embedding.APIConcurrency)
+	savingsPath := savings.DefaultPath()
+	if mcpCacheDir != "" {
+		savingsPath = filepath.Join(mcpCacheDir, "savings.json")
 	}
 
-	// Locals carrying N5 hot-path wiring out of the optional
-	// semantic-enrichment block so the MultiIndexer below sees them
-	// whether or not the block ran.
-	var (
-		mcpResolverLSPRegistry *lsp.ResolverHelperRegistry
-		mcpResolverLSPRouter   *lsp.Router
-	)
-
-	// Set up semantic enrichment.
-	if !mcpNoSemantic && (mcpSemantic || cfg.Semantic.Enabled) {
-		semCfg := cfg.Semantic
-		semCfg.Enabled = true
-
-		// Convert config provider entries to semantic.Config format.
-		semInternalCfg := semantic.Config{
-			Enabled:           semCfg.Enabled,
-			TimeoutSeconds:    semCfg.TimeoutSeconds,
-			EnrichOnWatch:     semCfg.EnrichOnWatch,
-			WatchDebounceMs:   semCfg.WatchDebounceMs,
-			RefuteUnconfirmed: semCfg.RefuteUnconfirmed,
-		}
-		for _, pc := range semCfg.Providers {
-			out := semantic.ProviderConfig{
-				Name:        pc.Name,
-				Command:     pc.Command,
-				Args:        pc.Args,
-				Env:         pc.Env,
-				Languages:   pc.Languages,
-				Priority:    pc.Priority,
-				Enabled:     pc.Enabled,
-				Mode:        pc.Mode,
-				Daemon:      pc.Daemon,
-				MaxParallel: pc.MaxParallel,
-			}
-			if pc.Connect != nil {
-				out.Connect = &semantic.ConnectConfig{
-					Network:       pc.Connect.Network,
-					Address:       pc.Connect.Address,
-					FallbackSpawn: pc.Connect.FallbackSpawn,
-				}
-			}
-			semInternalCfg.Providers = append(semInternalCfg.Providers, out)
-		}
-
-		semMgr := semantic.NewManager(semInternalCfg, logger)
-
-		// Register go/types provider (always available for Go).
-		mode := goanalysis.ModeTypeCheck
-		if mcpSemanticMode == "callgraph" {
-			mode = goanalysis.ModeCallGraph
-		}
-		goProvider := goanalysis.NewProvider(mode, false, logger)
-		semMgr.RegisterProvider(goProvider)
-		// Wire the goanalysis provider as the contract pipeline's
-		// BindingResolver — once Enrich runs, contract enrichment can
-		// upgrade Origin from ast_inferred to lsp_resolved using
-		// compiler-grade type info. See spec-contract-extraction.md §4.5.
-		contracts.SetBindingResolver(goProvider)
-
-		// Daemon-managed LSP router. Owns subprocess lifecycle for
-		// every server in the registry that the user enables — lazy
-		// spawn on first request, idle reaper, LRU eviction. Manager
-		// borrows providers from it via the LSPRouter interface; the
-		// MCP server reads it back through SemanticManager().LSPRouter()
-		// for on-demand requests (get_diagnostics / get_code_actions
-		// / apply_code_action / fix_all_in_file).
-		lspWorkspace := mcpIndex
-		if lspWorkspace == "" {
-			lspWorkspace, _ = os.Getwd()
-		}
-		lspRouter := lsp.NewRouter(lspWorkspace, logger).
-			WithIdleTimeout(10 * time.Minute).
-			WithReaperInterval(time.Minute).
-			WithMaxAlive(6)
-		semMgr.SetLSPRouter(lspRouter)
-
-		for _, pc := range semCfg.Providers {
-			if !pc.Enabled {
-				continue
-			}
-			switch {
-			case strings.HasPrefix(pc.Name, "scip-") && pc.Command != "":
-				semMgr.RegisterProvider(scip.NewProvider(pc.Command, pc.Args, pc.Languages, semCfg.TimeoutSeconds, logger))
-			case lsp.SpecByName(pc.Name) != nil:
-				// Router owns lifecycle — register the spec so it
-				// shows up in EnabledSpecNames; first ForSpec call
-				// triggers the lazy spawn (or dial, when the user
-				// configured passive attach via `connect:`).
-				var connect *lsp.ConnectSpec
-				if pc.Connect != nil {
-					connect = &lsp.ConnectSpec{
-						Network:       pc.Connect.Network,
-						Address:       pc.Connect.Address,
-						FallbackSpawn: pc.Connect.FallbackSpawn,
-					}
-				}
-				lspRouter.RegisterSpec(lsp.SpecWithOverridesConnect(
-					lsp.SpecByName(pc.Name), pc.Command, pc.Args, pc.Env, connect))
-			case pc.Daemon:
-				// Custom user-defined daemon (no registry spec) —
-				// keep the legacy eager-construction path so out-of-
-				// registry LSP servers still work.
-				semMgr.RegisterProvider(lsp.NewProvider(pc.Command, pc.Args, pc.Languages, pc.Daemon, pc.MaxParallel, logger))
-			}
-		}
-
-		idx.SetSemanticManager(semMgr)
-
-		// Resolve-time LSP hot path. Mirrors the daemon wiring
-		// so `gortex mcp` users get the same precision boost on
-		// TS/JS/JSX/TSX edges as daemon-tracked clients.
-		if !isFalsyEnv("GORTEX_LSP_RESOLVER") {
-			mcpResolverLSPRegistry = lsp.NewResolverHelperRegistry()
-			mcpResolverLSPRouter = lspRouter
-			idx.SetResolverLSPHelper(mcpResolverLSPRegistry)
-
-			// Single-repo standalone mode (no MultiIndexer) — register
-			// a "" prefix helper anchored at the workspace the user
-			// pointed `gortex mcp` at. Multi-repo mode (mi != nil)
-			// registers per-repo helpers via the OnRepoTracked hook
-			// further below.
-			if abs, err := filepath.Abs(lspWorkspace); err == nil && lspWorkspace != "" {
-				tsSpec := lsp.SpecByName("typescript-language-server")
-				if tsSpec != nil && lspRouter.Available(tsSpec) && repoLikelyHasTypeScriptIntent(abs) {
-					absRootCapture := abs
-					poolSize := lsp.ResolverPoolSizeFromEnv(1)
-					helper := buildResolverLSPHelper(lspRouter, tsSpec, absRootCapture, poolSize, logger)
-					mcpResolverLSPRegistry.Register("", helper)
-				}
-			}
-		}
-
-		fmt.Fprintf(os.Stderr, "[gortex] semantic enrichment enabled (mode: %s)\n", mcpSemanticMode)
-	}
-
-	// Initialize ConfigManager for multi-repo support.
-	cm, err := config.NewConfigManager("")
+	ss, err := serverstack.NewSharedServer(serverstack.SharedServerConfig{
+		Lifecycle: serverstack.LifecycleOneshot,
+		Index:     mcpIndex,
+		Config:    cfg,
+		Logger:    logger,
+		Version:   version,
+		Embedder: serverstack.EmbedderRequest{
+			FlagChanged: cmd.Flags().Changed("embeddings"),
+			FlagEnabled: mcpEmbeddings,
+			FlagURL:     mcpEmbeddingsURL,
+			FlagModel:   mcpEmbeddingsModel,
+		},
+		ActiveProject: mcpProject,
+		SemanticMode:  mcpSemanticMode,
+		SideStores: serverstack.SideStores{
+			NotesDir:     sideStoreCacheDir,
+			NotesRepo:    mcpIndex,
+			FeedbackDir:  mcpCacheDir,
+			FeedbackRepo: mcpIndex,
+			NotebookPath: mcpIndex,
+		},
+		SavingsPath: savingsPath,
+		SavingsRepo: mcpIndex,
+	})
 	if err != nil {
-		// Non-fatal: fall back to single-repo mode.
-		fmt.Fprintf(os.Stderr, "[gortex] warning: could not load global config: %v\n", err)
+		return fmt.Errorf("build server stack: %w", err)
 	}
+	defer func() { _ = ss.Close() }()
 
-	// Add --track repos to GlobalConfig.
-	if cm != nil && len(mcpTrack) > 0 {
-		for _, trackPath := range mcpTrack {
-			absPath, err := filepath.Abs(trackPath)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "[gortex] warning: could not resolve --track path %s: %v\n", trackPath, err)
-				continue
-			}
-			// Skip duplicates.
-			if err := cm.Global().AddRepo(config.RepoEntry{Path: absPath}); err != nil {
-				fmt.Fprintf(os.Stderr, "[gortex] warning: could not add --track repo %s: %v\n", absPath, err)
-			}
-		}
-	}
+	g := ss.Graph
+	idx := ss.Indexer
+	cm := ss.ConfigMgr
+	mi := ss.MultiIndexer
+	srv := ss.MCP
+	srv.SetBind(bind)
 
-	// Determine active project.
+	// Persist the resolved active project so the MCP server and
+	// set_active_project agree on the default scope.
 	activeProject := mcpProject
 	if activeProject == "" && cm != nil {
 		activeProject = cm.Global().ActiveProject
@@ -368,128 +221,24 @@ func runMCP(cmd *cobra.Command, args []string) error {
 		cm.Global().ActiveProject = activeProject
 	}
 
-	// Initialize MultiIndexer when we have a ConfigManager.
-	var mi *indexer.MultiIndexer
+	// Register --track repos for the background watch / track loop.
 	if cm != nil {
-		mi = indexer.NewMultiIndexer(g, reg, idx.Search(), cm, logger)
-		if embedder != nil {
-			mi.SetEmbedder(embedder)
-			mi.SetEmbeddingChunkOptions(embeddingChunkOptions(cfg))
-			mi.SetEmbeddingMaxSymbols(cfg.Embedding.MaxSymbols)
-			mi.SetEmbeddingAPIConcurrency(cfg.Embedding.APIConcurrency)
-		}
-		if mcpResolverLSPRegistry != nil {
-			mi.SetResolverLSPHelper(mcpResolverLSPRegistry)
-			if mcpResolverLSPRouter != nil {
-				routerRef := mcpResolverLSPRouter
-				registryRef := mcpResolverLSPRegistry
-				poolSize := lsp.ResolverPoolSizeFromEnv(1)
-				mi.SetOnRepoTracked(func(prefix, absPath string) {
-					tsSpec := lsp.SpecByName("typescript-language-server")
-					if tsSpec == nil || !routerRef.Available(tsSpec) {
-						return
-					}
-					if !repoLikelyHasTypeScriptIntent(absPath) {
-						return
-					}
-					absRootCapture := absPath
-					helper := buildResolverLSPHelper(routerRef, tsSpec, absRootCapture, poolSize, logger)
-					registryRef.Register(prefix, helper)
-				})
+		for _, trackPath := range mcpTrack {
+			absPath, aerr := filepath.Abs(trackPath)
+			if aerr != nil {
+				fmt.Fprintf(os.Stderr, "[gortex] warning: could not resolve --track path %s: %v\n", trackPath, aerr)
+				continue
+			}
+			if aerr := cm.Global().AddRepo(config.RepoEntry{Path: absPath}); aerr != nil {
+				fmt.Fprintf(os.Stderr, "[gortex] warning: could not add --track repo %s: %v\n", absPath, aerr)
 			}
 		}
 	}
 
-	// Build multi-repo options for the MCP server.
-	var multiOpts []gortexmcp.MultiRepoOptions
-	if mi != nil || cm != nil {
-		multiOpts = append(multiOpts, gortexmcp.MultiRepoOptions{
-			MultiIndexer:  mi,
-			ConfigManager: cm,
-			ActiveProject: activeProject,
-		})
-	}
-
-	// Create MCP server immediately so the stdio handshake can complete
-	// before indexing (which may take time on large repos).
-	eng := query.NewEngine(g)
-	eng.SetSearchProvider(idx.Search)
-	eng.ApplyRerankWeights(cfg.Search.Weights)
-	gortexmcp.Version = version
-	srv := gortexmcp.NewServer(eng, g, idx, nil, logger, cfg.Guards.Rules, multiOpts...)
-	srv.SetArchitecture(cfg.Architecture)
-	srv.SetArtifacts(cfg.Artifacts)
-	srv.SetNamedQueries(cfg.Queries)
-	srv.SetSearchConfig(cfg.Search)
-	srv.SetBind(bind)
-
-	// Wire semantic manager to MCP server for stats reporting.
-	if semMgr := idx.SemanticManager(); semMgr != nil {
-		srv.SetSemanticManager(semMgr)
-		// Hook the LSP router (if any) into the MCP
-		// `notifications/diagnostics` broadcaster so subscribed
-		// clients receive publishDiagnostics in real time. No-op
-		// when no router is wired.
-		srv.SetLSPDiagnosticsBroadcasting()
-	}
-
-	// Resolve the side-store cache dir. When --cache-dir is unset, fall
-	// back to the shared cache dir so notes / memories / notebooks still
-	// persist via the sidecar DB (the side-stores are independent of the
-	// graph backend, so they persist even under --backend memory).
-	sideStoreCacheDir := mcpCacheDir
-	if sideStoreCacheDir == "" {
-		sideStoreCacheDir = platform.CacheDir()
-	}
-
-	// Initialize feedback persistence for cross-session context learning.
-	srv.InitFeedback(mcpCacheDir, mcpIndex)
-	// Notes: per-repo session memory store backing save_note /
-	// query_notes / distill_session. Persisted in the sidecar DB so
-	// notes survive daemon restarts and compactions, independent of the
-	// graph backend.
-	srv.InitNotes(sideStoreCacheDir, mcpIndex)
-	// Memories: cross-session development-memory store backing
-	// store_memory / query_memories / surface_memories. Shares the
-	// sidecar DB with notes; entries are workspace-wide and durable
-	// across sessions, compounding team knowledge.
-	srv.InitMemories(sideStoreCacheDir, mcpIndex)
-	// Notebook: repository-local persistent notebook at
-	// <repo>/.gortex/notebook/. Entries are committed alongside the
-	// repo so they're visible in PR reviews and travel with the
-	// codebase.
-	srv.InitNotebook(mcpIndex)
-	// Combo tracker persists (query → chosen symbol) associations per repo
-	// so the next time the agent asks the same thing, the previously-picked
-	// symbol floats to the top of search results.
-	srv.InitCombo(mcpCacheDir, mcpIndex, gortexmcp.ModeAI)
-	// Frecency: per-symbol access timestamps with AI-tuned (3-day half-life)
-	// decay. Hot symbols in the current session float up in search results.
-	srv.InitFrecency(mcpCacheDir, mcpIndex, gortexmcp.ModeAI)
-
-	// Initialize cumulative token-savings persistence. Path defaults to
-	// ~/.gortex/cache/savings.json; the store operates in-memory when the
-	// cache dir is unavailable.
-	savingsPath := savings.DefaultPath()
-	if mcpCacheDir != "" {
-		savingsPath = filepath.Join(mcpCacheDir, "savings.json")
-	}
-	if savingsStore, err := savings.Open(savingsPath); err == nil {
-		srv.InitSavings(savingsStore, mcpIndex)
-		stopSavingsFlush := srv.StartPeriodicSavingsFlush(5 * time.Minute)
-		defer stopSavingsFlush()
-		defer func() { _ = srv.FlushSavings() }()
-	} else {
-		fmt.Fprintf(os.Stderr, "[gortex] savings persistence disabled: %v\n", err)
-	}
-
-	// LLM service — same wiring as the daemon path: repo config wins
-	// per non-zero field, global ~/.gortex/config.yaml fills the
-	// rest, env vars override last inside SetupLLM. The active provider
-	// is chosen by `llm.provider` (local / anthropic / openai / ollama /
-	// claudecli / gemini / bedrock / deepseek).
-	gc, _ := config.LoadGlobal()
-	srv.SetupLLM(gc.MergeLLMInto(cfg.LLM))
+	// Periodic savings flush. NewSharedServer flushes on Close (deferred
+	// above); this guards against a crash losing accumulated totals.
+	stopSavingsFlush := srv.StartPeriodicSavingsFlush(5 * time.Minute)
+	defer stopSavingsFlush()
 
 	fmt.Fprintf(os.Stderr, "[gortex] MCP server ready (transport: %s)\n", mcpTransport)
 

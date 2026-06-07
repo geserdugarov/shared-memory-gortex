@@ -210,8 +210,10 @@ func detectClientName() string {
 //  3. The first non-empty editor workspace env var (CURSOR_WORKSPACE,
 //     CLAUDE_CODE_WORKSPACE, WINDSURF_WORKSPACE, KIRO_WORKSPACE,
 //     CODEX_WORKSPACE, ANTIGRAVITY_WORKSPACE, VSCODE_WORKSPACE).
-//  4. Fall through to whatever Getwd() returned — the daemon (or the
-//     embedded handshake) will surface a clear entry-point error.
+//  4. Fall through to whatever Getwd() returned — the daemon resolves
+//     it per session (ScopeForCWD) and surfaces a clear repo_not_tracked
+//     error when the cwd maps to no tracked repo, isolating the session
+//     to nothing rather than the whole graph.
 func resolveLaunchCWD() (string, error) {
 	cwd, err := os.Getwd()
 	if err != nil {

@@ -30,7 +30,6 @@ import (
 	"github.com/zzet/gortex/internal/search"
 	"github.com/zzet/gortex/internal/semantic"
 	"github.com/zzet/gortex/internal/server/hub"
-	"github.com/zzet/gortex/internal/workspace"
 )
 
 // Version is set at build time.
@@ -285,12 +284,6 @@ type Server struct {
 	// leaves it nil so the live server is used.
 	resourcesNotifier resourcesUpdatedNotifier
 
-	// bind is the active two-entry-point handshake result.
-	// nil when no handshake has been performed (legacy callers, tests
-	// that construct the server directly). Tool handlers consult it
-	// via Bind(); the per-tool scope dispatcher consults it via
-	// resolveScope.
-	bind *workspace.Bind
 
 	// toolScopes is the per-Server tool-name → ToolScope registry.
 	// Populated by registerToolWithScope as tools are added; consulted
@@ -1546,22 +1539,6 @@ func (s *Server) ExportContext(ctx context.Context, task, entryPoint, format str
 	return s.handleExportContext(ctx, req)
 }
 
-// SetBind installs the active workspace bind.
-// Called by the `mcp` / `server` / daemon command
-// after a successful workspace.Resolve(cwd). nil resets the bind —
-// useful for tests.
-//
-// The bind drives per-tool scope dispatch: every call to a scope: repo
-// tool resolves `repo` against bind.Members; every call to a
-// scope: workspace tool defaults to the bind's member list;
-// scope: fan-out's `["*"]` sentinel expands to bind.Members.
-func (s *Server) SetBind(b *workspace.Bind) { s.bind = b }
-
-// Bind returns the active bind, or nil if no handshake has run.
-// Exposed for tool handlers that need to enforce the
-// workspace-isolation invariant directly (e.g. `list_repos`).
-func (s *Server) Bind() *workspace.Bind { return s.bind }
-
 // RegisterToolScope records the ToolScope for toolName so the
 // dispatcher can validate `repo` per call. Tools that don't register a
 // scope behave as if unscoped — legacy single-repo behavior — until
@@ -1604,7 +1581,7 @@ func (s *Server) ResolveToolScope(toolName string, repo any) (*ScopedRepos, *mcp
 	if !ok {
 		return nil, nil
 	}
-	return ResolveScopedRepos(scope, s.bind, repo)
+	return ResolveScopedRepos(scope, repo)
 }
 
 // communityCacheToken is the per-graph identity tuple

@@ -483,6 +483,14 @@ func (s *Store) AddNode(n *graph.Node) {
 	if n == nil || n.ID == "" {
 		return
 	}
+	// D-29: federation Option-B proxy nodes are volatile remote-derived
+	// state and must never reach disk. The durable writer is the single
+	// gate — neither the resolver mint path nor the hydrator carries its
+	// own "don't persist" branch. A dropped proxy node is re-minted on
+	// demand after a restart.
+	if graph.IsProxyNode(n) {
+		return
+	}
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 	if err := s.insertNodeLocked(s.stmtInsertNode, n); err != nil {
@@ -574,6 +582,10 @@ func (s *Store) AddBatch(nodes []*graph.Node, edges []*graph.Edge) {
 		if n == nil || n.ID == "" {
 			continue
 		}
+		// D-29: federation Option-B proxy nodes never reach disk.
+		if graph.IsProxyNode(n) {
+			continue
+		}
 		if err := s.insertNodeLocked(insertNode, n); err != nil {
 			panicOnFatal(err)
 			return
@@ -581,6 +593,12 @@ func (s *Store) AddBatch(nodes []*graph.Node, edges []*graph.Edge) {
 	}
 	for _, e := range edges {
 		if e == nil {
+			continue
+		}
+		// D-29: an edge to or from a proxy node is volatile remote-
+		// derived state too; never persist it (it would dangle on
+		// reload since the proxy node itself is dropped).
+		if graph.IsProxyID(e.From) || graph.IsProxyID(e.To) {
 			continue
 		}
 		if err := s.insertEdgeLocked(insertEdge, e); err != nil {

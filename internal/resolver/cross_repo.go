@@ -112,6 +112,15 @@ type CrossRepoResolver struct {
 	// the field of the same name on Resolver — see
 	// workspace_membership.go.
 	workspaceMembers WorkspaceMembership
+
+	// Federation Option-B (spec-08; off by default). When edgesEnabled
+	// and prober != nil, a function call that local resolution leaves
+	// unresolved is, as a last resort, stitched to a proxy node standing
+	// in for a symbol a remote daemon owns — but only on positive remote
+	// evidence (a find_declaration hit AND a non-empty import hint).
+	edgesEnabled bool
+	prober       RemoteDeclarationProber
+	proxyBudget  int
 }
 
 // NewCrossRepo creates a CrossRepoResolver for the given graph.
@@ -892,6 +901,13 @@ func (cr *CrossRepoResolver) resolveEdge(e *graph.Edge, stats *CrossRepoStats, b
 		stats.Unresolved++
 	default:
 		cr.resolveFunctionCall(e, target, stats)
+		// Last-resort federation stitch (spec-08): only when local
+		// resolution left the edge unresolved, Option B is on, and a
+		// prober is wired. The evidence gate inside tryRemoteStitch
+		// refuses to probe on a bare name (R-FED-6).
+		if e.To == oldTo && cr.edgesEnabled && cr.prober != nil {
+			cr.tryRemoteStitch(e, target, stats)
+		}
 	}
 
 	if e.To != oldTo {

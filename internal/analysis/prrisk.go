@@ -136,7 +136,6 @@ func ScorePRRisk(g graph.Store, in PRRiskInput) PRRiskResult {
 	// at the changed symbol). Only code-bearing symbols are counted so a
 	// changed import/type-alias does not dilute the ratio.
 	covered, uncovered := 0, 0
-	var uncoveredList []string
 	for _, id := range ids {
 		n := g.GetNode(id)
 		if n == nil || !isCodeSymbol(n.Kind) {
@@ -146,7 +145,6 @@ func ScorePRRisk(g graph.Store, in PRRiskInput) PRRiskResult {
 			covered++
 		} else {
 			uncovered++
-			uncoveredList = append(uncoveredList, id)
 		}
 	}
 	coverageScore := 0.0

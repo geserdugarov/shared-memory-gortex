@@ -208,7 +208,7 @@ func TestRunSurfacesGate(t *testing.T) {
 	low := mkFinding("low", SevInfo, "style", 1.0)
 	high := mkFinding("high", SevCritical, "security", 1.0)
 
-	report := &ReviewReport{}
+	var report *ReviewReport
 	plan := &reviewPlan{ruleFinds: []Finding{low, high}}
 
 	// Gated: MinSeverity warning drops the info finding.

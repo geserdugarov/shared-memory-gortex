@@ -667,8 +667,8 @@ func buildTriagePrompt(ranked []map[string]any) string {
 		author, _ := r["author"].(string)
 		risk, _ := r["risk"].(string)
 		score, _ := r["score"].(float64)
-		b.WriteString(fmt.Sprintf("PR %d | risk=%s score=%.1f | %s",
-			n, strings.TrimSpace(risk), score, strings.TrimSpace(title)))
+		fmt.Fprintf(&b, "PR %d | risk=%s score=%.1f | %s",
+			n, strings.TrimSpace(risk), score, strings.TrimSpace(title))
 		if a := strings.TrimSpace(author); a != "" {
 			b.WriteString(" | by " + a)
 		}

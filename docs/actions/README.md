@@ -77,3 +77,34 @@ front-end) that already fetched the PR data can avoid a refetch:
 When supplied data is present, the tool classifies / scores it directly and
 makes no network call. Triage additionally caches each fetched PR for a short
 window so a re-run within the window does not refetch the same PR.
+
+## Per-PR reviewer graph bundle
+
+`gortex prs bundle <number>` writes a self-contained, reviewer-focused slice of
+the knowledge graph to a JSON file (`--out`, default `pr-<number>-bundle.json`):
+
+- the PR's **changed files**,
+- the graph-joined **impact** — the blast radius, the five-axis PR-risk score,
+  and a small privacy-safe **review receipt** (risk tier + next-safe-action +
+  merge-blocker verdict) — taken verbatim from `get_pr_impact`,
+- the ranked **reviewer suggestions** from `suggest_reviewers` (CODEOWNERS +
+  recent authorship + co-change experts).
+
+The bundle is deterministic for an unchanged PR (the changed-file list is
+sorted and the JSON is stably indented), so it can be uploaded as a CI artifact
+and diffed across runs. The command is daemon-first: the forge supplies the
+changed-file set and the daemon joins it against the indexed graph — no second
+in-process index. A failing `suggest_reviewers` (missing token / CODEOWNERS)
+does not sink the bundle; the reviewers section is simply omitted.
+
+### Wiring it into CI
+
+A ready-to-use GitHub Action template lives at
+[`.github/workflows/gortex-pr-review.yml.example`](../../.github/workflows/gortex-pr-review.yml.example).
+The `.yml.example` suffix means GitHub does **not** run it as-is — copy it to
+`.github/workflows/gortex-pr-review.yml` in your repository to enable it. On
+each `pull_request` it builds gortex, starts the daemon, indexes the checked-out
+repo, runs `gortex prs bundle <N>`, and uploads the bundle with
+`actions/upload-artifact`. It maps the Action-provided `GITHUB_TOKEN` to
+`GH_TOKEN` so the daemon self-serves the PR's changed files with no extra secret
+configuration.

@@ -1,10 +1,13 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"text/tabwriter"
@@ -21,6 +24,7 @@ var (
 	prsRepo      string
 	prsFormat    string
 	prsWorktrees bool
+	prsBundleOut string
 )
 
 // Seams. The forge free functions and the daemon-tool relay are indirected
@@ -51,11 +55,39 @@ needs a running daemon that tracks the repo.`,
 	RunE: runPRs,
 }
 
+var prsBundleCmd = &cobra.Command{
+	Use:   "bundle <number>",
+	Short: "Write a reviewer graph bundle for a PR (impact + receipt + reviewers)",
+	Long: `Builds a self-contained, reviewer-focused bundle for a pull request and
+writes it to a file (--out, default pr-<number>-bundle.json).
+
+The bundle is the PR-review-relevant slice of the knowledge graph: the PR's
+changed files, the graph-joined blast radius and PR-risk score (with a
+privacy-safe review receipt), and the ranked reviewer suggestions. It joins
+the forge's changed-file set against the daemon's graph via the get_pr_impact
+and suggest_reviewers tools — no second in-process index.
+
+The bundle is deterministic for an unchanged PR, so it can be uploaded as a CI
+artifact and diffed across runs. A committed GitHub Action template that wires
+this into per-PR CI lives at .github/workflows/gortex-pr-review.yml.example
+(documented in docs/actions/README.md).
+
+Listing needs a GitHub token (GH_TOKEN or GITHUB_TOKEN) to fetch the changed
+files; the graph join needs a running daemon that tracks the repo.`,
+	Args: cobra.ExactArgs(1),
+	RunE: runPRsBundle,
+}
+
 func init() {
 	prsCmd.Flags().StringVarP(&prsBase, "base", "b", "", "default base branch used to flag BASE_MISMATCH (default: the repo's default branch)")
 	prsCmd.Flags().StringVar(&prsRepo, "repo", "", "repository path the forge / daemon must own (default: current directory)")
 	prsCmd.Flags().StringVar(&prsFormat, "format", "text", "output format: text or json")
 	prsCmd.Flags().BoolVar(&prsWorktrees, "worktrees", false, "annotate each PR whose head branch is checked out in a local worktree")
+
+	prsBundleCmd.Flags().StringVar(&prsRepo, "repo", "", "repository path the forge / daemon must own (default: current directory)")
+	prsBundleCmd.Flags().StringVarP(&prsBundleOut, "out", "o", "", "bundle output file (default: pr-<number>-bundle.json)")
+	prsCmd.AddCommand(prsBundleCmd)
+
 	rootCmd.AddCommand(prsCmd)
 }
 
@@ -327,4 +359,162 @@ func localWorktreeBranches(ctx context.Context, repoPath string) map[string]bool
 		}
 	}
 	return branches
+}
+
+// bundleVersion is the on-the-wire schema version of a reviewer bundle. Bump it
+// when the bundle's top-level shape changes incompatibly so consumers can gate.
+const bundleVersion = 1
+
+// reviewerBundle is the PR-review-relevant slice of the knowledge graph written
+// by `gortex prs bundle`. It pairs the PR's changed file set with the
+// graph-joined impact (blast radius + PR-risk score + privacy-safe receipt) and
+// the ranked reviewer suggestions, so a CI job can upload one self-contained
+// artifact a reviewer (or a downstream agent) consumes without a live daemon.
+//
+// Impact and Reviewers carry the daemon tools' payloads verbatim (get_pr_impact
+// and suggest_reviewers) so the bundle has a single source of truth and no
+// re-projection drift. ChangedFiles is lifted out for quick top-level scanning.
+type reviewerBundle struct {
+	BundleVersion int             `json:"bundle_version"`
+	Number        int             `json:"number"`
+	ChangedFiles  []string        `json:"changed_files"`
+	Impact        json.RawMessage `json:"impact"`
+	Reviewers     json.RawMessage `json:"reviewers,omitempty"`
+}
+
+// runPRsBundle builds a reviewer bundle for a PR and writes it to --out (or the
+// default pr-<number>-bundle.json). It is daemon-first: the forge supplies the
+// changed-file set (best-effort), and the daemon joins it against the graph via
+// get_pr_impact and suggest_reviewers. The result is deterministic for an
+// unchanged PR.
+func runPRsBundle(cmd *cobra.Command, args []string) error {
+	repoPath := "."
+	if prsRepo != "" {
+		repoPath = prsRepo
+	}
+
+	n, err := strconv.Atoi(strings.TrimSpace(args[0]))
+	if err != nil || n <= 0 {
+		return fmt.Errorf("invalid PR number %q", args[0])
+	}
+
+	ctx := context.Background()
+
+	// Best-effort: fetch the changed file set so the daemon tools skip a
+	// redundant forge fetch. With no token we omit it and let the daemon
+	// self-serve; a daemon with no token of its own degrades inside the tool.
+	var files []string
+	if forgeAvailable(ctx) {
+		fetched, ferr := forgePRFiles(ctx, repoPath, n)
+		if ferr != nil {
+			return fmt.Errorf("fetching PR #%d files: %w", n, ferr)
+		}
+		files = fetched
+	}
+
+	impactArgs := map[string]any{"number": n, "receipt": true}
+	reviewerArgs := map[string]any{"number": n}
+	if prsRepo != "" {
+		impactArgs["repo"] = prsRepo
+		reviewerArgs["repo"] = prsRepo
+	}
+	if files != nil {
+		if encoded, merr := json.Marshal(files); merr == nil {
+			impactArgs["files"] = string(encoded)
+		}
+	}
+
+	impact, err := prsDaemonTool(repoPath, "get_pr_impact", impactArgs)
+	if err != nil {
+		return err
+	}
+
+	// Reviewers are best-effort: a missing forge token / CODEOWNERS file must
+	// not sink the whole bundle. On any daemon error we record an empty
+	// reviewers section and still write the impact slice.
+	reviewers, rerr := prsDaemonTool(repoPath, "suggest_reviewers", reviewerArgs)
+	if rerr != nil {
+		reviewers = nil
+	}
+
+	// Pull the changed files out of the impact payload so the bundle carries an
+	// authoritative top-level list even when the CLI had no token to fetch its
+	// own. Fall back to the CLI-fetched set.
+	changed := changedFilesFromImpact(impact)
+	if len(changed) == 0 {
+		changed = files
+	}
+
+	out := prsBundleOut
+	if out == "" {
+		out = fmt.Sprintf("pr-%d-bundle.json", n)
+	}
+
+	if err := writeReviewerBundle(out, n, changed, impact, reviewers); err != nil {
+		return err
+	}
+	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "wrote reviewer bundle for PR #%d to %s\n", n, out)
+	return nil
+}
+
+// changedFilesFromImpact extracts the changed_files list from a get_pr_impact
+// payload. Returns nil when the payload is a degradation envelope or otherwise
+// lacks the field, so the caller can fall back to its own fetched set.
+func changedFilesFromImpact(impact json.RawMessage) []string {
+	if len(impact) == 0 {
+		return nil
+	}
+	var p struct {
+		ChangedFiles []string `json:"changed_files"`
+	}
+	if err := json.Unmarshal(impact, &p); err != nil {
+		return nil
+	}
+	return p.ChangedFiles
+}
+
+// writeReviewerBundle assembles a reviewerBundle from the daemon tool payloads
+// and writes it deterministically to path. The changed-file list is sorted and
+// the JSON is indented so two runs over an unchanged PR produce byte-identical
+// output (suitable for CI artifact diffing). A nil/empty reviewers payload is
+// omitted from the bundle rather than written as JSON null.
+func writeReviewerBundle(path string, number int, changedFiles []string, impact, reviewers json.RawMessage) error {
+	if number <= 0 {
+		return fmt.Errorf("invalid PR number %d", number)
+	}
+	if len(impact) == 0 {
+		return fmt.Errorf("cannot write bundle for PR #%d: empty impact payload", number)
+	}
+
+	files := append([]string(nil), changedFiles...)
+	sort.Strings(files)
+	if files == nil {
+		files = []string{}
+	}
+
+	b := reviewerBundle{
+		BundleVersion: bundleVersion,
+		Number:        number,
+		ChangedFiles:  files,
+		Impact:        impact,
+	}
+	if len(bytes.TrimSpace(reviewers)) > 0 {
+		b.Reviewers = reviewers
+	}
+
+	data, err := json.MarshalIndent(b, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encoding reviewer bundle: %w", err)
+	}
+	data = append(data, '\n')
+
+	if dir := filepath.Dir(path); dir != "" && dir != "." {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return fmt.Errorf("creating bundle directory %q: %w", dir, err)
+		}
+	}
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		return fmt.Errorf("writing reviewer bundle to %q: %w", path, err)
+	}
+	return nil
 }

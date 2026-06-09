@@ -1010,6 +1010,7 @@ func NewServer(engine *query.Engine, g graph.Store, idx *indexer.Indexer, watche
 	s.registerFindDeclarationTool()
 	s.registerPRRiskTool()
 	s.registerSuggestReviewersTool()
+	s.registerReviewTools()
 	s.registerPRTools()
 	s.registerConflictsPRTool()
 	s.registerResources()

@@ -2161,6 +2161,44 @@ func encodeConflictsPRs(result map[string]any) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
+// encodeSiblingDiffContext encodes the sibling_diff_context payload as GCX1: a
+// one-row summary (total + focus list) plus a per-sibling section carrying the
+// relation tag, relatedness score, and the raw diff text. The map shape mirrors
+// siblingDiffPayload so JSON and GCX share one set of field names.
+func encodeSiblingDiffContext(result map[string]any) ([]byte, error) {
+	var buf bytes.Buffer
+
+	total, _ := result["total"].(int)
+	focus, _ := result["focus"].([]string)
+	sumEnc := newGCX(&buf, "sibling_diff_context.summary", []string{"total", "focus"})
+	if err := sumEnc.WriteRow(total, strings.Join(focus, ",")); err != nil {
+		return nil, err
+	}
+	if err := sumEnc.Close(); err != nil {
+		return nil, err
+	}
+
+	sibEnc := newGCX(&buf, "sibling_diff_context.siblings",
+		[]string{"file", "relation", "score", "diff"},
+	)
+	if siblings, ok := result["siblings"].([]map[string]any); ok {
+		for _, sib := range siblings {
+			file, _ := sib["file"].(string)
+			relation, _ := sib["relation"].(string)
+			score, _ := sib["score"].(float64)
+			diff, _ := sib["diff"].(string)
+			if err := sibEnc.WriteRow(file, relation, roundFloat(score), diff); err != nil {
+				return nil, err
+			}
+		}
+	}
+	if err := sibEnc.Close(); err != nil {
+		return nil, err
+	}
+
+	return buf.Bytes(), nil
+}
+
 // joinInts renders a slice of ints as a comma-joined string for GCX1
 // scalar columns that carry a small list (e.g. colliding PR numbers).
 func joinInts(xs []int) string {

@@ -760,7 +760,7 @@ func runDaemonStop(cmd *cobra.Command, _ []string) error {
 	// following start, so only a standalone stop is sticky.
 	if !daemonRestartActive {
 		if err := daemon.MarkStopIntent(); err != nil {
-			fmt.Fprintf(w, "[gortex daemon] warning: could not record stop intent (%v); daemon may auto-respawn\n", err)
+			_, _ = fmt.Fprintf(w, "[gortex daemon] warning: could not record stop intent (%v); daemon may auto-respawn\n", err)
 		}
 		// If an OS supervisor (systemd --user / launchd) owns the daemon, stop
 		// it THROUGH the supervisor — a socket-level stop just kills the worker

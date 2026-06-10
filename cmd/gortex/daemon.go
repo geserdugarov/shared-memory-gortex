@@ -132,6 +132,9 @@ func init() {
 // with GORTEX_DAEMON_CHILD=1 set, which the inner exec picks up and runs
 // the actual serve loop.
 func runDaemonStart(cmd *cobra.Command, _ []string) error {
+	// An explicit start (user, supervisor, or autostart spawn) supersedes any
+	// prior `daemon stop` — clear the stay-down mark so autostart works again.
+	daemon.ClearStopIntent()
 	if daemon.IsRunning() {
 		return fmt.Errorf("daemon already running (socket: %s)", daemon.SocketPath())
 	}
@@ -747,6 +750,13 @@ func emitDaemonStartSummary(w io.Writer, pid int, elapsed time.Duration) {
 
 func runDaemonStop(cmd *cobra.Command, _ []string) error {
 	w := cmd.ErrOrStderr()
+	// Record the user's "stay down" intent so the autostart path (a live
+	// `gortex mcp` proxy relaunched by an editor) doesn't immediately respawn
+	// the daemon we're about to stop. A `daemon restart` re-clears it via the
+	// following start, so only a standalone stop is sticky.
+	if !daemonRestartActive {
+		_ = daemon.MarkStopIntent()
+	}
 	if !daemon.IsRunning() {
 		// The socket is gone, but a process may still be alive and holding
 		// the store lock — a daemon mid-shutdown, or one whose socket wedged.

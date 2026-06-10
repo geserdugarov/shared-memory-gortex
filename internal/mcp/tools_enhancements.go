@@ -3134,6 +3134,10 @@ func (s *Server) handleBatchEdit(ctx context.Context, req mcp.CallToolRequest) (
 // the file, and re-indexes. Semantics match the legacy single-op batch_edit.
 func (s *Server) applyBatchSymbolEdit(ctx context.Context, edit batchEditItem) batchEditResult {
 	res := batchEditResult{Op: "edit_symbol", SymbolID: edit.SymbolID}
+	if edit.OldSource == edit.NewSource {
+		res.Status, res.Error = "failed", "old_source and new_source are identical"
+		return res
+	}
 	node := s.engineFor(ctx).GetSymbol(edit.SymbolID)
 	if node == nil {
 		res.Status, res.Error = "failed", "symbol not found: "+edit.SymbolID
@@ -3161,12 +3165,36 @@ func (s *Server) applyBatchSymbolEdit(ctx context.Context, edit batchEditItem) b
 		return res
 	}
 	symbolSource := strings.Join(lines[node.StartLine-1:node.EndLine], "\n")
+	effectiveStart := node.StartLine
+	if findEOLMatches(symbolSource, edit.OldSource).count == 0 {
+		// Expand the window upward over preceding doc comments and blank
+		// lines — mirrors handleEditSymbol (agents often include the doc
+		// comment because get_symbol_source returns context above the
+		// symbol).
+		expandedStart := node.StartLine - 1
+		for expandedStart > 0 {
+			trimmed := strings.TrimSpace(lines[expandedStart-1])
+			if strings.HasPrefix(trimmed, "//") || strings.HasPrefix(trimmed, "/*") ||
+				strings.HasPrefix(trimmed, "*") || trimmed == "" {
+				expandedStart--
+			} else {
+				break
+			}
+		}
+		if expandedStart < node.StartLine-1 {
+			expanded := strings.Join(lines[expandedStart:node.EndLine], "\n")
+			if findEOLMatches(expanded, edit.OldSource).count > 0 {
+				symbolSource = expanded
+				effectiveStart = expandedStart + 1
+			}
+		}
+	}
 	if findEOLMatches(symbolSource, edit.OldSource).count == 0 {
 		res.Status, res.Error = "failed", "old_source not found within symbol"
 		return res
 	}
 	symbolStart := 0
-	for i := 0; i < node.StartLine-1 && i < len(lines); i++ {
+	for i := 0; i < effectiveStart-1 && i < len(lines); i++ {
 		symbolStart += len(lines[i]) + 1
 	}
 	symbolEnd := min(symbolStart+len(symbolSource), len(fileStr))

@@ -152,6 +152,56 @@ func TestBatchEdit_SymbolOpCRLFExactStillPreferred(t *testing.T) {
 	assert.Contains(t, string(got), "\ta := 10\r\n\tb := 20\r\n")
 }
 
+func TestBatchEdit_SymbolOpCRLFDocCommentIncludedInFragment(t *testing.T) {
+	srv, dir := setupTestServer(t)
+	path := writeCRLFGoFixture(t, srv, dir)
+
+	// Parity with edit_symbol: the batch op must also expand the search
+	// window over the preceding doc comment, EOL-tolerantly.
+	res := callBatchEdit(t, srv, map[string]any{"edits": []any{
+		map[string]any{
+			"op":         "edit_symbol",
+			"id":         "crlf.go::CrlfTarget",
+			"old_source": "// CrlfTarget exercises CRLF-file symbol editing.\nfunc CrlfTarget() {",
+			"new_source": "// CrlfTarget exercises CRLF-file symbol editing (edited).\nfunc CrlfTarget() {",
+		},
+	}})
+	require.False(t, res.IsError, "%v", res.Content)
+	results := decodeBatchEditResults(t, res)
+	require.Len(t, results, 1)
+	assert.Equal(t, "applied", results[0]["status"], "error: %v", results[0]["error"])
+
+	got, err := os.ReadFile(path)
+	require.NoError(t, err)
+	assert.Contains(t, string(got),
+		"// CrlfTarget exercises CRLF-file symbol editing (edited).\r\nfunc CrlfTarget() {\r\n")
+	assertUniformCRLF(t, string(got))
+}
+
+func TestBatchEdit_SymbolOpIdenticalSourcesRejected(t *testing.T) {
+	srv, dir := setupTestServer(t)
+	path := writeCRLFGoFixture(t, srv, dir)
+	before, err := os.ReadFile(path)
+	require.NoError(t, err)
+
+	res := callBatchEdit(t, srv, map[string]any{"edits": []any{
+		map[string]any{
+			"op":         "edit_symbol",
+			"id":         "crlf.go::CrlfTarget",
+			"old_source": "\ta := 1\r\n\tb := 2",
+			"new_source": "\ta := 1\r\n\tb := 2",
+		},
+	}})
+	results := decodeBatchEditResults(t, res)
+	require.Len(t, results, 1)
+	assert.Equal(t, "failed", results[0]["status"])
+	assert.Contains(t, results[0]["error"], "identical")
+
+	after, err := os.ReadFile(path)
+	require.NoError(t, err)
+	assert.Equal(t, string(before), string(after), "no silent no-op write")
+}
+
 func TestBatchEdit_MixedOpsCRLF(t *testing.T) {
 	srv, dir := setupTestServer(t)
 	goPath := writeCRLFGoFixture(t, srv, dir)

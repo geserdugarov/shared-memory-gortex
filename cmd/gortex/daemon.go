@@ -756,6 +756,13 @@ func runDaemonStop(cmd *cobra.Command, _ []string) error {
 	// following start, so only a standalone stop is sticky.
 	if !daemonRestartActive {
 		_ = daemon.MarkStopIntent()
+		// If an OS supervisor (systemd --user / launchd) owns the daemon, stop
+		// it THROUGH the supervisor — a socket-level stop just kills the worker
+		// and the supervisor restarts it. `daemon restart` skips this and
+		// bounces via the supervisor instead.
+		if serviceActive() {
+			return serviceStop(w)
+		}
 	}
 	if !daemon.IsRunning() {
 		// The socket is gone, but a process may still be alive and holding
@@ -900,6 +907,14 @@ func runDaemonRestart(cmd *cobra.Command, args []string) error {
 	defer func() { daemonRestartActive = false }()
 
 	emitDaemonRestartBanner(cmd.ErrOrStderr())
+
+	// When an OS supervisor owns the daemon, bounce it THROUGH the supervisor so
+	// the supervisor keeps ownership; a manual stop+start would orphan the new
+	// daemon from the unit (the unit reads inactive while a hand-started process
+	// holds the socket).
+	if serviceActive() {
+		return serviceRestart(cmd.ErrOrStderr())
+	}
 
 	// Stop is idempotent when not running and now blocks until the old
 	// process has fully exited — releasing the store's on-disk lock — before

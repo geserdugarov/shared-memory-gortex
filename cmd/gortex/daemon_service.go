@@ -119,8 +119,11 @@ func runDaemonServiceStatus(cmd *cobra.Command, _ []string) error {
 
 // --- launchd (macOS) ------------------------------------------------------
 
-// launchdPlistTemplate renders the LaunchAgent plist. KeepAlive ensures
-// crashes auto-restart; RunAtLoad starts on login.
+// launchdPlistTemplate renders the LaunchAgent plist. KeepAlive uses the
+// SuccessfulExit=false policy so the agent is restarted on a crash but NOT on a
+// clean exit — the launchd analogue of systemd's Restart=on-failure, so an
+// explicit `gortex daemon stop` (which exits 0) stays down instead of being
+// resurrected by KeepAlive. RunAtLoad starts on login.
 //
 // StandardOutPath / StandardErrorPath redirect logs into the same file
 // `gortex daemon logs` tails, so users don't need to remember two paths.
@@ -139,7 +142,10 @@ const launchdPlistTemplate = `<?xml version="1.0" encoding="UTF-8"?>
     <key>RunAtLoad</key>
     <true/>
     <key>KeepAlive</key>
-    <true/>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
     <key>StandardOutPath</key>
     <string>{{.LogPath}}</string>
     <key>StandardErrorPath</key>

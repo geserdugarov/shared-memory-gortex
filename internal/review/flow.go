@@ -445,19 +445,28 @@ func sortFindings(findings []Finding) {
 
 // summarize produces the one-line report headline. With no findings a
 // non-APPROVE verdict is risk-driven (computeVerdict escalates on per-file
-// blast radius), so the headline says which tier earned it instead of the
+// blast radius, tempered by test coverage), so the headline says which tier
+// earned it — and whether the risk is untested — instead of the
 // self-contradictory "BLOCK: no findings".
 func summarize(verdict Verdict, findings []Finding, fileRisk []FileRisk) string {
 	if len(findings) == 0 {
 		if verdict != VerdictApprove && len(fileRisk) > 0 {
 			worst := fileRisk[0].Risk // sorted worst-first
-			n := 0
+			n, untested := 0, 0
 			for _, fr := range fileRisk {
-				if fr.Risk == worst {
-					n++
+				if fr.Risk != worst {
+					continue
+				}
+				n++
+				if fr.Symbols == 0 || fr.Uncovered > 0 {
+					untested++
 				}
 			}
-			return fmt.Sprintf("%s: no rule findings, but %d of %d changed file(s) carry %s blast-radius risk",
+			if untested > 0 {
+				return fmt.Sprintf("%s: no rule findings, but %d of %d changed file(s) carry %s blast-radius risk (%d without covering tests)",
+					verdict, n, len(fileRisk), worst, untested)
+			}
+			return fmt.Sprintf("%s: no rule findings; %d of %d changed file(s) carry %s blast-radius risk, all test-covered",
 				verdict, n, len(fileRisk), worst)
 		}
 		return fmt.Sprintf("%s: no findings across %d changed file(s)", verdict, len(fileRisk))

@@ -263,3 +263,41 @@ func TestRankFileRiskNormalizesRepoPrefix(t *testing.T) {
 	require.Equal(t, string(analysis.RiskCritical), rows[0].Risk)
 	require.Equal(t, "app/b.go", rows[1].File)
 }
+
+// TestRankFileRiskCoverageEvidence pins the per-file coverage rollup: the
+// widest blast radius among the file's changed symbols, the changed-symbol
+// count, and how many of them lack a covering test.
+func TestRankFileRiskCoverageEvidence(t *testing.T) {
+	diff := &analysis.DiffResult{
+		ChangedSymbols: []analysis.ChangedSymbol{
+			{ID: "app/a.go::A", FilePath: "app/a.go", Line: 1},
+			{ID: "app/a.go::B", FilePath: "app/a.go", Line: 20},
+		},
+		ChangedFiles: []string{"app/a.go"},
+	}
+	impact := map[string]*analysis.ImpactResult{
+		"app/a.go::A": {Risk: analysis.RiskCritical, TotalAffected: 42, TestFiles: []string{"app/a_test.go"}},
+		"app/a.go::B": {Risk: analysis.RiskLow, TotalAffected: 3},
+	}
+	rows := rankFileRisk(diff, impact, nil, "")
+	require.Len(t, rows, 1)
+	require.Equal(t, 42, rows[0].Affected, "the widest symbol's blast radius wins")
+	require.Equal(t, 2, rows[0].Symbols)
+	require.Equal(t, 1, rows[0].Uncovered, "B has no covering test")
+}
+
+// TestComputeVerdictCoverageCap pins the coverage temper: a critical-risk
+// file whose changed symbols are all test-covered contributes at most
+// REVIEW; the same file with an untested changed symbol blocks.
+func TestComputeVerdictCoverageCap(t *testing.T) {
+	covered := []FileRisk{{File: "a.go", Risk: string(analysis.RiskCritical), Symbols: 2, Uncovered: 0}}
+	require.Equal(t, VerdictReview, computeVerdict(nil, covered),
+		"blast radius alone must not block a fully test-covered change")
+
+	untested := []FileRisk{{File: "a.go", Risk: string(analysis.RiskCritical), Symbols: 2, Uncovered: 1}}
+	require.Equal(t, VerdictBlock, computeVerdict(nil, untested))
+
+	// No coverage evidence (no impact data) keeps the conservative ladder.
+	unknown := []FileRisk{{File: "a.go", Risk: string(analysis.RiskCritical)}}
+	require.Equal(t, VerdictBlock, computeVerdict(nil, unknown))
+}

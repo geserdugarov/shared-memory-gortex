@@ -811,9 +811,12 @@ func reviewPayload(report *review.ReviewReport) map[string]any {
 		}
 		for _, fr := range report.FileRisk {
 			fileRisk = append(fileRisk, map[string]any{
-				"file":     fr.File,
-				"risk":     fr.Risk,
-				"findings": fr.Findings,
+				"file":      fr.File,
+				"risk":      fr.Risk,
+				"findings":  fr.Findings,
+				"affected":  fr.Affected,
+				"symbols":   fr.Symbols,
+				"uncovered": fr.Uncovered,
 			})
 		}
 	}
@@ -1329,9 +1332,12 @@ func reviewPackPayload(env reviewEnvelope) map[string]any {
 	fileRisk := make([]map[string]any, 0, len(env.FileRisk))
 	for _, fr := range env.FileRisk {
 		fileRisk = append(fileRisk, map[string]any{
-			"file":     fr.File,
-			"risk":     fr.Risk,
-			"findings": fr.Findings,
+			"file":      fr.File,
+			"risk":      fr.Risk,
+			"findings":  fr.Findings,
+			"affected":  fr.Affected,
+			"symbols":   fr.Symbols,
+			"uncovered": fr.Uncovered,
 		})
 	}
 	findings := make([]map[string]any, 0, len(env.Findings))

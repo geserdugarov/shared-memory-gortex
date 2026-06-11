@@ -27,11 +27,23 @@ type ReviewReport struct {
 }
 
 // FileRisk ranks one changed file by its impact-derived risk tier and the number
-// of findings anchored to it.
+// of findings anchored to it. The tier is a blast-radius fact; Affected,
+// Symbols, and Uncovered carry the evidence behind it so "CRITICAL" is
+// explainable: how many symbols the change can reach, and how much of the
+// change has covering tests. A fully covered file (Symbols > 0, Uncovered 0)
+// contributes at most REVIEW to the verdict — blast radius alone does not
+// block a well-tested change.
 type FileRisk struct {
 	File     string `json:"file"`
 	Risk     string `json:"risk"`
 	Findings int    `json:"findings"`
+	// Affected is the widest blast radius among the file's changed symbols
+	// (total transitively affected symbols from the impact analysis).
+	Affected int `json:"affected,omitempty"`
+	// Symbols counts the changed symbols in this file with impact data;
+	// Uncovered counts how many of them have no covering test.
+	Symbols   int `json:"symbols,omitempty"`
+	Uncovered int `json:"uncovered,omitempty"`
 }
 
 // ReviewStats records how the report was assembled: how many findings each
@@ -54,13 +66,22 @@ type ReviewStats struct {
 // warning finding (or a high/medium-risk file) → REVIEW; otherwise APPROVE. It
 // reuses the FromSeverity / FromRisk adapters so the ladder is never
 // re-implemented here.
+//
+// Coverage tempers the risk side: a file whose changed symbols are all
+// test-covered contributes at most REVIEW — blast radius says how far a
+// regression could reach, covering tests say how likely it is to land
+// unnoticed, and only the combination blocks.
 func computeVerdict(findings []Finding, fileRisk []FileRisk) Verdict {
 	worst := VerdictApprove
 	for _, f := range findings {
 		worst = worseVerdict(worst, FromSeverity(f.Severity))
 	}
 	for _, fr := range fileRisk {
-		worst = worseVerdict(worst, FromRisk(analysis.RiskLevel(fr.Risk)))
+		v := FromRisk(analysis.RiskLevel(fr.Risk))
+		if fr.Symbols > 0 && fr.Uncovered == 0 && verdictRank(v) > verdictRank(VerdictReview) {
+			v = VerdictReview
+		}
+		worst = worseVerdict(worst, v)
 	}
 	return worst
 }
@@ -107,6 +128,12 @@ func rankFileRisk(diff *analysis.DiffResult, impact map[string]*analysis.ImpactR
 
 	byFile := map[string]string{}
 	findingCount := map[string]int{}
+	type coverage struct {
+		affected  int
+		symbols   int
+		uncovered int
+	}
+	coverByFile := map[string]*coverage{}
 
 	for _, f := range findings {
 		if f.File != "" {
@@ -122,8 +149,25 @@ func rankFileRisk(diff *analysis.DiffResult, impact map[string]*analysis.ImpactR
 			}
 			risk := string(analysis.RiskLow)
 			if impact != nil {
-				if ir := impact[cs.ID]; ir != nil && ir.Risk != "" {
+				ir := impact[cs.ID]
+				if ir != nil && ir.Risk != "" {
 					risk = string(ir.Risk)
+				}
+				// Coverage evidence: how far the worst changed symbol
+				// reaches and whether each changed symbol has a covering
+				// test. Only recorded when impact data exists at all —
+				// absent analysis must not read as "fully covered".
+				cov := coverByFile[file]
+				if cov == nil {
+					cov = &coverage{}
+					coverByFile[file] = cov
+				}
+				cov.symbols++
+				if ir == nil || len(ir.TestFiles) == 0 {
+					cov.uncovered++
+				}
+				if ir != nil && ir.TotalAffected > cov.affected {
+					cov.affected = ir.TotalAffected
 				}
 			}
 			byFile[file] = worseRisk(byFile[file], risk)
@@ -151,7 +195,13 @@ func rankFileRisk(diff *analysis.DiffResult, impact map[string]*analysis.ImpactR
 		if risk == "" {
 			risk = string(riskFromFindingCount(findingCount[file]))
 		}
-		rows = append(rows, FileRisk{File: file, Risk: risk, Findings: findingCount[file]})
+		row := FileRisk{File: file, Risk: risk, Findings: findingCount[file]}
+		if cov := coverByFile[file]; cov != nil {
+			row.Affected = cov.affected
+			row.Symbols = cov.symbols
+			row.Uncovered = cov.uncovered
+		}
+		rows = append(rows, row)
 	}
 	sort.SliceStable(rows, func(i, j int) bool {
 		ri, rj := riskRank(rows[i].Risk), riskRank(rows[j].Risk)

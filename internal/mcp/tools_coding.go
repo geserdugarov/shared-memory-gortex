@@ -3,6 +3,7 @@ package mcp
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -530,6 +531,16 @@ func (s *Server) handleGetEditingContext(ctx context.Context, req mcp.CallToolRe
 	}
 	if ifNoneMatch := req.GetString("if_none_match", ""); ifNoneMatch != "" && ifNoneMatch == etag {
 		return notModifiedResult(etag), nil
+	}
+
+	// Server-side accounting only — an editing-context bundle stands in
+	// for reading the whole file before editing it.
+	ctxLang := ""
+	if fileNodeForScope != nil {
+		ctxLang = fileNodeForScope.Language
+	}
+	if payload, merr := json.Marshal(out); merr == nil {
+		s.recordFileBaselineSavings(ctx, "get_editing_context", fp, ctxLang, string(payload)+sourceCompressed)
 	}
 
 	// Omission notes: flag vendored/generated provenance and body

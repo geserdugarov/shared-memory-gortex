@@ -1872,6 +1872,20 @@ func (s *Server) handleGetFileSummary(ctx context.Context, req mcp.CallToolReque
 		return mcp.NewToolResultError("no symbols found for file: " + fp), nil
 	}
 
+	// Server-side accounting only — a file summary stands in for
+	// reading the whole file. The compact rendering doubles as the
+	// payload sample for every output format, which makes the recorded
+	// `returned` an upper bound for gcx and a fair count for
+	// compact/json.
+	summaryLang := ""
+	for _, n := range sg.Nodes {
+		if n != nil && n.Language != "" {
+			summaryLang = n.Language
+			break
+		}
+	}
+	s.recordFileBaselineSavings(ctx, "get_file_summary", fp, summaryLang, compactSubGraph(sg))
+
 	if isCompact(req) {
 		return mcp.NewToolResultText(compactSubGraph(sg)), nil
 	}

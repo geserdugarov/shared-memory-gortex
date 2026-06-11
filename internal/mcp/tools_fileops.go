@@ -14,6 +14,7 @@ import (
 	"github.com/zzet/gortex/internal/elide"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/indexer"
+	"github.com/zzet/gortex/internal/tokens"
 )
 
 // errPathUnresolved is returned when a relative path cannot be anchored to any
@@ -337,6 +338,43 @@ func (s *Server) resolveGraphPath(graphPath string) (string, error) {
 		}
 	}
 	return "", fmt.Errorf("%w: path=%q", errPathUnresolved, graphPath)
+}
+
+// fileAttributionNode synthesizes a node carrying just the repo prefix
+// and language of a file — enough for tokenStats.record to attribute an
+// observation to the right per-repo / per-language bucket when no real
+// symbol node is in hand.
+func (s *Server) fileAttributionNode(relPath, language string) *graph.Node {
+	prefix := ""
+	if s.multiIndexer != nil {
+		prefix = matchedRepoPrefix(s.multiIndexer, relPath)
+		if prefix == "" {
+			if prefixes := s.multiIndexer.RepoPrefixes(); len(prefixes) == 1 {
+				prefix = prefixes[0]
+			}
+		}
+	}
+	return &graph.Node{RepoPrefix: prefix, Language: language, FilePath: relPath}
+}
+
+// recordFileBaselineSavings books a savings observation for a tool whose
+// response stands in for reading a whole file. payload is the response
+// content actually produced — used both for the returned-token count and
+// as the chars-per-token calibration sample — and the baseline is the
+// on-disk byte size of the file the agent would otherwise have read.
+// Best-effort accounting: files that don't resolve or stat book nothing.
+func (s *Server) recordFileBaselineSavings(ctx context.Context, tool, relPath, language, payload string) {
+	abs, err := s.resolveGraphPath(relPath)
+	if err != nil {
+		return
+	}
+	info, err := os.Stat(abs)
+	if err != nil || info.IsDir() {
+		return
+	}
+	returned := tokens.CachedCountInt64(payload)
+	fullFile := int64(tokens.EstimateFromSample(int(info.Size()), payload))
+	s.tokenStatsFor(ctx).record(s.fileAttributionNode(relPath, language), tool, returned, fullFile)
 }
 
 // repoRelative converts an absolute path to a repo-prefixed or root-relative
@@ -720,6 +758,16 @@ func (s *Server) handleReadFile(ctx context.Context, req mcp.CallToolRequest) (*
 			content = out
 			salienceTruncated = true
 		}
+	}
+
+	// Server-side accounting only — read_file is the heaviest source
+	// fetch and must show up in the savings ledger even when nothing
+	// was saved (an uncompressed read returns the whole file, so
+	// returned == baseline and only the call is counted).
+	if !isBinary {
+		returned := tokens.CachedCountInt64(string(content))
+		fullFile := int64(tokens.EstimateFromSample(originalBytes, string(content)))
+		s.tokenStatsFor(ctx).record(s.fileAttributionNode(relPath, language), "read_file", returned, fullFile)
 	}
 
 	// Record the access for frecency credit on any node defined in

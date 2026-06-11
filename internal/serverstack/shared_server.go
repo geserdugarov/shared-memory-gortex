@@ -19,7 +19,6 @@ import (
 	gortexmcp "github.com/zzet/gortex/internal/mcp"
 	"github.com/zzet/gortex/internal/parser"
 	"github.com/zzet/gortex/internal/parser/languages"
-	"github.com/zzet/gortex/internal/persistence"
 	"github.com/zzet/gortex/internal/query"
 	"github.com/zzet/gortex/internal/savings"
 	"github.com/zzet/gortex/internal/semantic"
@@ -460,13 +459,13 @@ func NewSharedServer(cfg SharedServerConfig) (*SharedServer, error) {
 	srv.InitCombo(sideCfg.FeedbackDir, sideCfg.FeedbackRepo, gortexmcp.ModeAI)
 	srv.InitFrecency(sideCfg.FeedbackDir, sideCfg.FeedbackRepo, gortexmcp.ModeAI)
 
+	// The savings ledger is machine-global: every entry point defaults to
+	// the same sidecar database the `gortex savings` CLI reads. Deriving
+	// it from a per-mode side-store dir would split the ledger between
+	// writer and reader — the failure mode the flat files had.
 	savingsPath := cfg.SavingsPath
 	if savingsPath == "" {
-		if sideCfg.NotesDir != "" {
-			savingsPath = persistence.DefaultSidecarPath(sideCfg.NotesDir)
-		} else {
-			savingsPath = savings.DefaultDBPath()
-		}
+		savingsPath = savings.DefaultDBPath()
 	}
 	if savingsStore, err := savings.Open(savingsPath); err == nil {
 		legacyJSON := cfg.SavingsLegacyJSON

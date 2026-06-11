@@ -139,12 +139,14 @@ func runMCP(cmd *cobra.Command, args []string) error {
 	if sideStoreCacheDir == "" {
 		sideStoreCacheDir = platform.CacheDir()
 	}
-	// The savings ledger rides in the same sidecar database the side
-	// stores use (serverstack derives it from NotesDir). A custom
-	// --cache-dir also relocates the flat-file era's savings.json the
-	// one-shot legacy import looks for.
+	// The savings ledger defaults to the machine-global sidecar the
+	// `gortex savings` CLI reads. A custom --cache-dir relocates both
+	// the ledger and the flat-file era's savings.json the one-shot
+	// legacy import looks for — the isolation tests rely on.
+	savingsDBPath := ""
 	savingsLegacyJSON := ""
 	if mcpCacheDir != "" {
+		savingsDBPath = persistence.DefaultSidecarPath(mcpCacheDir)
 		savingsLegacyJSON = filepath.Join(mcpCacheDir, "savings.json")
 	}
 
@@ -169,6 +171,7 @@ func runMCP(cmd *cobra.Command, args []string) error {
 			FeedbackRepo: mcpIndex,
 			NotebookPath: mcpIndex,
 		},
+		SavingsPath:       savingsDBPath,
 		SavingsLegacyJSON: savingsLegacyJSON,
 		SavingsRepo:       mcpIndex,
 	})

@@ -62,9 +62,19 @@ func (s *Server) resolveFilePath(rawPath string) (absPath, relPath string, err e
 	if s.multiIndexer != nil {
 		// Multi-repo mode requires a repo-prefixed path. Bare-relative
 		// paths are ambiguous; refuse rather than fall through to the
-		// daemon process CWD.
+		// daemon process CWD. With exactly one tracked repo there is no
+		// ambiguity — single-repo mode indexes unprefixed paths, so a
+		// bare-relative path anchors to the lone repo's root.
 		prefix := matchedRepoPrefix(s.multiIndexer, rawPath)
 		if prefix == "" {
+			if root, ok := s.multiIndexer.RepoRoot(""); ok {
+				abs := filepath.Clean(filepath.Join(root, rawPath))
+				if !pathContainedIn(abs, root) {
+					return "", "", fmt.Errorf("%w: %q resolves to %q, outside repo root %q", errPathEscape, rawPath, abs, root)
+				}
+				abs = worktreeRootedPath(abs, root, s.multiIndexer)
+				return abs, rawPath, nil
+			}
 			prefixes := s.multiIndexer.RepoPrefixes()
 			return "", "", fmt.Errorf("%w: path %q does not start with a known repo prefix; expected one of: %s/, or an absolute path",
 				errPathUnresolved, rawPath, strings.Join(prefixes, "/, "))

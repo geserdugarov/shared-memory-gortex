@@ -1677,6 +1677,11 @@ func (mi *MultiIndexer) ResolveFilePath(prefixedPath string) string {
 		}
 	}
 	if bestPrefix == "" {
+		// Single-repo mode mints unprefixed graph paths; resolve them
+		// against the lone registered repo instead of failing.
+		if meta := mi.loneRepoLocked(); meta != nil && meta.RootPath != "" {
+			return filepath.Join(meta.RootPath, prefixedPath)
+		}
 		return ""
 	}
 	return filepath.Join(bestRoot, strings.TrimPrefix(prefixedPath, bestPrefix+"/"))
@@ -1699,17 +1704,39 @@ func (mi *MultiIndexer) RepoPrefixes() []string {
 // RepoRoot returns the local filesystem root for the given repo prefix.
 // ok is true only when the prefix is registered AND meta.RootPath is non-empty.
 // Caller is responsible for joining repo-relative file paths against the root.
+//
+// The empty prefix resolves to the lone registered repo when exactly one is
+// tracked: single-repo mode indexes nodes without a repo prefix (see
+// indexSingleRepo) while registering its metadata under the repo's real
+// prefix, so every node the single-repo indexer mints carries RepoPrefix=""
+// — refusing the empty prefix would orphan all of them. With two or more
+// repos the empty prefix is ambiguous and stays a miss.
 func (mi *MultiIndexer) RepoRoot(repoPrefix string) (string, bool) {
-	if repoPrefix == "" {
-		return "", false
-	}
 	mi.mu.RLock()
 	defer mi.mu.RUnlock()
+	if repoPrefix == "" {
+		if meta := mi.loneRepoLocked(); meta != nil && meta.RootPath != "" {
+			return meta.RootPath, true
+		}
+		return "", false
+	}
 	meta, ok := mi.repos[repoPrefix]
 	if !ok || meta == nil || meta.RootPath == "" {
 		return "", false
 	}
 	return meta.RootPath, true
+}
+
+// loneRepoLocked returns the metadata of the only registered repo when
+// exactly one repo is tracked, else nil. Caller must hold mi.mu.
+func (mi *MultiIndexer) loneRepoLocked() *RepoMetadata {
+	if len(mi.repos) != 1 {
+		return nil
+	}
+	for _, meta := range mi.repos {
+		return meta
+	}
+	return nil
 }
 
 // LinkedWorktreeRoots returns the on-disk roots of every tracked linked

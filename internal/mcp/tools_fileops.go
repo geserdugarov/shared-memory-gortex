@@ -84,6 +84,19 @@ func (s *Server) resolveFilePath(rawPath string) (absPath, relPath string, err e
 		if !ok {
 			return "", "", fmt.Errorf("%w: repo prefix %q has no root path", errPathUnresolved, prefix)
 		}
+		// Collision guard for the lone unprefixed repo: its indexed
+		// paths are raw relative paths, so one whose first segment
+		// equals the repo's own prefix (repo "api" containing
+		// api/handlers.go) would be hijacked by the prefix-strip join.
+		// Prefer the raw join when that file actually exists.
+		if loneRoot, lok := s.multiIndexer.RepoRoot(""); lok && loneRoot == root {
+			raw := filepath.Clean(filepath.Join(loneRoot, rawPath))
+			if pathContainedIn(raw, loneRoot) {
+				if _, err := os.Stat(raw); err == nil {
+					return worktreeRootedPath(raw, loneRoot, s.multiIndexer), rawPath, nil
+				}
+			}
+		}
 		abs := filepath.Clean(filepath.Join(root, strings.TrimPrefix(rawPath, prefix+"/")))
 		if !pathContainedIn(abs, root) {
 			return "", "", fmt.Errorf("%w: %q resolves to %q, outside repo root %q", errPathEscape, rawPath, abs, root)

@@ -470,6 +470,12 @@ func ResolveTemporalCalls(g graph.Store) int {
 	if len(reindexBatch) > 0 {
 		g.ReindexEdges(reindexBatch)
 	}
+	// Link Java consumers (workflow starts / signals / queries) to the Go
+	// workflows and handlers they target, by shared canonical name. Runs
+	// last: it reads temporal_role / temporal_name meta stamped by the
+	// sweep above and the via=temporal.handler edges emitted by the Go
+	// extractor. Additive — graph.AddEdge dedupes.
+	resolveTemporalCrossLanguage(g)
 	return resolved
 }
 
@@ -477,6 +483,126 @@ func ResolveTemporalCalls(g graph.Store) int {
 // unresolved Temporal stub call.
 func temporalStubPlaceholder(kind, name string) string {
 	return temporalStubPrefix + kind + "::" + name
+}
+
+// resolveTemporalCrossLanguage links Java consumers to the Go workflows /
+// handlers they target, by shared canonical name:
+//
+//   - a Java `@WorkflowInterface` method (role "workflow", canonical name
+//     from `@WorkflowMethod(name=…)`) → the Go workflow registered /
+//     named the same  → via=temporal.start-workflow.
+//   - a Java `@SignalMethod(name="cancel")` → a Go workflow that serves
+//     signal "cancel" (via=temporal.handler kind=signal) →
+//     via=temporal.signal-link.
+//   - a Java `@QueryMethod(name="status")` → a Go query handler →
+//     via=temporal.query-link.
+//
+// All edges carry cross_language=true and are emitted at the inferred
+// tier (the link is by string name across the type-system boundary).
+// graph.AddEdge dedupes → idempotent.
+func resolveTemporalCrossLanguage(g graph.Store) {
+	// Go provider indexes, by name.
+	goWorkflow := map[string][]string{}
+	goSignalWf := map[string][]string{}
+	goQueryWf := map[string][]string{}
+	addGoWorkflow := func(n *graph.Node) {
+		if n == nil || n.Language != "go" {
+			return
+		}
+		if r, _ := n.Meta["temporal_role"].(string); r != "workflow" {
+			return
+		}
+		name := n.Name
+		if tn, _ := n.Meta["temporal_name"].(string); tn != "" {
+			name = tn
+		}
+		goWorkflow[name] = append(goWorkflow[name], n.ID)
+		if n.Name != name {
+			goWorkflow[n.Name] = append(goWorkflow[n.Name], n.ID)
+		}
+	}
+	for n := range g.NodesByKind(graph.KindFunction) {
+		addGoWorkflow(n)
+	}
+	for n := range g.NodesByKind(graph.KindMethod) {
+		addGoWorkflow(n)
+	}
+	for e := range g.EdgesByKind(graph.EdgeCalls) {
+		if e == nil || e.Meta == nil || e.From == "" {
+			continue
+		}
+		if v, _ := e.Meta["via"].(string); v != "temporal.handler" {
+			continue
+		}
+		from := g.GetNode(e.From)
+		if from == nil || from.Language != "go" {
+			continue
+		}
+		kind, _ := e.Meta["temporal_kind"].(string)
+		name, _ := e.Meta["temporal_name"].(string)
+		if name == "" {
+			continue
+		}
+		switch kind {
+		case "signal":
+			goSignalWf[name] = append(goSignalWf[name], e.From)
+		case "query":
+			goQueryWf[name] = append(goQueryWf[name], e.From)
+		}
+	}
+	if len(goWorkflow) == 0 && len(goSignalWf) == 0 && len(goQueryWf) == 0 {
+		return
+	}
+
+	type link struct {
+		from, to, via string
+	}
+	var out []link
+	consume := func(n *graph.Node) {
+		if n == nil || n.Language != "java" {
+			return
+		}
+		role, _ := n.Meta["temporal_role"].(string)
+		name, _ := n.Meta["temporal_name"].(string)
+		if name == "" {
+			name = n.Name
+		}
+		var targets []string
+		var via string
+		switch role {
+		case "workflow":
+			targets, via = goWorkflow[name], "temporal.start-workflow"
+		case "signal":
+			targets, via = goSignalWf[name], "temporal.signal-link"
+		case "query":
+			targets, via = goQueryWf[name], "temporal.query-link"
+		default:
+			return
+		}
+		for _, to := range targets {
+			if to != n.ID {
+				out = append(out, link{from: n.ID, to: to, via: via})
+			}
+		}
+	}
+	for n := range g.NodesByKind(graph.KindMethod) {
+		consume(n)
+	}
+	for n := range g.NodesByKind(graph.KindFunction) {
+		consume(n)
+	}
+	for _, l := range out {
+		g.AddEdge(&graph.Edge{
+			From:   l.from,
+			To:     l.to,
+			Kind:   graph.EdgeCalls,
+			Origin: graph.OriginASTInferred,
+			Meta: map[string]any{
+				"via":            l.via,
+				"cross_language": true,
+			},
+		})
+	}
 }
 
 // temporalIndex maps (kind, name) to candidate handler nodes plus the
@@ -778,6 +904,13 @@ func buildTemporalIndex(g graph.Store, registerEdges, annotatedEdges []*graph.Ed
 		}
 		ifaceMethods := collectJavaInterfaceMethodsFromIndex(iface, javaMethodsByFile)
 		for _, m := range ifaceMethods {
+			// A method carrying its own @WorkflowMethod / @SignalMethod /
+			// @QueryMethod / @UpdateMethod annotation was already stamped
+			// (with its name= override) in Phase 2 — don't let the
+			// interface-level role clobber a more specific method role.
+			if r, _ := m.Meta["temporal_role"].(string); r != "" {
+				continue
+			}
 			canonical := canonicalFor(m)
 			stampTemporalRole(g, m, methodRole, canonical)
 			idx.byKindName[methodRole+"::"+canonical] = append(idx.byKindName[methodRole+"::"+canonical], m)

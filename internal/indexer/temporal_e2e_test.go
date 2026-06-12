@@ -708,3 +708,83 @@ func setupWorker(w Worker) {
 		"func-returning-constant dispatch must resolve to ChargeActivity")
 	assert.Equal(t, graph.OriginASTResolved, stubCall.Origin)
 }
+
+// TestTemporalE2E_JavaToGoBridge links a Java @WorkflowInterface (start +
+// signal + query) to the Go workflow that implements them, by canonical
+// name — the cross-language bridge.
+func TestTemporalE2E_JavaToGoBridge(t *testing.T) {
+	dir := t.TempDir()
+
+	writeFile(t, filepath.Join(dir, "order_workflow.go"), `package wf
+
+import "go.temporal.io/sdk/workflow"
+
+func OrderWorkflow(ctx workflow.Context, id string) error {
+	workflow.GetSignalChannel(ctx, "cancel-order")
+	workflow.SetQueryHandler(ctx, "order-status", func() (string, error) { return "ok", nil })
+	return nil
+}
+`)
+	writeFile(t, filepath.Join(dir, "main.go"), `package wf
+
+func setup(w Worker) { w.RegisterWorkflow(OrderWorkflow) }
+`)
+	writeFile(t, filepath.Join(dir, "OrderWorkflowApi.java"), `package com.example.orders;
+
+import io.temporal.workflow.WorkflowInterface;
+import io.temporal.workflow.WorkflowMethod;
+import io.temporal.workflow.SignalMethod;
+import io.temporal.workflow.QueryMethod;
+
+@WorkflowInterface
+public interface OrderWorkflowApi {
+    @WorkflowMethod(name = "OrderWorkflow")
+    String process(String orderId);
+
+    @SignalMethod(name = "cancel-order")
+    void cancel(String reason);
+
+    @QueryMethod(name = "order-status")
+    String getStatus();
+}
+`)
+
+	g := graph.New()
+	idx := newTestIndexerGoJava(g)
+	_, err := idx.Index(dir)
+	require.NoError(t, err)
+
+	goWf := g.FindNodesByName("OrderWorkflow")[0]
+
+	// Find the Java method nodes by name.
+	javaMethod := func(name string) *graph.Node {
+		for _, n := range g.FindNodesByName(name) {
+			if n.Language == "java" {
+				return n
+			}
+		}
+		return nil
+	}
+	process := javaMethod("process")
+	cancel := javaMethod("cancel")
+	getStatus := javaMethod("getStatus")
+	require.NotNil(t, process)
+	require.NotNil(t, cancel)
+	require.NotNil(t, getStatus)
+
+	hasCrossLink := func(fromID, via string) bool {
+		for _, e := range g.GetOutEdges(fromID) {
+			if e != nil && e.Meta != nil && e.Meta["via"] == via &&
+				e.Meta["cross_language"] == true && e.To == goWf.ID {
+				return true
+			}
+		}
+		return false
+	}
+	assert.True(t, hasCrossLink(process.ID, "temporal.start-workflow"),
+		"Java @WorkflowMethod(name=OrderWorkflow) must link to the Go OrderWorkflow")
+	assert.True(t, hasCrossLink(cancel.ID, "temporal.signal-link"),
+		"Java @SignalMethod(cancel-order) must link to the Go workflow handling it")
+	assert.True(t, hasCrossLink(getStatus.ID, "temporal.query-link"),
+		"Java @QueryMethod(order-status) must link to the Go workflow handling it")
+}

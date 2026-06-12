@@ -195,3 +195,37 @@ func setupWorker(w Worker) {
 	assert.Equal(t, true, stubCall.Meta[graph.MetaSpeculative],
 		"env-default edge must be hidden-by-default")
 }
+
+// TestTemporalE2E_GoQueryHandler exercises in-workflow handler detection:
+// a workflow.SetQueryHandler call must surface as a via=temporal.handler
+// edge from the enclosing workflow carrying its kind + name.
+func TestTemporalE2E_GoQueryHandler(t *testing.T) {
+	dir := t.TempDir()
+
+	writeFile(t, filepath.Join(dir, "workflow.go"), `package wf
+
+import "go.temporal.io/sdk/workflow"
+
+func StatusWorkflow(ctx workflow.Context) error {
+	workflow.SetQueryHandler(ctx, "status", func() (string, error) { return "ok", nil })
+	return nil
+}
+`)
+
+	g := graph.New()
+	idx := newTestIndexer(g)
+	_, err := idx.Index(dir)
+	require.NoError(t, err)
+
+	wf := g.FindNodesByName("StatusWorkflow")[0]
+	var handler *graph.Edge
+	for _, e := range g.GetOutEdges(wf.ID) {
+		if e != nil && e.Meta != nil && e.Meta["via"] == "temporal.handler" {
+			handler = e
+			break
+		}
+	}
+	require.NotNil(t, handler, "workflow must have an outbound temporal.handler edge")
+	assert.Equal(t, "query", handler.Meta["temporal_kind"])
+	assert.Equal(t, "status", handler.Meta["temporal_name"])
+}

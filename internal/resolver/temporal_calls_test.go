@@ -428,3 +428,32 @@ func TestResolveTemporalCalls_RoleStampingIsIdempotent(t *testing.T) {
 	}
 	assert.Equal(t, "activity", methods["doIt"].Meta["temporal_role"])
 }
+
+func TestTemporalIndexLookup_LanguageGate(t *testing.T) {
+	goNode := &graph.Node{ID: "go/a.go::ChargeCard", Name: "ChargeCard", Language: "go", RepoPrefix: "svc"}
+	javaNode := &graph.Node{ID: "java/A.java::chargeCard", Name: "ChargeCard", Language: "java", RepoPrefix: "jsvc"}
+
+	idx := &temporalIndex{byKindName: map[string][]*graph.Node{
+		"activity::ChargeCard": {javaNode}, // only a Java candidate
+	}}
+
+	// A Go stub must NOT resolve onto a Java handler node even when the
+	// Java entry is the unique overall candidate — that cross-language
+	// match is the job of the dedicated join pass, not the stub resolver.
+	id, _, _ := idx.lookup("activity", "ChargeCard", "svc", "go")
+	assert.Empty(t, id, "go stub must not resolve to a java handler")
+
+	// With a Go candidate present, the Go caller resolves to it (unique
+	// within the caller's language).
+	idx.byKindName["activity::ChargeCard"] = []*graph.Node{javaNode, goNode}
+	id, origin, conf := idx.lookup("activity", "ChargeCard", "svc", "go")
+	assert.Equal(t, goNode.ID, id)
+	assert.Equal(t, graph.OriginASTResolved, origin)
+	assert.Equal(t, 0.9, conf)
+
+	// An unknown caller language keeps the language-agnostic
+	// unique-overall fallback (no regression for callers with no lang).
+	idx.byKindName["activity::Solo"] = []*graph.Node{javaNode}
+	id, _, _ = idx.lookup("activity", "Solo", "", "")
+	assert.Equal(t, javaNode.ID, id, "unknown caller lang keeps the unique-overall fallback")
+}

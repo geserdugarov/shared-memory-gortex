@@ -130,10 +130,12 @@ func ResolveTemporalCalls(g graph.Store) int {
 	for _, s := range stubs {
 		e := s.edge
 		callerRepo := ""
+		callerLang := ""
 		if from := callerNodes[e.From]; from != nil {
 			callerRepo = from.RepoPrefix
+			callerLang = from.Language
 		}
-		handlerID, origin, conf := idx.lookup(s.kind, s.name, callerRepo)
+		handlerID, origin, conf := idx.lookup(s.kind, s.name, callerRepo, callerLang)
 
 		// When the name came from an env-var-with-literal-default
 		// variable, the value is a best-guess: land the resolved edge at
@@ -200,10 +202,31 @@ type temporalIndex struct {
 	byKindName map[string][]*graph.Node
 }
 
-func (idx *temporalIndex) lookup(kind, name, callerRepo string) (id, origin string, confidence float64) {
-	cands := idx.byKindName[kind+"::"+name]
-	if len(cands) == 0 {
+func (idx *temporalIndex) lookup(kind, name, callerRepo, callerLang string) (id, origin string, confidence float64) {
+	all := idx.byKindName[kind+"::"+name]
+	if len(all) == 0 {
 		return "", "", 0
+	}
+	// Language gate: a Temporal stub call resolves only within its own
+	// language. The candidate set co-mingles Go register targets and Java
+	// annotation-tagged methods under the same "<kind>::<name>" key with
+	// no language tag, so without this gate a Go workflow.ExecuteActivity
+	// stub could land on a Java method node when names collide and that
+	// Java entry is the unique overall candidate (pickGoTemporalTarget
+	// gates language only on the Go register-indexing path, not here). The
+	// intentional Java→Go cross-language join is a separate, explicitly
+	// cross-language pass, not this same-language stub resolver.
+	cands := all
+	if callerLang != "" {
+		cands = cands[:0:0]
+		for _, n := range all {
+			if n.Language == callerLang {
+				cands = append(cands, n)
+			}
+		}
+		if len(cands) == 0 {
+			return "", "", 0
+		}
 	}
 	// Prefer same-repo, then unique overall.
 	var sameRepo []*graph.Node

@@ -401,42 +401,66 @@ func goTemporalEnvDefaultName(callNode *sitter.Node, name string, src []byte) (s
 		return "", false
 	}
 	limit := callNode.StartByte()
-	envDeclSeen := false
-	var result string
-	var found bool
+
+	// Collect every assignment to `name` lexically before the dispatch
+	// call, in source order, WITHOUT descending into nested func_literal
+	// bodies — a closure is a separate scope, and matching a shadowing
+	// same-named variable declared there would be a false positive.
+	var assigns []*sitter.Node
 	var walk func(n *sitter.Node)
 	walk = func(n *sitter.Node) {
-		if n == nil || found {
+		if n == nil {
 			return
 		}
-		// Only consider assignments lexically before the dispatch call.
+		if n.Type() == "func_literal" {
+			return // do not descend into nested closures
+		}
 		if (n.Type() == "short_var_declaration" || n.Type() == "assignment_statement") &&
 			n.StartByte() < limit && goAssignHasTarget(n, name, src) {
-			if rhs := goAssignRHSExpr(n); rhs != nil {
-				if rhs.Type() == "call_expression" {
-					if goIsEnvRead(rhs, src) {
-						envDeclSeen = true
-					} else if def, ok := goCallEnvDefaultLiteral(rhs, src); ok {
-						result, found = def, true
-						return
-					}
-				} else if envDeclSeen {
-					if lit, ok := goStringLiteralValue(rhs, src); ok {
-						result, found = lit, true
-						return
-					}
-				}
-			}
+			assigns = append(assigns, n)
 		}
 		for i := 0; i < int(n.NamedChildCount()); i++ {
 			walk(n.NamedChild(i))
-			if found {
-				return
-			}
 		}
 	}
 	walk(body)
-	return result, found
+
+	// Replay the writes in order. The dispatch name is env-default-sourced
+	// only if, after the LAST write before the call, the variable still
+	// holds an env-or-default value: either a `cmp.Or(os.Getenv, "lit")`
+	// assignment, or a string-literal assignment that followed an
+	// os.Getenv / os.LookupEnv read (the `name := os.Getenv(...); if name
+	// == "" { name = "lit" }` shape). Any other later write — a plain
+	// reassignment `name = pick()` — clears the env-sourcing, and we leave
+	// the dispatch unresolved rather than guess.
+	resolved := ""
+	resolvedOK := false
+	envReadSeen := false
+	for _, a := range assigns {
+		rhs := goAssignRHSExpr(a)
+		switch {
+		case rhs == nil:
+			resolved, resolvedOK, envReadSeen = "", false, false
+		case rhs.Type() == "call_expression" && goIsEnvRead(rhs, src):
+			// `name := os.Getenv("K")` — default still pending.
+			resolved, resolvedOK, envReadSeen = "", false, true
+		case rhs.Type() == "call_expression":
+			// `name := cmp.Or(os.Getenv("K"), "lit")` — self-contained.
+			if def, ok := goCallEnvDefaultLiteral(rhs, src); ok {
+				resolved, resolvedOK, envReadSeen = def, true, false
+			} else {
+				resolved, resolvedOK, envReadSeen = "", false, false
+			}
+		default:
+			// `name = "lit"` — only a default when it follows an env read.
+			if lit, ok := goStringLiteralValue(rhs, src); ok && envReadSeen {
+				resolved, resolvedOK = lit, true
+			} else {
+				resolved, resolvedOK, envReadSeen = "", false, false
+			}
+		}
+	}
+	return resolved, resolvedOK
 }
 
 // goEnclosingFuncBody walks up from n to the nearest function-like
@@ -497,18 +521,27 @@ func goIsEnvRead(call *sitter.Node, src []byte) bool {
 	return false
 }
 
-// goCallEnvDefaultLiteral inspects a call's arguments for the
-// env-or-default shape `f(os.Getenv("KEY"), "Default")`: at least one
-// argument is an os.Getenv / os.LookupEnv read AND at least one is a
-// string literal. Returns the last string-literal argument and true on a
-// match.
+// goCallEnvDefaultLiteral inspects a `cmp.Or(os.Getenv("KEY"), "Default")`
+// call and returns its literal default. cmp.Or returns the FIRST non-zero
+// argument, so when the env read yields "" at runtime the value is the
+// first string-literal argument that follows — hence we return the FIRST
+// literal, not the last. Gated on the cmp.Or callee: an arbitrary user
+// function mixing an env read with a literal (`combine(os.Getenv("K"),
+// "Suffix")`) is deliberately NOT treated as env-or-default — only the
+// stdlib cmp.Or idiom qualifies, since cmp.Or is the one combinator whose
+// "first non-zero" semantics make the literal a provable default. Returns
+// ("", false) when the callee is not cmp.Or, no os.Getenv / os.LookupEnv
+// read is present, or there is no string-literal argument.
 func goCallEnvDefaultLiteral(call *sitter.Node, src []byte) (string, bool) {
+	if !goIsCmpOr(call, src) {
+		return "", false
+	}
 	args := call.ChildByFieldName("arguments")
 	if args == nil {
 		return "", false
 	}
 	hasEnvRead := false
-	lastLiteral := ""
+	firstLiteral := ""
 	haveLiteral := false
 	for i := 0; i < int(args.NamedChildCount()); i++ {
 		c := args.NamedChild(i)
@@ -519,14 +552,29 @@ func goCallEnvDefaultLiteral(call *sitter.Node, src []byte) (string, bool) {
 			hasEnvRead = true
 			continue
 		}
-		if lit, ok := goStringLiteralValue(c, src); ok {
-			lastLiteral, haveLiteral = lit, true
+		if lit, ok := goStringLiteralValue(c, src); ok && !haveLiteral {
+			firstLiteral, haveLiteral = lit, true
 		}
 	}
 	if hasEnvRead && haveLiteral {
-		return lastLiteral, true
+		return firstLiteral, true
 	}
 	return "", false
+}
+
+// goIsCmpOr reports whether a call_expression is a call to the stdlib
+// `cmp.Or` — the canonical "first non-zero" combinator used for the
+// env-or-default idiom. Matched by the canonical `cmp` package alias
+// (consistent with the os.Getenv / "workflow" receiver gates elsewhere).
+func goIsCmpOr(call *sitter.Node, src []byte) bool {
+	fn := call.ChildByFieldName("function")
+	if fn == nil || fn.Type() != "selector_expression" {
+		return false
+	}
+	op := fn.ChildByFieldName("operand")
+	field := fn.ChildByFieldName("field")
+	return op != nil && field != nil &&
+		op.Content(src) == "cmp" && field.Content(src) == "Or"
 }
 
 // goStringLiteralValue returns the unquoted value of a Go string literal

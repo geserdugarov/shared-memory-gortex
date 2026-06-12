@@ -298,6 +298,107 @@ func WF(ctx workflow.Context) {
 	assert.False(t, flagged)
 }
 
+func TestGoTemporal_ExecuteActivity_EnvDefault_CmpOrFirstLiteral(t *testing.T) {
+	// cmp.Or returns the FIRST non-zero argument, so with the env unset
+	// the runtime value is the first literal ("First"), not the last.
+	fix := runGoExtract(t, `package wf
+
+import (
+	"cmp"
+	"os"
+	"go.temporal.io/sdk/workflow"
+)
+
+func WF(ctx workflow.Context) {
+	actName := cmp.Or(os.Getenv("A"), os.Getenv("B"), "First", "Second")
+	workflow.ExecuteActivity(ctx, actName, 1)
+}
+`)
+	edges := temporalEdgesByVia(fix, "temporal.stub")
+	require.Len(t, edges, 1)
+	assert.Equal(t, "First", edges[0].Meta["temporal_name"],
+		"cmp.Or default must be the first literal, not the last")
+	assert.Equal(t, "env_default", edges[0].Meta["temporal_name_origin"])
+}
+
+func TestGoTemporal_ExecuteActivity_NonCmpOrCalleeNotEnvDefault(t *testing.T) {
+	// An arbitrary user function mixing an env read with a literal is NOT
+	// the cmp.Or env-or-default idiom — keep the bare identifier, no flag.
+	fix := runGoExtract(t, `package wf
+
+import (
+	"os"
+	"go.temporal.io/sdk/workflow"
+)
+
+func combine(a, b string) string { return a + b }
+
+func WF(ctx workflow.Context) {
+	actName := combine(os.Getenv("K"), "Suffix")
+	workflow.ExecuteActivity(ctx, actName, 1)
+}
+`)
+	edges := temporalEdgesByVia(fix, "temporal.stub")
+	require.Len(t, edges, 1)
+	assert.Equal(t, "actName", edges[0].Meta["temporal_name"])
+	_, flagged := edges[0].Meta["temporal_name_origin"]
+	assert.False(t, flagged, "non-cmp.Or callee must not be treated as env_default")
+}
+
+func TestGoTemporal_ExecuteActivity_EnvDefaultOverwrittenNotFlagged(t *testing.T) {
+	// A later plain reassignment is the live value at the call site; the
+	// earlier env-default write must not win — leave it unresolved.
+	fix := runGoExtract(t, `package wf
+
+import (
+	"cmp"
+	"os"
+	"go.temporal.io/sdk/workflow"
+)
+
+func pick() string { return "Other" }
+
+func WF(ctx workflow.Context) {
+	actName := cmp.Or(os.Getenv("K"), "ChargeCard")
+	actName = pick()
+	workflow.ExecuteActivity(ctx, actName, 1)
+}
+`)
+	edges := temporalEdgesByVia(fix, "temporal.stub")
+	require.Len(t, edges, 1)
+	assert.Equal(t, "actName", edges[0].Meta["temporal_name"])
+	_, flagged := edges[0].Meta["temporal_name_origin"]
+	assert.False(t, flagged, "a later non-env reassignment must clear the env_default flag")
+}
+
+func TestGoTemporal_ExecuteActivity_ShadowInNestedClosureNotMatched(t *testing.T) {
+	// A same-named variable declared in a nested closure is a different
+	// scope; it must not be matched for the outer dispatch's name.
+	fix := runGoExtract(t, `package wf
+
+import (
+	"cmp"
+	"os"
+	"go.temporal.io/sdk/workflow"
+)
+
+func run(f func()) { f() }
+
+func WF(ctx workflow.Context, actName string) {
+	run(func() {
+		actName := cmp.Or(os.Getenv("K"), "Inner")
+		_ = actName
+	})
+	workflow.ExecuteActivity(ctx, actName, 1)
+}
+`)
+	edges := temporalEdgesByVia(fix, "temporal.stub")
+	require.Len(t, edges, 1)
+	assert.Equal(t, "actName", edges[0].Meta["temporal_name"])
+	_, flagged := edges[0].Meta["temporal_name_origin"]
+	assert.False(t, flagged, "a shadowing var in a nested closure must not flag the outer dispatch")
+}
+
 // --- In-workflow handler declarations (query / signal / update) -----
 //
 // These mirror the Java SDK's @QueryMethod / @SignalMethod /

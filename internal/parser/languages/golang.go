@@ -231,6 +231,11 @@ type goDeferredCall struct {
 	// the resolver promotes every exported method of that struct to a
 	// temporal activity keyed by the method name.
 	tempRegisterPlural bool
+	// tempStartName is the workflow name when this call STARTS a workflow
+	// (client.ExecuteWorkflow / SignalWithStartWorkflow). `via=temporal.start`
+	// meta is stamped on the emitted edge and the resolver rewrites it to
+	// the registered workflow — the "who starts this workflow" edge.
+	tempStartName string
 }
 
 type goDeferredTypeRef struct {
@@ -417,6 +422,13 @@ func (e *GoExtractor) Extract(filePath string, src []byte) (*parser.ExtractionRe
 				if name := goTemporalNthStringLiteralArg(expr.Node, namePos, src); name != "" {
 					dc.tempOutKind = okind
 					dc.tempName = name
+				}
+			} else if wfPos, ok := goTemporalStartKind(method); ok {
+				// Service-side workflow START: client.ExecuteWorkflow /
+				// SignalWithStartWorkflow. The workflow is the wfPos-th
+				// positional arg (a func ref, selector, or string type name).
+				if name := goTemporalNthArgName(expr.Node, wfPos, src); name != "" {
+					dc.tempStartName = name
 				}
 			}
 			calls = append(calls, dc)
@@ -745,6 +757,7 @@ func (e *GoExtractor) Extract(filePath string, src []byte) (*parser.ExtractionRe
 			applyGoTemporalRegisterMeta(edge, c)
 			applyGoTemporalHandlerMeta(edge, c)
 			applyGoTemporalSignalQueryMeta(edge, c)
+			applyGoTemporalStartMeta(edge, c)
 			result.Edges = append(result.Edges, edge)
 			emitGoSpawnEdge(c, callerID, target, filePath, result)
 			continue
@@ -759,6 +772,7 @@ func (e *GoExtractor) Extract(filePath string, src []byte) (*parser.ExtractionRe
 			applyGoTemporalRegisterMeta(edge, c)
 			applyGoTemporalHandlerMeta(edge, c)
 			applyGoTemporalSignalQueryMeta(edge, c)
+			applyGoTemporalStartMeta(edge, c)
 			result.Edges = append(result.Edges, edge)
 			emitGoSpawnEdge(c, callerID, target, filePath, result)
 			continue
@@ -809,6 +823,7 @@ func (e *GoExtractor) Extract(filePath string, src []byte) (*parser.ExtractionRe
 		applyGoGRPCRegisterMeta(edge, c, src, tenv)
 		applyGoTemporalRegisterMeta(edge, c)
 		applyGoTemporalSignalQueryMeta(edge, c)
+		applyGoTemporalStartMeta(edge, c)
 		result.Edges = append(result.Edges, edge)
 		emitGoSpawnEdge(c, callerID, target, filePath, result)
 	}

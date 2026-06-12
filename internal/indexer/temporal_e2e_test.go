@@ -339,3 +339,56 @@ func setup(w Worker) {
 		"dispatch must resolve to the struct's promoted method")
 	assert.Equal(t, "activity", charge[0].Meta["temporal_role"])
 }
+
+// TestTemporalE2E_GoServiceStartsWorkflow exercises the workflow-start
+// family: a service that calls client.ExecuteWorkflow(ctx, opts, WorkflowFn)
+// must get a via=temporal.start edge resolved to the registered workflow —
+// the "who starts this workflow" relationship.
+func TestTemporalE2E_GoServiceStartsWorkflow(t *testing.T) {
+	dir := t.TempDir()
+
+	writeFile(t, filepath.Join(dir, "workflow.go"), `package wf
+
+import "go.temporal.io/sdk/workflow"
+
+func OrderWorkflow(ctx workflow.Context, id string) error { return nil }
+`)
+	writeFile(t, filepath.Join(dir, "service.go"), `package wf
+
+import "go.temporal.io/sdk/client"
+
+func StartOrder(ctx any, c client.Client, id string) error {
+	_, err := c.ExecuteWorkflow(ctx, client.StartWorkflowOptions{}, OrderWorkflow, id)
+	return err
+}
+`)
+	writeFile(t, filepath.Join(dir, "main.go"), `package wf
+
+func setup(w Worker) {
+	w.RegisterWorkflow(OrderWorkflow)
+}
+`)
+
+	g := graph.New()
+	idx := newTestIndexer(g)
+	_, err := idx.Index(dir)
+	require.NoError(t, err)
+
+	starter := g.FindNodesByName("StartOrder")
+	require.NotEmpty(t, starter)
+	wf := g.FindNodesByName("OrderWorkflow")
+	require.NotEmpty(t, wf)
+
+	var start *graph.Edge
+	for _, e := range g.GetOutEdges(starter[0].ID) {
+		if e != nil && e.Meta != nil && e.Meta["via"] == "temporal.start" {
+			start = e
+			break
+		}
+	}
+	require.NotNil(t, start, "StartOrder must have an outbound temporal.start edge")
+	assert.Equal(t, "workflow", start.Meta["temporal_kind"])
+	assert.Equal(t, "OrderWorkflow", start.Meta["temporal_name"])
+	assert.Equal(t, wf[0].ID, start.To,
+		"the start edge must resolve to the registered workflow")
+}

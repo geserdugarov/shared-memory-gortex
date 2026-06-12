@@ -115,7 +115,12 @@ func ResolveTemporalCalls(g graph.Store) int {
 		switch v, _ := e.Meta["via"].(string); v {
 		case "temporal.register":
 			registerEdges = append(registerEdges, e)
-		case "temporal.stub":
+		case "temporal.stub", "temporal.start":
+			// temporal.stub is a workflow→activity / workflow→child-workflow
+			// dispatch; temporal.start is a service→workflow start
+			// (client.ExecuteWorkflow / SignalWithStartWorkflow). Both
+			// resolve the same way — rewrite to the registered handler /
+			// workflow found by <kind>::<name>.
 			kind, _ := e.Meta["temporal_kind"].(string)
 			name, _ := e.Meta["temporal_name"].(string)
 			if kind == "" || name == "" {

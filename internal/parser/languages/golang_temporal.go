@@ -444,6 +444,75 @@ func applyGoTemporalSignalQueryMeta(edge *graph.Edge, c goDeferredCall) {
 	edge.Meta["temporal_name"] = c.tempName
 }
 
+// goTemporalStartKind reports whether a method name is one of the
+// service-side workflow-START helpers and, if so, returns the 1-based
+// positional index of the workflow argument.
+//
+//	client.ExecuteWorkflow(ctx, opts, workflow, args...)               // workflow @ 3
+//	client.SignalWithStartWorkflow(ctx, wfID, sig, arg, opts, workflow, args...) // workflow @ 6
+//
+// Both are client methods invoked on an arbitrary client variable, so —
+// like SignalWorkflow / QueryWorkflow and the Register* helpers — they are
+// matched by method name alone; ExecuteWorkflow / SignalWithStartWorkflow
+// are distinctive enough across the SDK surface for that to be precise.
+func goTemporalStartKind(method string) (wfPos int, ok bool) {
+	switch method {
+	case "ExecuteWorkflow":
+		return 3, true
+	case "SignalWithStartWorkflow":
+		return 6, true
+	}
+	return 0, false
+}
+
+// goTemporalNthArgName reduces the n-th (1-based) positional argument of a
+// call to the trailing identifier that names a workflow — handling a func
+// reference (OrderWorkflow), a selector (pkg.OrderWorkflow), or a string
+// type name ("OrderWorkflow"), via goTemporalNameFromExpr. Returns "" when
+// the call has fewer than n positional arguments or the argument is not a
+// reducible name. Unlike goTemporalNthStringLiteralArg this accepts a
+// non-literal, because a workflow START usually passes the workflow
+// function value, whose name is the registered type.
+func goTemporalNthArgName(callNode *sitter.Node, n int, src []byte) string {
+	if callNode == nil || callNode.Type() != "call_expression" {
+		return ""
+	}
+	args := callNode.ChildByFieldName("arguments")
+	if args == nil {
+		return ""
+	}
+	count := 0
+	for i := 0; i < int(args.NamedChildCount()); i++ {
+		c := args.NamedChild(i)
+		if c == nil {
+			continue
+		}
+		count++
+		if count == n {
+			return goTemporalNameFromExpr(c, src)
+		}
+	}
+	return ""
+}
+
+// applyGoTemporalStartMeta stamps `via=temporal.start` plus
+// `temporal_kind=workflow` and `temporal_name` (the started workflow's
+// name) onto the EdgeCalls edge derived from a client.ExecuteWorkflow /
+// SignalWithStartWorkflow call. No-op when c.tempStartName is unset. The
+// resolver rewrites this edge to the registered workflow node, so
+// get_callers on a Go workflow surfaces the services that start it.
+func applyGoTemporalStartMeta(edge *graph.Edge, c goDeferredCall) {
+	if edge == nil || c.tempStartName == "" {
+		return
+	}
+	if edge.Meta == nil {
+		edge.Meta = map[string]any{}
+	}
+	edge.Meta["via"] = "temporal.start"
+	edge.Meta["temporal_kind"] = "workflow"
+	edge.Meta["temporal_name"] = c.tempStartName
+}
+
 // goTemporalNthStringLiteralArg returns the unquoted value of the n-th
 // (1-based) positional argument of a call when that argument is a string
 // literal, else "". Used to extract the signal/query name from an

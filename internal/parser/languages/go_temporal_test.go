@@ -635,3 +635,35 @@ func Orchestrator(ctx wf.Context) error {
 `)
 	assert.Empty(t, temporalEdgesByVia(fix, "temporal.signal-send"))
 }
+
+// --- Service-side workflow START (ExecuteWorkflow / SignalWithStartWorkflow) ---
+
+func TestGoTemporal_ExecuteWorkflowStart(t *testing.T) {
+	// client.ExecuteWorkflow(ctx, opts, WorkflowFn, args...) — workflow is
+	// the 3rd positional arg, reduced from the func reference.
+	fix := runGoExtract(t, `package svc
+
+func Start(c Client) {
+	c.ExecuteWorkflow(ctx, opts, OrderWorkflow, 1)
+}
+`)
+	edges := temporalEdgesByVia(fix, "temporal.start")
+	require.Len(t, edges, 1)
+	assert.Equal(t, "workflow", edges[0].Meta["temporal_kind"])
+	assert.Equal(t, "OrderWorkflow", edges[0].Meta["temporal_name"])
+}
+
+func TestGoTemporal_SignalWithStartWorkflow(t *testing.T) {
+	// client.SignalWithStartWorkflow(ctx, wfID, sig, arg, opts, workflow, ...)
+	// — the workflow is the 6th positional arg.
+	fix := runGoExtract(t, `package svc
+
+func Start(c Client) {
+	c.SignalWithStartWorkflow(ctx, "order-1", "cancel", nil, opts, OrderWorkflow, 1)
+}
+`)
+	edges := temporalEdgesByVia(fix, "temporal.start")
+	require.Len(t, edges, 1)
+	assert.Equal(t, "workflow", edges[0].Meta["temporal_kind"])
+	assert.Equal(t, "OrderWorkflow", edges[0].Meta["temporal_name"])
+}

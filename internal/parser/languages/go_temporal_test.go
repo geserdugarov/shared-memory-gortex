@@ -279,6 +279,39 @@ func OrderWorkflow(ctx workflow.Context) error {
 	assert.Equal(t, "retry", edges[0].Meta["temporal_name"])
 }
 
+func TestGoTemporal_SetQueryHandlerWithOptions(t *testing.T) {
+	fix := runGoExtract(t, `package wf
+
+import "go.temporal.io/sdk/workflow"
+
+func OrderWorkflow(ctx workflow.Context) error {
+	workflow.SetQueryHandlerWithOptions(ctx, "status", func() (string, error) { return "ok", nil }, workflow.QueryHandlerOptions{})
+	return nil
+}
+`)
+	edges := temporalEdgesByVia(fix, "temporal.handler")
+	require.Len(t, edges, 1)
+	assert.Equal(t, "query", edges[0].Meta["temporal_kind"])
+	assert.Equal(t, "status", edges[0].Meta["temporal_name"])
+}
+
+func TestGoTemporal_GetSignalChannelWithOptions(t *testing.T) {
+	fix := runGoExtract(t, `package wf
+
+import "go.temporal.io/sdk/workflow"
+
+func OrderWorkflow(ctx workflow.Context) error {
+	ch := workflow.GetSignalChannelWithOptions(ctx, "cancel", workflow.SignalChannelOptions{})
+	_ = ch
+	return nil
+}
+`)
+	edges := temporalEdgesByVia(fix, "temporal.handler")
+	require.Len(t, edges, 1)
+	assert.Equal(t, "signal", edges[0].Meta["temporal_kind"])
+	assert.Equal(t, "cancel", edges[0].Meta["temporal_name"])
+}
+
 func TestGoTemporal_HandlerNonLiteralNameUndetected(t *testing.T) {
 	// Query / signal / update names are matched by string at runtime;
 	// a non-literal name (variable / selector) can't be pinned here, so

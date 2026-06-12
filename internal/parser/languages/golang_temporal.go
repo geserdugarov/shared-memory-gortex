@@ -84,7 +84,9 @@ func goTemporalRegisterKind(method string) (kind string, plural bool, ok bool) {
 // returns the canonical kind ("query" / "signal" / "update").
 //
 //	workflow.SetQueryHandler(ctx, "name", fn)
+//	workflow.SetQueryHandlerWithOptions(ctx, "name", fn, opts)
 //	workflow.GetSignalChannel(ctx, "name")
+//	workflow.GetSignalChannelWithOptions(ctx, "name", opts)
 //	workflow.SetUpdateHandler(ctx, "name", fn)
 //	workflow.SetUpdateHandlerWithOptions(ctx, "name", fn, opts)
 //
@@ -98,9 +100,9 @@ func goTemporalHandlerKind(receiver, method string) (kind string, ok bool) {
 		return "", false
 	}
 	switch method {
-	case "SetQueryHandler":
+	case "SetQueryHandler", "SetQueryHandlerWithOptions":
 		return "query", true
-	case "GetSignalChannel":
+	case "GetSignalChannel", "GetSignalChannelWithOptions":
 		return "signal", true
 	case "SetUpdateHandler", "SetUpdateHandlerWithOptions":
 		return "update", true

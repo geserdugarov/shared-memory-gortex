@@ -329,6 +329,12 @@ func TestResolveTemporalCalls_JavaActivityInterfacePropagation(t *testing.T) {
 	assert.Equal(t, "activity", ifaceMethods["shipOrder"].Meta["temporal_role"])
 	assert.Equal(t, "activity", implMethods["chargeCard"].Meta["temporal_role"], "impl methods tagged via interface chain")
 	assert.Equal(t, "activity", implMethods["shipOrder"].Meta["temporal_role"])
+	// G2: an activity's canonical Temporal type is its method name with the
+	// first letter capitalized (the Java SDK default), keyed off the same
+	// string a Go RegisterActivity would use.
+	assert.Equal(t, "ChargeCard", ifaceMethods["chargeCard"].Meta["temporal_name"],
+		"activity canonical name is the capitalized method name")
+	assert.Equal(t, "ChargeCard", implMethods["chargeCard"].Meta["temporal_name"])
 }
 
 func TestResolveTemporalCalls_JavaWorkflowInterfacePropagation(t *testing.T) {
@@ -347,6 +353,30 @@ func TestResolveTemporalCalls_JavaWorkflowInterfacePropagation(t *testing.T) {
 	assert.Equal(t, "workflow_interface", iface.Meta["temporal_role"])
 	assert.Equal(t, "workflow", ifaceMethods["processOrder"].Meta["temporal_role"])
 	assert.Equal(t, "workflow", implMethods["processOrder"].Meta["temporal_role"])
+	// G2: a workflow's canonical Temporal type is the interface simple
+	// name (not the method name), so a Go service that starts this
+	// workflow by type matches it.
+	assert.Equal(t, "OrderWorkflow", ifaceMethods["processOrder"].Meta["temporal_name"],
+		"workflow canonical name is the interface simple name")
+	assert.Equal(t, "OrderWorkflow", implMethods["processOrder"].Meta["temporal_name"])
+}
+
+func TestJavaTemporalCanonicalNameHelpers(t *testing.T) {
+	assert.Equal(t, "ChargeCard", javaAnnotationStringArg(`name = "ChargeCard"`, "name"))
+	assert.Equal(t, "Foo_", javaAnnotationStringArg(`namePrefix = "Foo_"`, "namePrefix"))
+	// "name" lookup must not match the "namePrefix" key.
+	assert.Equal(t, "", javaAnnotationStringArg(`namePrefix = "Foo_"`, "name"))
+	assert.Equal(t, "", javaAnnotationStringArg(``, "name"))
+
+	assert.Equal(t, "ChargeCard", capitalizeASCII("chargeCard"))
+	assert.Equal(t, "X", capitalizeASCII("x"))
+	assert.Equal(t, "", capitalizeASCII(""))
+
+	// explicit name wins; activity defaults to capitalized; others to bare.
+	assert.Equal(t, "Override", javaMethodCanonicalName("activity", "chargeCard", `name = "Override"`))
+	assert.Equal(t, "ChargeCard", javaMethodCanonicalName("activity", "chargeCard", ""))
+	assert.Equal(t, "status", javaMethodCanonicalName("query", "status", ""))
+	assert.Equal(t, "getStatus", javaMethodCanonicalName("query", "getStatus", ""))
 }
 
 func TestResolveTemporalCalls_JavaSignalAndQueryMethods(t *testing.T) {

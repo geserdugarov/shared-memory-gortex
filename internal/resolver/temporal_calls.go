@@ -409,6 +409,7 @@ func buildTemporalIndex(g graph.Store, registerEdges, annotatedEdges []*graph.Ed
 	type javaAnno struct {
 		fromID                string
 		ifaceRole, methodRole string
+		args                  string // raw annotation inner-parens text
 	}
 	var javaAnnos []javaAnno
 	annoFromIDs := map[string]struct{}{}
@@ -420,7 +421,8 @@ func buildTemporalIndex(g graph.Store, registerEdges, annotatedEdges []*graph.Ed
 		if role == "" && methodRole == "" {
 			continue
 		}
-		javaAnnos = append(javaAnnos, javaAnno{fromID: e.From, ifaceRole: role, methodRole: methodRole})
+		args, _ := e.Meta["args"].(string)
+		javaAnnos = append(javaAnnos, javaAnno{fromID: e.From, ifaceRole: role, methodRole: methodRole, args: args})
 		if e.From != "" {
 			annoFromIDs[e.From] = struct{}{}
 		}
@@ -432,8 +434,9 @@ func buildTemporalIndex(g graph.Store, registerEdges, annotatedEdges []*graph.Ed
 	annoFromNodes := g.GetNodesByIDs(annoFromList)
 
 	type javaIfaceTag struct {
-		ifaceID string
-		role    string // "activity_interface" / "workflow_interface"
+		ifaceID    string
+		role       string // "activity_interface" / "workflow_interface"
+		namePrefix string // @ActivityInterface(namePrefix = "...")
 	}
 	var javaIfaces []javaIfaceTag
 	for _, a := range javaAnnos {
@@ -441,17 +444,25 @@ func buildTemporalIndex(g graph.Store, registerEdges, annotatedEdges []*graph.Ed
 		if from == nil {
 			continue
 		}
-		// Method-level annotation: stamp directly.
+		// Method-level annotation: stamp + index under the canonical
+		// Temporal name (explicit @XxxMethod(name=) > activity Capitalize >
+		// bare method name) so it keys off the same string a matching Go
+		// registration uses.
 		if a.methodRole != "" && (from.Kind == graph.KindMethod || from.Kind == graph.KindFunction) {
-			stampTemporalRole(g, from, a.methodRole, from.Name)
-			idx.byKindName[normaliseTemporalKind(a.methodRole)+"::"+from.Name] = append(
-				idx.byKindName[normaliseTemporalKind(a.methodRole)+"::"+from.Name], from)
+			canonical := javaMethodCanonicalName(a.methodRole, from.Name, a.args)
+			stampTemporalRole(g, from, a.methodRole, canonical)
+			key := normaliseTemporalKind(a.methodRole) + "::" + canonical
+			idx.byKindName[key] = append(idx.byKindName[key], from)
 			continue
 		}
 		// Interface-level annotation: queue for the propagation pass.
 		if a.ifaceRole != "" && from.Kind == graph.KindInterface {
 			stampTemporalRole(g, from, a.ifaceRole, from.Name)
-			javaIfaces = append(javaIfaces, javaIfaceTag{ifaceID: from.ID, role: a.ifaceRole})
+			javaIfaces = append(javaIfaces, javaIfaceTag{
+				ifaceID:    from.ID,
+				role:       a.ifaceRole,
+				namePrefix: javaAnnotationStringArg(a.args, "namePrefix"),
+			})
 		}
 	}
 
@@ -507,10 +518,22 @@ func buildTemporalIndex(g graph.Store, registerEdges, annotatedEdges []*graph.Ed
 		if iface == nil {
 			continue
 		}
+		// Canonical Temporal name for a method of this interface: a
+		// workflow's type is the interface simple name; an activity's type
+		// is its method name capitalized, with the @ActivityInterface
+		// namePrefix prepended. Keyed the same for interface and impl
+		// methods (same method name) so a dispatch lands on either.
+		canonicalFor := func(m *graph.Node) string {
+			if t.role == "workflow_interface" {
+				return iface.Name
+			}
+			return t.namePrefix + capitalizeASCII(m.Name)
+		}
 		ifaceMethods := collectJavaInterfaceMethodsFromIndex(iface, javaMethodsByFile)
 		for _, m := range ifaceMethods {
-			stampTemporalRole(g, m, methodRole, m.Name)
-			idx.byKindName[methodRole+"::"+m.Name] = append(idx.byKindName[methodRole+"::"+m.Name], m)
+			canonical := canonicalFor(m)
+			stampTemporalRole(g, m, methodRole, canonical)
+			idx.byKindName[methodRole+"::"+canonical] = append(idx.byKindName[methodRole+"::"+canonical], m)
 		}
 		// Propagate to implementing classes' methods.
 		implMethodNames := map[string]struct{}{}
@@ -526,8 +549,9 @@ func buildTemporalIndex(g graph.Store, registerEdges, annotatedEdges []*graph.Ed
 				if _, ok := implMethodNames[m.Name]; !ok {
 					continue
 				}
-				stampTemporalRole(g, m, methodRole, m.Name)
-				idx.byKindName[methodRole+"::"+m.Name] = append(idx.byKindName[methodRole+"::"+m.Name], m)
+				canonical := canonicalFor(m)
+				stampTemporalRole(g, m, methodRole, canonical)
+				idx.byKindName[methodRole+"::"+canonical] = append(idx.byKindName[methodRole+"::"+canonical], m)
 			}
 		}
 	}
@@ -556,6 +580,73 @@ func temporalRoleForJavaAnnotation(annoID string) (ifaceRole, methodRole string)
 		return "", "update"
 	}
 	return "", ""
+}
+
+// javaAnnotationStringArg extracts the value of a `key = "value"` argument
+// from an annotation's raw inner-parens text (the EdgeAnnotated Meta
+// "args"), e.g. javaAnnotationStringArg(`name = "ChargeCard"`, "name") ==
+// "ChargeCard". Matched on a word boundary so a "name" lookup does not
+// match "namePrefix". Returns "" when the key is absent or unquoted.
+func javaAnnotationStringArg(args, key string) string {
+	for i := 0; i+len(key) <= len(args); i++ {
+		if args[i:i+len(key)] != key {
+			continue
+		}
+		if i > 0 {
+			if b := args[i-1]; b != ' ' && b != ',' && b != '(' {
+				continue
+			}
+		}
+		j := i + len(key)
+		for j < len(args) && args[j] == ' ' {
+			j++
+		}
+		if j >= len(args) || args[j] != '=' {
+			continue
+		}
+		rest := args[j+1:]
+		q := strings.IndexByte(rest, '"')
+		if q < 0 {
+			return ""
+		}
+		rest = rest[q+1:]
+		end := strings.IndexByte(rest, '"')
+		if end < 0 {
+			return ""
+		}
+		return rest[:end]
+	}
+	return ""
+}
+
+// capitalizeASCII upper-cases the first rune of s (Temporal's Java SDK
+// derives an activity's default type from the method name with the first
+// letter capitalized).
+func capitalizeASCII(s string) string {
+	if s == "" {
+		return s
+	}
+	r, size := utf8.DecodeRuneInString(s)
+	return string(unicode.ToUpper(r)) + s[size:]
+}
+
+// javaMethodCanonicalName computes the canonical Temporal name a Java
+// method-level annotation registers under, so the resolver keys it off the
+// same string a matching Go registration would use:
+//   - an explicit @XxxMethod(name = "...") always wins;
+//   - an activity method defaults to its name with the first letter
+//     capitalized (the Java SDK default activity type);
+//   - signal / query / update / workflow methods default to the bare
+//     method name (signal/query/update names match by string at runtime;
+//     a workflow's type is usually the interface name, handled in Phase 3).
+func javaMethodCanonicalName(role, methodName, args string) string {
+	if explicit := javaAnnotationStringArg(args, "name"); explicit != "" {
+		return explicit
+	}
+	if role == "activity" {
+		return capitalizeASCII(methodName)
+	}
+	return methodName
 }
 
 // normaliseTemporalKind collapses the seven role tags down to the two

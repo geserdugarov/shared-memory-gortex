@@ -420,6 +420,13 @@ func ResolveTemporalCalls(g graph.Store) int {
 	stubNames := make([]string, 0, len(stubs))
 	for _, s := range stubs {
 		stubNames = append(stubNames, s.name)
+		// Env-default const reference: the helper's default argument was a
+		// constant NAME (`GetEnvOrDefault(KEY, config.ACTIVITY_NAME_DEFAULT)`),
+		// recorded as `temporal_default_const`. Include it so the deref map
+		// resolves it to its literal value alongside the dispatch names.
+		if cn, _ := s.edge.Meta["temporal_default_const"].(string); cn != "" {
+			stubNames = append(stubNames, cn)
+		}
 	}
 	derefByName := buildConstDerefMap(g, stubNames)
 
@@ -443,6 +450,23 @@ func ResolveTemporalCalls(g graph.Store) int {
 				}
 			}
 		}
+		// Env-default const reference: the env-helper's default argument was a
+		// constant reference (`GetEnvOrDefault(KEY, config.ACTIVITY_NAME_DEFAULT)`),
+		// recorded as `temporal_default_const`. Substitute the constant's literal
+		// VALUE through the deref map (register-confirmed candidates), then look
+		// it up. The env-default tier override below keeps the edge at the
+		// const_ref tier (inferred, visible) regardless of how it resolved.
+		if handlerID == "" {
+			if cn, _ := e.Meta["temporal_default_const"].(string); cn != "" {
+				if v, ok := derefByName[cn]; ok && v != "" {
+					if id, o, c := idx.lookup(s.kind, v, callerRepo, callerLang); id != "" {
+						handlerID, origin, conf = id, o, c
+						e.Meta["temporal_const_value"] = v
+					}
+				}
+			}
+		}
+
 		// Cross-language join: a consumer (typically a temporal.start, e.g.
 		// a Java service starting a Go workflow) with no same-language
 		// handler is matched to a unique other-language candidate by
@@ -464,8 +488,8 @@ func ResolveTemporalCalls(g graph.Store) int {
 		// When the name came from an env-var-with-literal-default variable,
 		// the value is a best-guess (the runtime env may differ from the
 		// literal default). HOW it was recognised decides the tier:
-		//   - "allowlist" / "os_getenv": we are confident this IS an
-		//     env-with-default — land at the inferred tier (0.6, visible).
+		//   - "allowlist" / "os_getenv" / "const_ref": we are confident this IS
+		//     an env-with-default — land at the inferred tier (0.6, visible).
 		//   - "heuristic" (or unknown/legacy): a generic env-named-helper
 		//     guess — land at the hidden speculative tier (0.4), where the
 		//     optional LLM cleaning pass can confirm or prune it.
@@ -475,7 +499,7 @@ func ResolveTemporalCalls(g graph.Store) int {
 			envDefault = true
 			envSource, _ = e.Meta["temporal_env_source"].(string)
 		}
-		envSpeculative := envDefault && envSource != "allowlist" && envSource != "os_getenv"
+		envSpeculative := envDefault && envSource != "allowlist" && envSource != "os_getenv" && envSource != "const_ref"
 		if handlerID != "" && envDefault {
 			if envSpeculative {
 				origin = graph.OriginSpeculative

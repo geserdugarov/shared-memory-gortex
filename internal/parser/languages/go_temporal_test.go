@@ -431,6 +431,76 @@ func WF(ctx workflow.Context) {
 	assert.Equal(t, "allowlist", edges[0].Meta["temporal_env_source"])
 }
 
+func TestEnvFallbackViaHelper_ConstSelectorDefault(t *testing.T) {
+	// The #1 corpus gap: env-helper default is a selector_expression constant
+	// reference, not a literal. temporal_name stays the dispatch variable; the
+	// const NAME is recorded in temporal_default_const at the const_ref tier.
+	fix := runGoExtract(t, `package wf
+
+import (
+	"go.temporal.io/sdk/workflow"
+	"example.com/app/config"
+	"example.com/app/wfutils"
+)
+
+func WF(ctx workflow.Context) {
+	actName := wfutils.GetEnvOrDefault(config.ACTIVITY_NAME_ENV, config.ACTIVITY_NAME_DEFAULT)
+	workflow.ExecuteActivity(ctx, actName, 1)
+}
+`)
+	edges := temporalEdgesByVia(fix, "temporal.stub")
+	require.Len(t, edges, 1)
+	e := edges[0]
+	assert.Equal(t, "actName", e.Meta["temporal_name"], "temporal_name stays the dispatch variable for a const default")
+	assert.Equal(t, "ACTIVITY_NAME_DEFAULT", e.Meta["temporal_default_const"])
+	assert.Equal(t, "env_default", e.Meta["temporal_name_origin"])
+	assert.Equal(t, "const_ref", e.Meta["temporal_env_source"])
+}
+
+func TestEnvFallbackViaHelper_ConstBareDefault(t *testing.T) {
+	// Local (un-qualified) constant default — a bare identifier.
+	fix := runGoExtract(t, `package wf
+
+import "go.temporal.io/sdk/workflow"
+
+const VALIDATE_ACTIVITY_NAME_DEFAULT = "ValidateActivity"
+
+func WF(ctx workflow.Context) {
+	actName := EnvOr("VALIDATE_ACTIVITY_NAME_ENV", VALIDATE_ACTIVITY_NAME_DEFAULT)
+	workflow.ExecuteActivity(ctx, actName, 1)
+}
+`)
+	edges := temporalEdgesByVia(fix, "temporal.stub")
+	require.Len(t, edges, 1)
+	e := edges[0]
+	assert.Equal(t, "VALIDATE_ACTIVITY_NAME_DEFAULT", e.Meta["temporal_default_const"])
+	assert.Equal(t, "const_ref", e.Meta["temporal_env_source"])
+}
+
+func TestEnvFallbackHeuristic_ConstDefaultStaysHeuristic(t *testing.T) {
+	// An env-NAMED (heuristic, not allow-listed) helper with a const default:
+	// the const is recorded, but the source stays "heuristic" (the helper
+	// itself is the unproven link → hidden speculative tier).
+	fix := runGoExtract(t, `package wf
+
+import (
+	"go.temporal.io/sdk/workflow"
+	"example.com/app/cfg"
+)
+
+func WF(ctx workflow.Context) {
+	actName := cfg.ActivityFromEnv("CHARGE_ACTIVITY", cfg.CHARGE_ACTIVITY_DEFAULT)
+	workflow.ExecuteActivity(ctx, actName, 1)
+}
+`)
+	edges := temporalEdgesByVia(fix, "temporal.stub")
+	require.Len(t, edges, 1)
+	e := edges[0]
+	assert.Equal(t, "CHARGE_ACTIVITY_DEFAULT", e.Meta["temporal_default_const"])
+	assert.Equal(t, "heuristic", e.Meta["temporal_env_source"],
+		"heuristic helper stays heuristic even with a const default")
+}
+
 func TestEnvFallbackAllowlist_ConfigPromotesHelper(t *testing.T) {
 	// A helper that is neither built-in NOR "env"-named is invisible to both
 	// layers by default — but installing it in the per-repo corporate

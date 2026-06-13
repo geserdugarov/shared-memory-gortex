@@ -250,6 +250,12 @@ type goDeferredCall struct {
 	// carries the handler's string name. `via=temporal.handler` meta is
 	// stamped on the emitted edge in the call post-pass below.
 	tempHandlerKind string
+	// tempDefaultConst is set when the env-default's default argument was a
+	// constant REFERENCE (`config.ACTIVITY_NAME_DEFAULT` / a bare const name)
+	// rather than a string literal. temporal_name then stays the dispatch
+	// variable name; the resolver substitutes the constant's literal value
+	// from its const-deref index. Emitted as `temporal_default_const`.
+	tempDefaultConst string
 	// tempEnvSource records HOW the env-default name was recognised:
 	// "os_getenv" (provable os.Getenv / os.LookupEnv read), "allowlist" (a
 	// helper name in the configured env-helper allow-list), or "heuristic"
@@ -461,10 +467,17 @@ func (e *GoExtractor) Extract(filePath string, src []byte) (*parser.ExtractionRe
 					// variable, try to resolve it to an env-var-with-literal
 					// -default so the dispatch lands on the default activity.
 					if argNode != nil && argNode.Type() == "identifier" {
-						if def, source, ok := goTemporalEnvDefaultName(expr.Node, name, src, e.envHelperExtra); ok {
-							dc.tempName = def
+						if litDef, constName, source, ok := goTemporalEnvDefaultName(expr.Node, name, src, e.envHelperExtra); ok {
 							dc.tempEnvDefault = true
 							dc.tempEnvSource = source
+							if constName != "" {
+								// Const-reference default: keep temporal_name as the
+								// dispatch variable; the resolver substitutes the
+								// constant's literal value via temporal_default_const.
+								dc.tempDefaultConst = constName
+							} else {
+								dc.tempName = litDef
+							}
 						}
 					}
 				}
@@ -882,6 +895,9 @@ func (e *GoExtractor) Extract(filePath string, src []byte) (*parser.ExtractionRe
 					meta["temporal_name_origin"] = "env_default"
 					if c.tempEnvSource != "" {
 						meta["temporal_env_source"] = c.tempEnvSource
+					}
+					if c.tempDefaultConst != "" {
+						meta["temporal_default_const"] = c.tempDefaultConst
 					}
 				}
 				if recvName := recvNameByID[callerID]; recvName != "" {

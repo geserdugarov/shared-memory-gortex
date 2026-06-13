@@ -692,10 +692,17 @@ func goTemporalNameFromExpr(node *sitter.Node, src []byte) string {
 // os.Getenv-anchored literal default returns "", false. This is a
 // deliberately narrow data-flow shortcut, not general constant
 // propagation — see the speculative tier the resolver lands it at.
-func goTemporalEnvDefaultName(callNode *sitter.Node, name string, src []byte, extra map[string]bool) (def string, source string, ok bool) {
+// The result is reported as exactly one of `litDef` (a string-literal default)
+// or `constName` (a constant-reference default the resolver substitutes through
+// constVal), plus a `source` tier marker: "os_getenv" / "allowlist" (trusted
+// literal), "const_ref" (trusted helper with a constant default — same visible
+// tier as allowlist), or "heuristic" (env-named-helper guess, hidden tier;
+// stays heuristic even when its default is a constant, the helper itself being
+// the weak link).
+func goTemporalEnvDefaultName(callNode *sitter.Node, name string, src []byte, extra map[string]bool) (litDef string, constName string, source string, ok bool) {
 	body := goEnclosingFuncBody(callNode)
 	if body == nil {
-		return "", "", false
+		return "", "", "", false
 	}
 	limit := callNode.StartByte()
 
@@ -734,43 +741,69 @@ func goTemporalEnvDefaultName(callNode *sitter.Node, name string, src []byte, ex
 	// unresolved rather than guess.
 	//
 	// resolvedSource records HOW the default was recognised so the resolver
-	// can tier the edge: "os_getenv" / "allowlist" land at the inferred
-	// (visible) tier, "heuristic" stays at the hidden speculative tier.
-	resolved := ""
+	// can tier the edge: "os_getenv" / "allowlist" / "const_ref" land at the
+	// inferred (visible) tier, "heuristic" stays at the hidden speculative
+	// tier. The default is reported as exactly one of resLit (a string-literal
+	// default) or resConst (a constant-reference default the resolver
+	// substitutes through its const-deref index).
+	resLit := ""
+	resConst := ""
 	resolvedSource := ""
 	resolvedOK := false
 	envReadSeen := false
+	// commit records a resolved default, routing a constant-reference value
+	// into resConst (and downgrading "const_ref" → "heuristic" when the helper
+	// itself is only a heuristic match — the helper, not the constant, is the
+	// weak link).
+	commit := func(val string, isConst bool, trustedSource string) {
+		if isConst {
+			resLit, resConst = "", val
+			if trustedSource == "heuristic" {
+				resolvedSource = "heuristic"
+			} else {
+				resolvedSource = "const_ref"
+			}
+		} else {
+			resLit, resConst, resolvedSource = val, "", trustedSource
+		}
+		resolvedOK, envReadSeen = true, false
+	}
+	clear := func() {
+		resLit, resConst, resolvedSource, resolvedOK, envReadSeen = "", "", "", false, false
+	}
 	for _, a := range assigns {
 		rhs := goAssignRHSExpr(a)
 		switch {
 		case rhs == nil:
-			resolved, resolvedSource, resolvedOK, envReadSeen = "", "", false, false
+			clear()
 		case rhs.Type() == "call_expression" && goIsEnvRead(rhs, src):
 			// `name := os.Getenv("K")` — default still pending.
-			resolved, resolvedSource, resolvedOK, envReadSeen = "", "", false, true
+			clear()
+			envReadSeen = true
 		case rhs.Type() == "call_expression":
 			// `name := cmp.Or(os.Getenv("K"), "lit")` — self-contained.
-			if def, ok := goCallEnvDefaultLiteral(rhs, src); ok {
-				resolved, resolvedSource, resolvedOK, envReadSeen = def, "os_getenv", true, false
-			} else if def, ok := goEnvHelperDefaultLiteral(rhs, src, extra); ok {
+			if v, isC, ok := goCallEnvDefaultLiteral(rhs, src); ok {
+				commit(v, isC, "os_getenv")
+			} else if v, isC, ok := goEnvHelperDefaultLiteral(rhs, src, extra); ok {
 				// Allow-listed env-helper (`GetEnvOrDefault(KEY, "lit")`).
-				resolved, resolvedSource, resolvedOK, envReadSeen = def, "allowlist", true, false
-			} else if def, ok := goEnvHelperHeuristicDefault(rhs, src); ok {
+				commit(v, isC, "allowlist")
+			} else if v, isC, ok := goEnvHelperHeuristicDefault(rhs, src); ok {
 				// Generic "env"-named helper — lower-trust heuristic.
-				resolved, resolvedSource, resolvedOK, envReadSeen = def, "heuristic", true, false
+				commit(v, isC, "heuristic")
 			} else {
-				resolved, resolvedSource, resolvedOK, envReadSeen = "", "", false, false
+				clear()
 			}
 		default:
-			// `name = "lit"` — only a default when it follows an env read.
-			if lit, ok := goStringLiteralValue(rhs, src); ok && envReadSeen {
-				resolved, resolvedSource, resolvedOK = lit, "os_getenv", true
+			// `name = "lit"` / `name = CONST` — only a default when it
+			// follows an env read.
+			if v, isC, ok := goArgDefaultValue(rhs, src); ok && envReadSeen {
+				commit(v, isC, "os_getenv")
 			} else {
-				resolved, resolvedSource, resolvedOK, envReadSeen = "", "", false, false
+				clear()
 			}
 		}
 	}
-	return resolved, resolvedSource, resolvedOK
+	return resLit, resConst, resolvedSource, resolvedOK
 }
 
 // goEnclosingFuncBody walks up from n to the nearest function-like
@@ -831,6 +864,36 @@ func goIsEnvRead(call *sitter.Node, src []byte) bool {
 	return false
 }
 
+// goArgDefaultValue reduces an env-or-default helper's DEFAULT argument to its
+// dispatch-name value. A string literal (`"ChargeActivity"`) yields the literal
+// with isConst=false. A constant REFERENCE — a bare identifier
+// (`ACTIVITY_NAME_DEFAULT`) or a selector_expression
+// (`config.ACTIVITY_NAME_DEFAULT`) — yields the constant's NAME with
+// isConst=true; the resolver later substitutes the constant's literal value
+// through its const-deref index (the constant body usually lives in another
+// package, invisible at extract time). Identifiers are admitted optimistically
+// because the resolver validates them against the const-deref index — an
+// identifier that is not actually a string constant simply fails to resolve and
+// stays a broken_dispatch, so there is no false-resolution risk. Returns
+// ("", false, false) for any other shape.
+func goArgDefaultValue(node *sitter.Node, src []byte) (val string, isConst bool, ok bool) {
+	if node == nil {
+		return "", false, false
+	}
+	if lit, okk := goStringLiteralValue(node, src); okk {
+		return lit, false, true
+	}
+	switch node.Type() {
+	case "identifier":
+		return node.Content(src), true, true
+	case "selector_expression":
+		if field := node.ChildByFieldName("field"); field != nil {
+			return field.Content(src), true, true
+		}
+	}
+	return "", false, false
+}
+
 // goCallEnvDefaultLiteral inspects a `cmp.Or(os.Getenv("KEY"), "Default")`
 // call and returns its literal default. cmp.Or returns the FIRST non-zero
 // argument, so when the env read yields "" at runtime the value is the
@@ -840,19 +903,22 @@ func goIsEnvRead(call *sitter.Node, src []byte) bool {
 // "Suffix")`) is deliberately NOT treated as env-or-default — only the
 // stdlib cmp.Or idiom qualifies, since cmp.Or is the one combinator whose
 // "first non-zero" semantics make the literal a provable default. Returns
-// ("", false) when the callee is not cmp.Or, no os.Getenv / os.LookupEnv
-// read is present, or there is no string-literal argument.
-func goCallEnvDefaultLiteral(call *sitter.Node, src []byte) (string, bool) {
+// ("", false, false) when the callee is not cmp.Or, no os.Getenv /
+// os.LookupEnv read is present, or there is no default argument. The default
+// may be a string literal (isConst=false) or a constant reference
+// (isConst=true) the resolver substitutes through its const-deref index.
+func goCallEnvDefaultLiteral(call *sitter.Node, src []byte) (val string, isConst bool, ok bool) {
 	if !goIsCmpOr(call, src) {
-		return "", false
+		return "", false, false
 	}
 	args := call.ChildByFieldName("arguments")
 	if args == nil {
-		return "", false
+		return "", false, false
 	}
 	hasEnvRead := false
-	firstLiteral := ""
-	haveLiteral := false
+	firstVal := ""
+	firstConst := false
+	haveDefault := false
 	for i := 0; i < int(args.NamedChildCount()); i++ {
 		c := args.NamedChild(i)
 		if c == nil {
@@ -862,14 +928,14 @@ func goCallEnvDefaultLiteral(call *sitter.Node, src []byte) (string, bool) {
 			hasEnvRead = true
 			continue
 		}
-		if lit, ok := goStringLiteralValue(c, src); ok && !haveLiteral {
-			firstLiteral, haveLiteral = lit, true
+		if v, isC, okk := goArgDefaultValue(c, src); okk && !haveDefault {
+			firstVal, firstConst, haveDefault = v, isC, true
 		}
 	}
-	if hasEnvRead && haveLiteral {
-		return firstLiteral, true
+	if hasEnvRead && haveDefault {
+		return firstVal, firstConst, true
 	}
-	return "", false
+	return "", false, false
 }
 
 // goIsCmpOr reports whether a call_expression is a call to the stdlib
@@ -911,10 +977,10 @@ var goEnvHelperNames = []string{
 // tier — that is how a corporate agent PROMOTES its own helper above the
 // generic "env"-name heuristic. Returns ("", false) for any non-matching name
 // or a non-string-literal 2nd arg.
-func goEnvHelperDefaultLiteral(call *sitter.Node, src []byte, extra map[string]bool) (string, bool) {
+func goEnvHelperDefaultLiteral(call *sitter.Node, src []byte, extra map[string]bool) (val string, isConst bool, ok bool) {
 	fn := call.ChildByFieldName("function")
 	if fn == nil {
-		return "", false
+		return "", false, false
 	}
 	var callee string
 	switch fn.Type() {
@@ -926,7 +992,7 @@ func goEnvHelperDefaultLiteral(call *sitter.Node, src []byte, extra map[string]b
 		}
 	}
 	if callee == "" {
-		return "", false
+		return "", false, false
 	}
 	matched := false
 	for _, name := range goEnvHelperNames {
@@ -939,13 +1005,13 @@ func goEnvHelperDefaultLiteral(call *sitter.Node, src []byte, extra map[string]b
 		matched = true
 	}
 	if !matched {
-		return "", false
+		return "", false, false
 	}
 	args := call.ChildByFieldName("arguments")
 	if args == nil || args.NamedChildCount() < 2 {
-		return "", false
+		return "", false, false
 	}
-	return goStringLiteralValue(args.NamedChild(1), src)
+	return goArgDefaultValue(args.NamedChild(1), src)
 }
 
 // goEnvHelperHeuristicDefault is the generic-recall fallback for env-or-default
@@ -960,10 +1026,10 @@ func goEnvHelperDefaultLiteral(call *sitter.Node, src []byte, extra map[string]b
 // than asserting it as a real dispatch. Returns ("", false) when the name lacks
 // the "env" marker or the 2nd argument is not a string literal — so a plain
 // `pick(KEY, "X")` (no env marker) is left untouched, preserving precision.
-func goEnvHelperHeuristicDefault(call *sitter.Node, src []byte) (string, bool) {
+func goEnvHelperHeuristicDefault(call *sitter.Node, src []byte) (val string, isConst bool, ok bool) {
 	fn := call.ChildByFieldName("function")
 	if fn == nil {
-		return "", false
+		return "", false, false
 	}
 	var callee string
 	switch fn.Type() {
@@ -975,13 +1041,13 @@ func goEnvHelperHeuristicDefault(call *sitter.Node, src []byte) (string, bool) {
 		}
 	}
 	if callee == "" || !strings.Contains(strings.ToLower(callee), "env") {
-		return "", false
+		return "", false, false
 	}
 	args := call.ChildByFieldName("arguments")
 	if args == nil || args.NamedChildCount() < 2 {
-		return "", false
+		return "", false, false
 	}
-	return goStringLiteralValue(args.NamedChild(1), src)
+	return goArgDefaultValue(args.NamedChild(1), src)
 }
 
 // goStringLiteralValue returns the unquoted value of a Go string literal

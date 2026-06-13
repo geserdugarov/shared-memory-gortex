@@ -377,6 +377,24 @@ func (s *Server) handleVerifyChange(ctx context.Context, req mcp.CallToolRequest
 		for _, v := range result.Violations {
 			fmt.Fprintf(&b, "%s %s %s:%d %s\n", v.Kind, v.SymbolID, v.FilePath, v.Line, v.Description)
 		}
+		// One line per changed function: how its call sites consume the
+		// return value, so a return-signature change shows exactly which
+		// sites bind / return / branch on the result.
+		for _, ru := range result.ReturnUsage {
+			fmt.Fprintf(&b, "return_usage %s call_sites:%d", ru.SymbolID, ru.CallSites)
+			labels := make([]string, 0, len(ru.Counts))
+			for label := range ru.Counts {
+				labels = append(labels, label)
+			}
+			sort.Strings(labels)
+			for _, label := range labels {
+				fmt.Fprintf(&b, " %s:%d", label, ru.Counts[label])
+			}
+			if ru.Unclassified > 0 {
+				fmt.Fprintf(&b, " unclassified:%d", ru.Unclassified)
+			}
+			b.WriteString("\n")
+		}
 		if result.Clean {
 			fmt.Fprintf(&b, "clean: checked %d callers, %d implementors\n", result.CheckedCallers, result.CheckedImpls)
 		}

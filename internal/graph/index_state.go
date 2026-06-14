@@ -36,3 +36,11 @@ type RepoIndexStateWriter interface {
 type RepoIndexStateReader interface {
 	GetRepoIndexState(repoPrefix string) (RepoIndexState, bool, error)
 }
+
+// DBStatReporter is an optional capability: report the on-disk size of the
+// backing database file and its write-ahead log, in bytes. Surfaced in
+// daemon_health so a runaway WAL high-water mark is observable. In-memory
+// backends do not implement it.
+type DBStatReporter interface {
+	DBStats() (dbBytes, walBytes int64)
+}

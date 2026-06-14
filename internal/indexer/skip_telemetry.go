@@ -104,6 +104,7 @@ func timeoutSkipResult(relPath, lang string, budgetMS int) *parser.ExtractionRes
 			FilePath: relPath,
 			Language: lang,
 			Meta: map[string]any{
+				"skip_reason":            "timeout",
 				"skipped_due_to_timeout": true,
 				"extract_budget_ms":      budgetMS,
 			},
@@ -124,6 +125,7 @@ func minifiedSkipResult(relPath, lang, reason string) *parser.ExtractionResult {
 			FilePath: relPath,
 			Language: lang,
 			Meta: map[string]any{
+				"skip_reason":             "minified",
 				"skipped_due_to_minified": true,
 				"minified_reason":         reason,
 			},
@@ -141,10 +143,39 @@ func sizeSkipNode(sf skippedFile, maxSize int64) *graph.Node {
 		FilePath: sf.relPath,
 		Language: sf.lang,
 		Meta: map[string]any{
+			"skip_reason":         "size",
 			"skipped_due_to_size": true,
 			"file_size_bytes":     sf.size,
 			"max_file_size_bytes": maxSize,
 		},
+	}
+}
+
+// parseFailedSkipResult builds a synthetic single-node result for a file
+// whose extractor returned an error that did not panic or time out — an
+// ordinary parse failure that would otherwise be dropped silently.
+// Keeping the file in the graph as a skip node makes "why is this symbol
+// missing" answerable (index_health rolls the skip reasons up), and the
+// Merkle reconcile retries it automatically once its content changes or
+// its language's extractor version is bumped — so no separate retry
+// ledger is needed.
+func parseFailedSkipResult(relPath, lang string, cause error) *parser.ExtractionResult {
+	reason := "parse failed"
+	if cause != nil {
+		reason = cause.Error()
+	}
+	return &parser.ExtractionResult{
+		Nodes: []*graph.Node{{
+			ID:       relPath,
+			Kind:     graph.KindFile,
+			Name:     filepath.Base(relPath),
+			FilePath: relPath,
+			Language: lang,
+			Meta: map[string]any{
+				"skip_reason": "parse_failed",
+				"parse_error": reason,
+			},
+		}},
 	}
 }
 

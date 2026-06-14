@@ -66,6 +66,15 @@ func DetectTemporalOrphans(g graph.Store) TemporalOrphanReport {
 			}
 		case "temporal.stub":
 			if strings.HasPrefix(e.To, temporalStubPrefix) {
+				// P0: a dispatch whose call site is a test file is almost
+				// always a fixture/mock (handler is a stub or lives in
+				// another repo); counting it as a broken_dispatch is the
+				// dominant false positive. Skip it — keyed on the edge's
+				// own FilePath (the dispatcher), so it's robust under both
+				// full and incremental reindex (no Node.Meta dependency).
+				if isTestFilePath(e.FilePath) {
+					continue
+				}
 				rep.BrokenDispatch = append(rep.BrokenDispatch, TemporalOrphan{
 					From: e.From, Kind: kind, Name: name, File: e.FilePath, Line: e.Line,
 				})

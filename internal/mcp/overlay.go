@@ -141,6 +141,15 @@ func (s *Server) wrapToolHandler(h mcpserver.ToolHandlerFunc) mcpserver.ToolHand
 		if warming && hErr == nil {
 			res = decorateResultWithWarming(res, env)
 		}
+		// Inline freshness: when a file-reading tool returns content for a
+		// file that has changed on disk since it was indexed, attach a
+		// small `freshness` block so the agent knows the graph view may lag
+		// the working tree. Omitted (zero cost) for the common fresh case.
+		if hErr == nil {
+			if rider := s.freshnessRiderFor(req.Params.Name, req); rider != nil {
+				res = decorateResultWithFreshness(res, rider)
+			}
+		}
 		// Capture large successful responses into the session ring so
 		// the post-filter tools can re-cut them without re-querying.
 		if hErr == nil {

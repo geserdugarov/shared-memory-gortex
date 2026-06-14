@@ -6301,3 +6301,26 @@ func (idx *Indexer) IsStale(relPath string) bool {
 
 	return info.ModTime().UnixNano() != storedMtime
 }
+
+// IsTrackedStale reports whether a file that IS in the index has changed
+// on disk since it was indexed. Unlike IsStale it returns false for an
+// untracked path (a new file, a non-source path, or a path-form
+// mismatch), so a freshness signal never false-positives on a file the
+// index legitimately does not cover.
+func (idx *Indexer) IsTrackedStale(relPath string) bool {
+	relPath = pathkey.Normalize(filepath.ToSlash(relPath))
+
+	idx.mtimeMu.RLock()
+	storedMtime, ok := idx.fileMtimes[relPath]
+	idx.mtimeMu.RUnlock()
+	if !ok {
+		return false
+	}
+
+	absPath := filepath.Join(idx.rootPath, filepath.FromSlash(relPath))
+	info, err := os.Stat(absPath)
+	if err != nil {
+		return false
+	}
+	return info.ModTime().UnixNano() != storedMtime
+}

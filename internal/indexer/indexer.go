@@ -1814,6 +1814,7 @@ func (idx *Indexer) IndexCtx(ctx context.Context, root string) (result *IndexRes
 	var skippedLarge int
 	var skippedBytes int64
 	var skippedBySize []skippedFile
+	var parseFailedFiles []skippedFile
 	err = filepath.WalkDir(absRoot, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return nil
@@ -2189,6 +2190,16 @@ func (idx *Indexer) IndexCtx(ctx context.Context, root string) (result *IndexRes
 						errMu.Unlock()
 					}
 					if result == nil {
+						// A full-index parse failure that produced no nodes:
+						// record it for a skip-node post-pass so the file
+						// stays visible instead of vanishing. (The live-modify
+						// path never reaches here — it keeps a file's prior
+						// nodes through a transient parse failure.)
+						if err != nil {
+							errMu.Lock()
+							parseFailedFiles = append(parseFailedFiles, skippedFile{relPath: relPath, lang: lang, cause: err.Error()})
+							errMu.Unlock()
+						}
 						continue
 					}
 					if skipped && len(result.Nodes) > 0 {
@@ -2330,6 +2341,7 @@ func (idx *Indexer) IndexCtx(ctx context.Context, root string) (result *IndexRes
 	// they stay visible in the graph with skip telemetry attached
 	// instead of vanishing silently.
 	idx.emitSizeSkipNodes(skippedBySize)
+	idx.emitParseFailedSkipNodes(parseFailedFiles)
 
 	// Populate fileMtimes for all detected files. Keyed through
 	// relKey so the mtime map agrees with the graph's file-node keys

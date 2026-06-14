@@ -200,14 +200,7 @@ func (idx *Indexer) extractFile(
 				true, eerr
 		}
 		if eerr != nil {
-			// A non-panic, non-timeout extraction error: keep the file
-			// visible as a skip node instead of dropping it silently, so
-			// "why is this symbol missing" is answerable. The Merkle
-			// reconcile retries it once its content or extractor version
-			// changes — no separate retry ledger needed.
-			idx.logger.Debug("indexer: extraction failed; file recorded as skipped",
-				zap.String("file", relPath), zap.Error(eerr))
-			return parseFailedSkipResult(relPath, lang, eerr), true, eerr
+			return nil, false, eerr
 		}
 		stampParseErrors(r)
 		return r, false, nil
@@ -231,9 +224,7 @@ func (idx *Indexer) extractFile(
 		return quarantineResult(relPath, lang, res.Err), true,
 			fmt.Errorf("parser crash isolated on %s: %s", relPath, res.Err)
 	case res.Err != "":
-		// Same as the in-process path: a non-crash extraction error keeps
-		// the file visible as a skip node rather than vanishing.
-		return parseFailedSkipResult(relPath, lang, errors.New(res.Err)), true, errors.New(res.Err)
+		return nil, false, errors.New(res.Err)
 	}
 
 	// Clean parse: if the file was quarantined under an older revision

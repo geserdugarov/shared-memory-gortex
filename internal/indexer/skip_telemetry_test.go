@@ -163,3 +163,25 @@ func TestParseFailedSkipResult_RecordsError(t *testing.T) {
 	require.Equal(t, "parse_failed", n.Meta["skip_reason"])
 	require.Equal(t, "unexpected token", n.Meta["parse_error"])
 }
+
+// TestIndex_ParseFailedSkipTelemetry verifies a file that fails to parse
+// during a FULL index stays visible as a parse_failed skip node instead of
+// vanishing — the safe counterpart to the live-modify path, which keeps a
+// file's prior nodes through a transient failure (see
+// TestPatchGraphModify_ParseFailureKeepsPriorNodes).
+func TestIndex_ParseFailedSkipTelemetry(t *testing.T) {
+	idx, ext := newToggleIndexer(t)
+	ext.setFail(true) // every extraction returns an error
+
+	dir := t.TempDir()
+	idx.SetRootPath(dir)
+	writeFile(t, filepath.Join(dir, "broken.fk"), "this does not parse")
+
+	_, err := idx.Index(dir)
+	require.NoError(t, err)
+
+	n := idx.graph.GetNode("broken.fk")
+	require.NotNil(t, n, "a full-index parse failure must leave a visible skip node")
+	require.Equal(t, graph.KindFile, n.Kind)
+	require.Equal(t, "parse_failed", n.Meta["skip_reason"])
+}

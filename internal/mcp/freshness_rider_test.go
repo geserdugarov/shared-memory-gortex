@@ -50,4 +50,20 @@ func TestDecorateResultWithFreshness(t *testing.T) {
 	got3 := decorateResultWithFreshness(mcp.NewToolResultText(`{"x":1}`), nil)
 	text3, _ := singleTextContent(got3)
 	require.Equal(t, `{"x":1}`, text3)
+
+	// A worktree-mismatch-only rider still attaches.
+	got4 := decorateResultWithFreshness(mcp.NewToolResultText(`{"x":1}`),
+		map[string]any{"worktree_mismatch": true})
+	text4, _ := singleTextContent(got4)
+	var obj4 map[string]any
+	require.NoError(t, json.Unmarshal([]byte(text4), &obj4))
+	require.Equal(t, true, obj4["freshness"].(map[string]any)["worktree_mismatch"])
+}
+
+func TestPathWithin(t *testing.T) {
+	require.True(t, pathWithin("/a/b/c", "/a/b"))
+	require.True(t, pathWithin("/a/b", "/a/b"))
+	require.False(t, pathWithin("/a/bc", "/a/b"), "must respect segment boundaries")
+	require.False(t, pathWithin("/a", "/a/b"))
+	require.False(t, pathWithin("/x/y", "/a/b"))
 }

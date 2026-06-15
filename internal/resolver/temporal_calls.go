@@ -448,14 +448,20 @@ func ResolveTemporalCalls(g graph.Store) int {
 		}
 		handlerID, origin, conf := idx.lookup(s.kind, s.name, callerRepo, callerLang)
 		// When the direct name didn't resolve, try dereferencing it as a
-		// string constant and re-looking-up under the literal value.
+		// string constant and re-looking-up under the literal value. The
+		// deref value is computed up front so it also feeds the
+		// cross-language join below (a Java const-ref dispatch through
+		// `Constants.X` derefs X to the literal, then matches the Go
+		// workflow of that name across the type-system boundary).
 		constDeref := ""
-		if handlerID == "" {
-			if v, ok := derefByName[s.name]; ok && v != "" {
-				if hID, o, c := idx.lookup(s.kind, v, callerRepo, callerLang); hID != "" {
-					handlerID, origin, conf = hID, o, c
-					constDeref = v
-				}
+		derefVal := ""
+		if v, ok := derefByName[s.name]; ok && v != "" {
+			derefVal = v
+		}
+		if handlerID == "" && derefVal != "" {
+			if hID, o, c := idx.lookup(s.kind, derefVal, callerRepo, callerLang); hID != "" {
+				handlerID, origin, conf = hID, o, c
+				constDeref = derefVal
 			}
 		}
 		// Env-default const reference: the env-helper's default argument was a
@@ -507,14 +513,17 @@ func ResolveTemporalCalls(g graph.Store) int {
 		crossLang := false
 		if handlerID == "" {
 			matchName := s.name
-			if constDeref != "" {
-				matchName = constDeref
+			if derefVal != "" {
+				matchName = derefVal
 			}
 			if hID, ok := idx.lookupCrossLang(s.kind, matchName, callerLang); ok {
 				handlerID = hID
 				origin = graph.OriginSpeculative
 				conf = temporalCrossLangConfidence
 				crossLang = true
+				if derefVal != "" {
+					constDeref = derefVal
+				}
 			}
 		}
 
@@ -619,6 +628,12 @@ func ResolveTemporalCalls(g graph.Store) int {
 	if len(reindexBatch) > 0 {
 		g.ReindexEdges(reindexBatch)
 	}
+	// Link Java consumers (workflow starts / signals / queries) to the Go
+	// workflows and handlers they target, by shared canonical name. Runs
+	// last: it reads temporal_role / temporal_name meta stamped by the
+	// sweep above and the via=temporal.handler edges emitted by the Go
+	// extractor. Additive — graph.AddEdge dedupes.
+	resolveTemporalCrossLanguage(g)
 	return resolved
 }
 
@@ -626,6 +641,126 @@ func ResolveTemporalCalls(g graph.Store) int {
 // unresolved Temporal stub call.
 func temporalStubPlaceholder(kind, name string) string {
 	return temporalStubPrefix + kind + "::" + name
+}
+
+// resolveTemporalCrossLanguage links Java consumers to the Go workflows /
+// handlers they target, by shared canonical name:
+//
+//   - a Java `@WorkflowInterface` method (role "workflow", canonical name
+//     from `@WorkflowMethod(name=…)`) → the Go workflow registered /
+//     named the same  → via=temporal.start-workflow.
+//   - a Java `@SignalMethod(name="cancel")` → a Go workflow that serves
+//     signal "cancel" (via=temporal.handler kind=signal) →
+//     via=temporal.signal-link.
+//   - a Java `@QueryMethod(name="status")` → a Go query handler →
+//     via=temporal.query-link.
+//
+// All edges carry cross_language=true and are emitted at the inferred
+// tier (the link is by string name across the type-system boundary).
+// graph.AddEdge dedupes → idempotent.
+func resolveTemporalCrossLanguage(g graph.Store) {
+	// Go provider indexes, by name.
+	goWorkflow := map[string][]string{}
+	goSignalWf := map[string][]string{}
+	goQueryWf := map[string][]string{}
+	addGoWorkflow := func(n *graph.Node) {
+		if n == nil || n.Language != "go" {
+			return
+		}
+		if r, _ := n.Meta["temporal_role"].(string); r != "workflow" {
+			return
+		}
+		name := n.Name
+		if tn, _ := n.Meta["temporal_name"].(string); tn != "" {
+			name = tn
+		}
+		goWorkflow[name] = append(goWorkflow[name], n.ID)
+		if n.Name != name {
+			goWorkflow[n.Name] = append(goWorkflow[n.Name], n.ID)
+		}
+	}
+	for n := range g.NodesByKind(graph.KindFunction) {
+		addGoWorkflow(n)
+	}
+	for n := range g.NodesByKind(graph.KindMethod) {
+		addGoWorkflow(n)
+	}
+	for e := range g.EdgesByKind(graph.EdgeCalls) {
+		if e == nil || e.Meta == nil || e.From == "" {
+			continue
+		}
+		if v, _ := e.Meta["via"].(string); v != "temporal.handler" {
+			continue
+		}
+		from := g.GetNode(e.From)
+		if from == nil || from.Language != "go" {
+			continue
+		}
+		kind, _ := e.Meta["temporal_kind"].(string)
+		name, _ := e.Meta["temporal_name"].(string)
+		if name == "" {
+			continue
+		}
+		switch kind {
+		case "signal":
+			goSignalWf[name] = append(goSignalWf[name], e.From)
+		case "query":
+			goQueryWf[name] = append(goQueryWf[name], e.From)
+		}
+	}
+	if len(goWorkflow) == 0 && len(goSignalWf) == 0 && len(goQueryWf) == 0 {
+		return
+	}
+
+	type link struct {
+		from, to, via string
+	}
+	var out []link
+	consume := func(n *graph.Node) {
+		if n == nil || n.Language != "java" {
+			return
+		}
+		role, _ := n.Meta["temporal_role"].(string)
+		name, _ := n.Meta["temporal_name"].(string)
+		if name == "" {
+			name = n.Name
+		}
+		var targets []string
+		var via string
+		switch role {
+		case "workflow":
+			targets, via = goWorkflow[name], "temporal.start-workflow"
+		case "signal":
+			targets, via = goSignalWf[name], "temporal.signal-link"
+		case "query":
+			targets, via = goQueryWf[name], "temporal.query-link"
+		default:
+			return
+		}
+		for _, to := range targets {
+			if to != n.ID {
+				out = append(out, link{from: n.ID, to: to, via: via})
+			}
+		}
+	}
+	for n := range g.NodesByKind(graph.KindMethod) {
+		consume(n)
+	}
+	for n := range g.NodesByKind(graph.KindFunction) {
+		consume(n)
+	}
+	for _, l := range out {
+		g.AddEdge(&graph.Edge{
+			From:   l.from,
+			To:     l.to,
+			Kind:   graph.EdgeCalls,
+			Origin: graph.OriginASTInferred,
+			Meta: map[string]any{
+				"via":            l.via,
+				"cross_language": true,
+			},
+		})
+	}
 }
 
 // temporalIndex maps (kind, name) to candidate handler nodes plus the
@@ -1143,6 +1278,13 @@ func buildTemporalIndex(g graph.Store, registerEdges, annotatedEdges []*graph.Ed
 		}
 		ifaceMethods := collectJavaInterfaceMethodsFromIndex(iface, javaMethodsByFile)
 		for _, m := range ifaceMethods {
+			// A method carrying its own @WorkflowMethod / @SignalMethod /
+			// @QueryMethod / @UpdateMethod annotation was already stamped
+			// (with its name= override) in Phase 2 — don't let the
+			// interface-level role clobber a more specific method role.
+			if r, _ := m.Meta["temporal_role"].(string); r != "" {
+				continue
+			}
 			canonical := canonicalFor(m)
 			stampTemporalRole(g, m, methodRole, canonical)
 			idx.byKindName[methodRole+"::"+canonical] = append(idx.byKindName[methodRole+"::"+canonical], m)
@@ -1458,19 +1600,27 @@ func isExportedGoName(name string) bool {
 // so an ALL_CAPS dispatch name that is itself an alias (ALIAS = REAL =
 // "lit") still dereferences. Cycles never progress and are dropped at the cap.
 func buildConstDerefMap(g graph.Store, names []string) map[string]string {
-	reader, ok := g.(graph.ConstantValueReader)
-	if !ok || len(names) == 0 {
+	if len(names) == 0 {
 		return nil
 	}
+	reader, _ := g.(graph.ConstantValueReader)
 	nameSet := make(map[string]struct{}, len(names))
 	for _, n := range names {
 		nameSet[n] = struct{}{}
 	}
 	// Expand the lookup set with every const_ref hop reachable from the
 	// requested names so an alias chain's terminal literal is fetched too.
-	// Bounded passes keep a malicious / cyclic graph from looping.
+	// Bounded passes keep a malicious / cyclic graph from looping. The same
+	// sweep collects Java string-constant fields (see javaFieldVals).
 	idToName := map[string]string{}
 	aliasRef := map[string]string{} // name → referenced const name
+	// javaFieldVals collects Java string constants (`static final String`),
+	// which the Java extractor emits as KindField nodes carrying the literal
+	// on Meta["value"] rather than through the queryable constant sidecar.
+	// Ingesting them lets a Java invoker const-ref dispatch
+	// (`invoker.invokeAsync(Constants.X, …)`) deref X cross-language to the
+	// registered Go workflow / activity.
+	javaFieldVals := map[string]string{}
 	resolveNames := func(want map[string]struct{}) {
 		uniq := make([]string, 0, len(want))
 		for n := range want {
@@ -1478,12 +1628,19 @@ func buildConstDerefMap(g graph.Store, names []string) map[string]string {
 		}
 		for name, cands := range g.FindNodesByNames(uniq) {
 			for _, n := range cands {
-				if n == nil || (n.Kind != graph.KindConstant && n.Kind != graph.KindFunction && n.Kind != graph.KindMethod) {
+				if n == nil {
 					continue
 				}
-				idToName[n.ID] = name
-				if ref, ok := n.Meta["const_ref"].(string); ok && ref != "" {
-					aliasRef[name] = ref
+				switch {
+				case n.Kind == graph.KindConstant || n.Kind == graph.KindFunction || n.Kind == graph.KindMethod:
+					idToName[n.ID] = name
+					if ref, ok := n.Meta["const_ref"].(string); ok && ref != "" {
+						aliasRef[name] = ref
+					}
+				case n.Kind == graph.KindField && n.Language == "java":
+					if v, ok := n.Meta["value"].(string); ok && v != "" {
+						javaFieldVals[name] = v
+					}
 				}
 			}
 		}
@@ -1508,32 +1665,40 @@ func buildConstDerefMap(g graph.Store, names []string) map[string]string {
 	for id := range idToName {
 		constIDs = append(constIDs, id)
 	}
-	if len(constIDs) == 0 {
-		return nil
-	}
-	vals, err := reader.ConstantValuesByNodeIDs(constIDs)
-	if err != nil {
-		return nil
-	}
-	out := make(map[string]string, len(vals))
+
+	out := make(map[string]string)
 	ambiguous := map[string]struct{}{}
-	for id, v := range vals {
-		name := idToName[id]
+	ingest := func(name, v string) {
 		if name == "" || v == "" {
-			continue
+			return
+		}
+		if _, dropped := ambiguous[name]; dropped {
+			return
 		}
 		if existing, seen := out[name]; seen && existing != v {
+			delete(out, name)
 			ambiguous[name] = struct{}{}
-			continue
+			return
 		}
 		out[name] = v
 	}
-	for name := range ambiguous {
-		delete(out, name)
+
+	if reader != nil && len(constIDs) > 0 {
+		if vals, err := reader.ConstantValuesByNodeIDs(constIDs); err == nil {
+			for id, v := range vals {
+				ingest(idToName[id], v)
+			}
+		}
 	}
-	// Collapse alias chains against the literal map by a bounded fixpoint:
-	// an alias name with no literal of its own inherits its referent's
-	// resolved literal. Cycles never progress and are dropped at the cap.
+	// Java string-constant fields share the SAME dereference index, with the
+	// same workspace-wide ambiguity rule as Go string constants.
+	for name, v := range javaFieldVals {
+		ingest(name, v)
+	}
+
+	// Collapse alias chains against the literal map by a bounded fixpoint: an
+	// alias name with no literal of its own inherits its referent's resolved
+	// literal. Cycles never progress and are dropped at the cap.
 	for pass := 0; pass < 8; pass++ {
 		progressed := false
 		for name, ref := range aliasRef {
@@ -1549,6 +1714,7 @@ func buildConstDerefMap(g graph.Store, names []string) map[string]string {
 			break
 		}
 	}
+
 	if len(out) == 0 {
 		return nil
 	}

@@ -6,8 +6,12 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/zap"
 
+	"github.com/zzet/gortex/internal/config"
 	"github.com/zzet/gortex/internal/graph"
+	"github.com/zzet/gortex/internal/parser"
+	"github.com/zzet/gortex/internal/parser/languages"
 )
 
 // TestTemporalE2E_GoWorkflowToActivity exercises the full pipeline —
@@ -949,4 +953,256 @@ func setupWorker(w Worker) {
 	assert.Equal(t, act.ID, stub.To, "unregistered activity must resolve by func-name convention")
 	assert.Equal(t, "convention", stub.Meta["temporal_resolution_via"])
 	assert.Equal(t, graph.OriginASTInferred, stub.Origin, "convention match is inferred-tier")
+}
+
+// TestTemporalE2E_JavaToGoBridge links a Java @WorkflowInterface (start +
+// signal + query) to the Go workflow that implements them, by canonical
+// name — the cross-language bridge.
+func TestTemporalE2E_JavaToGoBridge(t *testing.T) {
+	dir := t.TempDir()
+
+	writeFile(t, filepath.Join(dir, "order_workflow.go"), `package wf
+
+import "go.temporal.io/sdk/workflow"
+
+func OrderWorkflow(ctx workflow.Context, id string) error {
+	workflow.GetSignalChannel(ctx, "cancel-order")
+	workflow.SetQueryHandler(ctx, "order-status", func() (string, error) { return "ok", nil })
+	return nil
+}
+`)
+	writeFile(t, filepath.Join(dir, "main.go"), `package wf
+
+func setup(w Worker) { w.RegisterWorkflow(OrderWorkflow) }
+`)
+	writeFile(t, filepath.Join(dir, "OrderWorkflowApi.java"), `package com.example.orders;
+
+import io.temporal.workflow.WorkflowInterface;
+import io.temporal.workflow.WorkflowMethod;
+import io.temporal.workflow.SignalMethod;
+import io.temporal.workflow.QueryMethod;
+
+@WorkflowInterface
+public interface OrderWorkflowApi {
+    @WorkflowMethod(name = "OrderWorkflow")
+    String process(String orderId);
+
+    @SignalMethod(name = "cancel-order")
+    void cancel(String reason);
+
+    @QueryMethod(name = "order-status")
+    String getStatus();
+}
+`)
+
+	g := graph.New()
+	idx := newTestIndexerGoJava(g)
+	_, err := idx.Index(dir)
+	require.NoError(t, err)
+
+	goWf := g.FindNodesByName("OrderWorkflow")[0]
+
+	// Find the Java method nodes by name.
+	javaMethod := func(name string) *graph.Node {
+		for _, n := range g.FindNodesByName(name) {
+			if n.Language == "java" {
+				return n
+			}
+		}
+		return nil
+	}
+	process := javaMethod("process")
+	cancel := javaMethod("cancel")
+	getStatus := javaMethod("getStatus")
+	require.NotNil(t, process)
+	require.NotNil(t, cancel)
+	require.NotNil(t, getStatus)
+
+	hasCrossLink := func(fromID, via string) bool {
+		for _, e := range g.GetOutEdges(fromID) {
+			if e != nil && e.Meta != nil && e.Meta["via"] == via &&
+				e.Meta["cross_language"] == true && e.To == goWf.ID {
+				return true
+			}
+		}
+		return false
+	}
+	assert.True(t, hasCrossLink(process.ID, "temporal.start-workflow"),
+		"Java @WorkflowMethod(name=OrderWorkflow) must link to the Go OrderWorkflow")
+	assert.True(t, hasCrossLink(cancel.ID, "temporal.signal-link"),
+		"Java @SignalMethod(cancel-order) must link to the Go workflow handling it")
+	assert.True(t, hasCrossLink(getStatus.ID, "temporal.query-link"),
+		"Java @QueryMethod(order-status) must link to the Go workflow handling it")
+}
+
+// TestTemporalE2E_JavaInvokerToGoBridge exercises the Java invoker detector: a
+// Java class dispatches a Go workflow through a configured custom invoker
+// (`invoker.invokeAsync("ProcessOrderWorkflow", …)`), both as a string literal
+// (exact, register-tier) and through an env property with a literal default
+// (heuristic, hidden tier). Both must emit via=temporal.stub edges the resolver
+// lands on the registered Go workflow.
+func TestTemporalE2E_JavaInvokerToGoBridge(t *testing.T) {
+	dir := t.TempDir()
+
+	writeFile(t, filepath.Join(dir, "OrderManager.java"), `package com.example;
+
+import io.temporal.workflow.WorkflowOptions;
+
+public class OrderManager {
+    private final Invoker invoker;
+
+    public String startOrder(Object input) {
+        WorkflowOptions options = WorkflowOptions.newBuilder()
+            .setTaskQueue("order-workflow").build();
+        return invoker.invokeAsync("ProcessOrderWorkflow", options, input).block();
+    }
+
+    public String startWithDefault(Object input) {
+        return invoker.invokeAsync(
+            env.getProperty("order.workflow.type", "ProcessOrderWorkflow"),
+            options, input).block();
+    }
+}
+`)
+	writeFile(t, filepath.Join(dir, "workflow.go"), `package main
+
+import "go.temporal.io/sdk/workflow"
+
+func ProcessOrderWorkflow(ctx workflow.Context, input string) error { return nil }
+`)
+	writeFile(t, filepath.Join(dir, "main.go"), `package main
+
+func setup(w Worker) { w.RegisterWorkflow(ProcessOrderWorkflow) }
+`)
+
+	g := graph.New()
+	reg := parser.NewRegistry()
+	reg.Register(languages.NewGoExtractor())
+	reg.Register(languages.NewJavaExtractor())
+	languages.ConfigureTemporalJavaInvokers(reg, []string{"Invoker"}, nil)
+	cfg := config.Default().Index
+	cfg.Workers = 2
+	idx := New(g, reg, cfg, zap.NewNop())
+
+	_, err := idx.Index(dir)
+	require.NoError(t, err)
+
+	goWf := g.FindNodesByName("ProcessOrderWorkflow")[0]
+
+	javaStub := func(method string) *graph.Edge {
+		nodes := g.FindNodesByName(method)
+		require.NotEmpty(t, nodes, "java method %s must be a node", method)
+		for _, e := range g.GetOutEdges(nodes[0].ID) {
+			if e != nil && e.Meta != nil && e.Meta["via"] == "temporal.stub" {
+				return e
+			}
+		}
+		return nil
+	}
+
+	// Literal name → exact tier, resolves to the Go workflow, visible.
+	exact := javaStub("startOrder")
+	require.NotNil(t, exact, "startOrder must emit a temporal.stub")
+	assert.Equal(t, "ProcessOrderWorkflow", exact.Meta["temporal_name"])
+	assert.Equal(t, "workflow", exact.Meta["temporal_kind"])
+	assert.Equal(t, true, exact.Meta["cross_language"])
+	assert.Equal(t, goWf.ID, exact.To, "literal invoker dispatch resolves to the Go workflow")
+
+	// Env-property default → heuristic tier, carries the env key, also resolves.
+	heur := javaStub("startWithDefault")
+	require.NotNil(t, heur, "startWithDefault must emit a temporal.stub")
+	assert.Equal(t, "ProcessOrderWorkflow", heur.Meta["temporal_name"])
+	assert.Equal(t, "heuristic", heur.Meta["temporal_env_source"])
+	assert.Equal(t, "order.workflow.type", heur.Meta["temporal_env_key"])
+	assert.Equal(t, goWf.ID, heur.To, "env-default invoker dispatch resolves to the Go workflow")
+}
+
+// TestTemporalE2E_JavaInvokerOffWhenUnconfigured asserts zero behavioural
+// change when java_temporal_invokers is not configured: the invoker call is
+// left to the generic path, emitting no temporal.stub.
+func TestTemporalE2E_JavaInvokerOffWhenUnconfigured(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "OrderManager.java"), `package com.example;
+
+public class OrderManager {
+    private final Invoker invoker;
+
+    public String startOrder(Object input) {
+        return invoker.invokeAsync("ProcessOrderWorkflow", input).block();
+    }
+}
+`)
+	g := graph.New()
+	idx := newTestIndexerGoJava(g) // NOT configured with any invoker
+	_, err := idx.Index(dir)
+	require.NoError(t, err)
+
+	for _, n := range g.FindNodesByName("startOrder") {
+		for _, e := range g.GetOutEdges(n.ID) {
+			if e != nil && e.Meta != nil && e.Meta["via"] == "temporal.stub" {
+				t.Fatal("invoker detection must be OFF when java_temporal_invokers is unconfigured")
+			}
+		}
+	}
+}
+
+// TestTemporalE2E_JavaInvokerValueField exercises Java invoker priority 3: the
+// dispatch name is a Spring `@Value("${key:Default}")`-injected field. The
+// detector resolves the field to its SpEL literal default and lands the edge on
+// the Go workflow at the heuristic tier.
+func TestTemporalE2E_JavaInvokerValueField(t *testing.T) {
+	dir := t.TempDir()
+
+	writeFile(t, filepath.Join(dir, "OrderManager.java"), `package com.example;
+
+import org.springframework.beans.factory.annotation.Value;
+
+public class OrderManager {
+    private final Invoker invoker;
+
+    @Value("${order.workflow.type:ProcessOrderWorkflow}")
+    private String workflowType;
+
+    public String startConfigured(Object input) {
+        return invoker.invokeAsync(workflowType, options, input).block();
+    }
+}
+`)
+	writeFile(t, filepath.Join(dir, "workflow.go"), `package main
+
+import "go.temporal.io/sdk/workflow"
+
+func ProcessOrderWorkflow(ctx workflow.Context, input string) error { return nil }
+`)
+	writeFile(t, filepath.Join(dir, "main.go"), `package main
+
+func setup(w Worker) { w.RegisterWorkflow(ProcessOrderWorkflow) }
+`)
+
+	g := graph.New()
+	reg := parser.NewRegistry()
+	reg.Register(languages.NewGoExtractor())
+	reg.Register(languages.NewJavaExtractor())
+	languages.ConfigureTemporalJavaInvokers(reg, []string{"Invoker"}, nil)
+	cfg := config.Default().Index
+	cfg.Workers = 2
+	idx := New(g, reg, cfg, zap.NewNop())
+
+	_, err := idx.Index(dir)
+	require.NoError(t, err)
+
+	goWf := g.FindNodesByName("ProcessOrderWorkflow")[0]
+	nodes := g.FindNodesByName("startConfigured")
+	require.NotEmpty(t, nodes)
+	var stub *graph.Edge
+	for _, e := range g.GetOutEdges(nodes[0].ID) {
+		if e != nil && e.Meta != nil && e.Meta["via"] == "temporal.stub" {
+			stub = e
+			break
+		}
+	}
+	require.NotNil(t, stub, "@Value-field invoker dispatch must emit a temporal.stub")
+	assert.Equal(t, "ProcessOrderWorkflow", stub.Meta["temporal_name"])
+	assert.Equal(t, "heuristic", stub.Meta["temporal_env_source"])
+	assert.Equal(t, goWf.ID, stub.To, "@Value default resolves to the Go workflow")
 }

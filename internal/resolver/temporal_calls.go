@@ -708,7 +708,10 @@ func (idx *temporalIndex) lookup(kind, name, callerRepo, callerLang string) (id,
 // workflow.ExecuteActivity dispatch resolves only to a Go function, never
 // to a like-named symbol in another language.
 func (idx *temporalIndex) lookupConvention(kind, name, callerRepo, callerLang string) string {
-	cands := idx.funcByName[name]
+	// Drop cross-repo *_test.go stubs (test mocks of the activity/workflow)
+	// the same way the register path does, so a convention match never lands
+	// on a cross-repo test fixture.
+	cands := eligibleTemporalCandidates(idx.funcByName[name], callerRepo)
 	if len(cands) == 0 {
 		return ""
 	}

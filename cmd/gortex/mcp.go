@@ -110,7 +110,7 @@ func runMCP(cmd *cobra.Command, args []string) error {
 	// presence + GORTEX_AUTOSTART, never by the flag.
 	switch resolveDaemonDecision() {
 	case daemonReady, daemonAutostarted:
-		ran, proxyErr := runProxy(cmd.Context())
+		ran, proxyErr := runProxy(cmd.Context(), proxyToolSurface())
 		if proxyErr != nil {
 			return proxyErr
 		}

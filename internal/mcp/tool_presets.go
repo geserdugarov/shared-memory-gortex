@@ -133,8 +133,7 @@ func newToolPolicy(cfg ToolPolicyConfig, logger *zap.Logger) *toolPolicy {
 		denyMutating bool
 		label        string
 	)
-	switch {
-	case rawPreset == "":
+	if rawPreset == "" {
 		// No named preset. An explicit allow list (e.g. --tools
 		// search_symbols,edit_file) IS the surface; otherwise the full
 		// surface, minus any deny.
@@ -144,25 +143,22 @@ func newToolPolicy(cfg ToolPolicyConfig, logger *zap.Logger) *toolPolicy {
 		} else {
 			label = "full"
 		}
-	default:
-		set, dm, known := builtinToolPresetSet(rawPreset)
-		if known {
-			explicit = set
-			denyMutating = dm
-			label = rawPreset
-			if label == "all" {
-				label = "full"
-			}
-		} else {
-			// A typo'd preset fails open to the full surface (never
-			// strands an agent with no tools); allow deltas stay additive.
-			if logger != nil {
-				logger.Warn("unknown MCP tool preset; serving the full surface",
-					zap.String("preset", cfg.Preset),
-					zap.Strings("known", builtinPresetNames))
-			}
+	} else if set, dm, known := builtinToolPresetSet(rawPreset); known {
+		explicit = set
+		denyMutating = dm
+		label = rawPreset
+		if label == "all" {
 			label = "full"
 		}
+	} else {
+		// A typo'd preset fails open to the full surface (never strands
+		// an agent with no tools); allow deltas stay additive.
+		if logger != nil {
+			logger.Warn("unknown MCP tool preset; serving the full surface",
+				zap.String("preset", cfg.Preset),
+				zap.Strings("known", builtinPresetNames))
+		}
+		label = "full"
 	}
 	active := explicit != nil || denyMutating || len(allow) > 0 || len(deny) > 0
 	return &toolPolicy{

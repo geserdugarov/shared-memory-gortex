@@ -88,6 +88,21 @@ gortex mcp --tools edit --tools-mode hide
 gortex daemon start --tools readonly      # propagates to the detached child
 ```
 
+**Per-connection (client-driven) scoping.** The selectors above applied to `gortex daemon start` narrow the *whole daemon* for every client. To let one client pick its own surface while the daemon keeps serving the full set to everyone else, set `--tools` / `GORTEX_TOOLS` on that client's **`gortex mcp`** invocation — the stdio proxy filters just that connection's `tools/list` and blocks calls to tools outside the set. Because the filter applies from the first `tools/list`, it works on **every** MCP client (no `tools/list_changed` dependency).
+
+```jsonc
+// An MCP client config giving this client a minimal editing surface,
+// against a daemon that still serves the full catalogue to others:
+{
+  "command": "gortex",
+  "args": ["mcp", "--tools", "search_symbols,find_files,edit_file,verify_change"],
+  // or: "args": ["mcp", "--tools", "edit"]  (a named preset)
+  // or: "env": { "GORTEX_TOOLS": "readonly" }
+}
+```
+
+A spec whose first token isn't a known preset (`search_symbols,find_files,…`) is an **explicit allow list** — exactly those tools — for experts who want to hand-pick the surface. A known preset followed by names (`edit,find_files`) keeps preset semantics plus the extra tools.
+
 `tool_profile` reports the active `preset` / `preset_mode`, the narrowed `live` set, and a `categories{}` map grouping every tool into a functional family (nav / read / edit / analysis / review / pr / memory / overlay / subscription / enrich / workspace / admin) for prefix-style filtering.
 
 **Prompt-injection screening.** Every tool call is screened by middleware that scans arguments and result text for injection patterns. On a hit it attaches a non-blocking `_meta.gortex_security` advisory — the call still succeeds and the result body is never mutated. Disable with `GORTEX_MCP_SANITIZE=0`.

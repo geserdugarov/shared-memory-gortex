@@ -57,7 +57,7 @@
 - **50× fewer tokens per response** — graph-native lookups beat naive file reads. Agents read the symbol they need, not the 500-line file around it.
 - **Sub-millisecond impact analysis** — a precomputed depth-3 reach index turns blast-radius queries into O(seeds × reach) map lookups. Safe to ask "what breaks if I change this?" on every edit.
 - **Cross-repo by default** — N repos in one graph; contracts, references, and call chains span repo boundaries with evidence-gated resolution.
-- **Zero external dependencies** — everything in-process, in-memory. No DB, no network, no model download to get started.
+- **Zero external dependencies** — single binary, everything in-process. No network, no model download to get started.
 
 ## Install
 

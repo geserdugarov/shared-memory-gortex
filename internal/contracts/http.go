@@ -126,6 +126,29 @@ var httpPatterns = []httpPattern{
 		languages:  []string{"typescript", "javascript"},
 	},
 	{
+		// Fastify instance verbs (the instance is conventionally `fastify`,
+		// which the express receiver set does not cover).
+		re:         regexp.MustCompile(`fastify\.(get|post|put|delete|patch|head|options|all)\(\s*["'` + "`" + `]([^"'` + "`" + `]+)["'` + "`" + `]\s*(?:,\s*(\w+))?`),
+		role:       RoleProvider,
+		methodGrp:  1,
+		pathGrp:    2,
+		handlerGrp: 3,
+		framework:  "fastify",
+		confidence: 0.9,
+		languages:  []string{"typescript", "javascript"},
+	},
+	{
+		// Koa-router's `.del` alias for DELETE (express uses `.delete`).
+		re:         regexp.MustCompile(`(?:router|app)\.del\(\s*["'` + "`" + `]([^"'` + "`" + `]+)["'` + "`" + `]\s*(?:,\s*(\w+))?`),
+		role:       RoleProvider,
+		method:     "DELETE",
+		pathGrp:    1,
+		handlerGrp: 2,
+		framework:  "koa",
+		confidence: 0.85,
+		languages:  []string{"typescript", "javascript"},
+	},
+	{
 		re:         regexp.MustCompile(`@(Get|Post|Put|Delete|Patch|Head|Options)\(\s*["'` + "`" + `]([^"'` + "`" + `]+)["'` + "`" + `]`),
 		role:       RoleProvider,
 		methodGrp:  1,
@@ -559,6 +582,9 @@ var httpTsJsMarkers = [][]byte{
 	[]byte("@Options("),
 	[]byte("app."),
 	[]byte("router."),
+	[]byte("fastify."), // Fastify instance verbs / fastify.route({...})
+	[]byte("server."),  // Hapi server.route({...})
+	[]byte(".route("),  // object-config + chained route forms
 }
 
 var httpJvmMarkers = [][]byte{
@@ -818,6 +844,12 @@ func (h *HTTPExtractor) extract(
 	// fetch/axios consumer heuristics, which are TS/JS only.
 	if len(h.ClientAliases) > 0 && (lang == "typescript" || lang == "javascript") {
 		out = append(out, h.detectClientAliasConsumers(filePath, text, lines, fileNodes, lang, tree)...)
+	}
+
+	// Object-config (Fastify/Hapi route({...})) and chained
+	// (Express route('/p').get()) route shapes the per-line table cannot read.
+	if (lang == "typescript" || lang == "javascript") && strings.Contains(text, ".route(") {
+		out = append(out, h.extractObjectRouteProviders(filePath, text, lines, fileNodes, lang, tree)...)
 	}
 
 	return out

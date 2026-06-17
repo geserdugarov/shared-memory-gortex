@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -168,6 +169,105 @@ func TestAPIProvider_AccumulatesTokenUsage(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.Equal(t, int64(14), p.TokensUsed(), "usage accumulates across batches")
+}
+
+// TestAPIProvider_OpenAIBaseURLVariants asserts the OpenAI request path is
+// "/v1/embeddings" whether the base URL is given with or without the "/v1"
+// version segment. OpenAI-compatible bases conventionally include "/v1"
+// (OpenAI, OpenRouter); without this normalization a "…/v1" base produced
+// "…/v1/v1/embeddings" → 404 → silent fallback to BM25.
+func TestAPIProvider_OpenAIBaseURLVariants(t *testing.T) {
+	for _, suffix := range []string{"", "/v1"} {
+		suffix := suffix
+		t.Run("base"+suffix, func(t *testing.T) {
+			var gotPath string
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				gotPath = r.URL.Path
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"data":[{"embedding":[0.1,0.2],"index":0}]}`))
+			}))
+			defer srv.Close()
+
+			p := NewAPIProvider(srv.URL+suffix, "text-embedding-3-small")
+			_, err := p.EmbedBatch(context.Background(), []string{"hi"})
+			require.NoError(t, err)
+			assert.Equal(t, "/v1/embeddings", gotPath,
+				"both base forms must resolve to a single /v1/embeddings path")
+		})
+	}
+}
+
+// TestAPIProvider_ProbeDimensions asserts the probe discovers the vector
+// width with exactly one embedding call, caches it (so Dimensions() then
+// reports the true width up front), and is idempotent — a second probe
+// issues no further HTTP. This is the fix for the daemon logging dim:0 and
+// the snapshot-vector reload gate rejecting a correctly-sized cached index.
+func TestAPIProvider_ProbeDimensions(t *testing.T) {
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&calls, 1)
+		w.Header().Set("Content-Type", "application/json")
+		// A 4-dimensional vector stands in for OpenAI's 1536-d response.
+		_, _ = w.Write([]byte(`{"data":[{"embedding":[0.1,0.2,0.3,0.4],"index":0}],"usage":{"total_tokens":3}}`))
+	}))
+	defer srv.Close()
+
+	p := NewAPIProvider(srv.URL, "text-embedding-3-small")
+	assert.Equal(t, 0, p.Dimensions(), "width unknown before the first call")
+
+	dim, err := p.ProbeDimensions(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 4, dim, "probe reports the response vector width")
+	assert.Equal(t, 4, p.Dimensions(), "width is cached after the probe")
+	assert.Equal(t, int32(1), atomic.LoadInt32(&calls), "the probe is a single call")
+
+	dim2, err := p.ProbeDimensions(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 4, dim2)
+	assert.Equal(t, int32(1), atomic.LoadInt32(&calls), "a second probe issues no further HTTP")
+}
+
+// TestAPIProvider_ProbeDimensionsError asserts that a probe against an
+// unreachable / erroring backend surfaces the error and leaves the width at
+// 0 (best-effort) — the caller only warns and indexing falls back to BM25.
+func TestAPIProvider_ProbeDimensionsError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"error":"bad key"}`))
+	}))
+	defer srv.Close()
+
+	p := NewAPIProvider(srv.URL, "text-embedding-3-small")
+	dim, err := p.ProbeDimensions(context.Background())
+	require.Error(t, err, "an auth failure must surface as an error")
+	assert.Equal(t, 0, dim)
+	assert.Equal(t, 0, p.Dimensions(), "a failed probe leaves the width unset")
+}
+
+// TestAPIProvider_ProbeDimensionsLive hits the REAL OpenAI embeddings API to
+// prove the fork's embedder is genuinely wired end-to-end (not a stub): the
+// probe returns text-embedding-3-small's true 1536-d width, a batch embed
+// returns 1536-d vectors, and token usage is accounted. Skipped unless a key
+// is present so CI without credentials stays green.
+//
+//	OPENAI_API_KEY=sk-... go test ./internal/embedding -run ProbeDimensionsLive -v
+func TestAPIProvider_ProbeDimensionsLive(t *testing.T) {
+	if os.Getenv("GORTEX_EMBEDDINGS_API_KEY") == "" && os.Getenv("OPENAI_API_KEY") == "" {
+		t.Skip("no embeddings API key (set OPENAI_API_KEY) — skipping live OpenAI probe")
+	}
+
+	p := NewAPIProvider("https://api.openai.com/v1", "text-embedding-3-small")
+	dim, err := p.ProbeDimensions(context.Background())
+	require.NoError(t, err, "live probe against OpenAI must succeed")
+	assert.Equal(t, 1536, dim, "text-embedding-3-small is 1536-dimensional")
+	assert.Equal(t, 1536, p.Dimensions())
+
+	vecs, err := p.EmbedBatch(context.Background(), []string{"rule engine evaluates facts", "knowledge base"})
+	require.NoError(t, err)
+	require.Len(t, vecs, 2)
+	assert.Len(t, vecs[0], 1536, "each returned vector is 1536-d")
+	assert.Len(t, vecs[1], 1536)
+	assert.Greater(t, p.TokensUsed(), int64(0), "the paid embedding pass accounts token usage")
 }
 
 // TestTruncateEmbedInputs asserts oversized inputs are head-truncated to the

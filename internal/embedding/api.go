@@ -143,6 +143,40 @@ func (p *APIProvider) EmbedBatch(ctx context.Context, texts []string) ([][]float
 func (p *APIProvider) Dimensions() int { return p.dims }
 func (p *APIProvider) Close() error    { return nil }
 
+// ProbeDimensions makes one tiny embedding call to discover and cache the
+// provider's vector width, so Dimensions() reports the true value *before*
+// the first indexing pass. An APIProvider learns its width only from the
+// first real embed (embedOpenAI / embedOllama set p.dims from the returned
+// vector); until then Dimensions() returns 0, which has two concrete
+// consequences at daemon startup: the "embeddings enabled" log mislabels
+// the width as dim:0, and the snapshot-vector reload gate
+// (daemon_state.go: vec.Dims == EmbedderDims) rejects a correctly-sized
+// persisted index, forcing a needless full re-embed on every restart.
+//
+// Idempotent: a no-op once the width is known. Best-effort: on any
+// transport/auth error it returns the error and leaves dims at 0 — the
+// caller logs a warning, the lazy path still sets the width from the first
+// real vector, and indexing degrades to BM25 if embeddings are truly
+// unreachable. The probe also doubles as an early connectivity/credential
+// check, surfacing a bad key or URL at startup instead of mid-index.
+func (p *APIProvider) ProbeDimensions(ctx context.Context) (int, error) {
+	if d := p.Dimensions(); d > 0 {
+		return d, nil
+	}
+	pctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	vec, err := p.Embed(pctx, "gortex embedding dimension probe")
+	if err != nil {
+		return 0, err
+	}
+	// Embed -> EmbedBatch -> embed{OpenAI,Ollama} already cached p.dims from
+	// the response; fall back to the returned vector's length defensively.
+	if p.dims == 0 && len(vec) > 0 {
+		p.dims = len(vec)
+	}
+	return p.dims, nil
+}
+
 // Concurrent reports that this provider is safe — and worth — calling
 // from several goroutines at once. An external HTTP embedding endpoint
 // gains from overlapped round-trips; the indexer's embedding pool uses
@@ -295,7 +329,16 @@ func (p *APIProvider) embedOpenAI(ctx context.Context, texts []string) ([][]floa
 		return nil, fmt.Errorf("marshal request: %w", err)
 	}
 
-	url := p.url + "/v1/embeddings"
+	// OpenAI-compatible bases are conventionally given WITH the version
+	// segment (OpenAI "https://api.openai.com/v1", OpenRouter
+	// "https://openrouter.ai/api/v1"). Append "/v1" only when it is absent,
+	// so a "…/v1" base does not become "…/v1/v1/embeddings" (a 404 that
+	// silently degrades the whole vector index to BM25).
+	endpoint := "/v1/embeddings"
+	if strings.HasSuffix(p.url, "/v1") {
+		endpoint = "/embeddings"
+	}
+	url := p.url + endpoint
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("create request: %w", err)

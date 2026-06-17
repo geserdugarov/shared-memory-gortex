@@ -390,16 +390,16 @@ func ensureNodeColumns(db *sql.DB) error {
 			dflt             sql.NullString
 		)
 		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
-			rows.Close()
+			_ = rows.Close()
 			return err
 		}
 		existing[name] = true
 	}
 	if err := rows.Err(); err != nil {
-		rows.Close()
+		_ = rows.Close()
 		return err
 	}
-	rows.Close()
+	_ = rows.Close()
 	for _, c := range promotedMetaColumns {
 		if existing[c.name] {
 			continue

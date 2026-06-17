@@ -28,6 +28,7 @@ var (
 	indexProfile   bool
 	indexSnapshot  string
 	indexWorkspace string
+	indexForce     bool
 )
 
 var indexCmd = &cobra.Command{
@@ -46,6 +47,7 @@ func init() {
 	indexCmd.Flags().BoolVar(&indexProfile, "profile", false, "print per-stage timings + peak RSS for battle-testing")
 	indexCmd.Flags().StringVar(&indexSnapshot, "snapshot", "", "write a snapshot.gob.gz file at the given path (used by gortex-cloud's indexer worker)")
 	indexCmd.Flags().StringVar(&indexWorkspace, "workspace", "", "stamp emitted nodes with this WorkspaceID (defaults to repo name)")
+	indexCmd.Flags().BoolVarP(&indexForce, "force", "f", false, "index even when the path is the home directory or filesystem root")
 	rootCmd.AddCommand(indexCmd)
 }
 
@@ -73,6 +75,9 @@ func runIndex(cmd *cobra.Command, args []string) error {
 
 	// Index each path as a separate repository.
 	for _, path := range paths {
+		if reason := indexer.UnsafeIndexRootReason(path); reason != "" && !indexForce {
+			return fmt.Errorf("%s; pass --force to index it anyway", reason)
+		}
 		// Construct the spinner first so we know whether to silence the
 		// indexer's zap logger. When the cozy view is live, structured
 		// info logs would interleave with the mesh frame.

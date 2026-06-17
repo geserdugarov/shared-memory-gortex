@@ -19,6 +19,11 @@ func RegisterAll(reg *parser.Registry) {
 	// setup> and delegates to TS/JS). Registered before registerForestLanguages
 	// so it claims .vue over the generic forest vue grammar.
 	reg.Register(NewVueExtractor())
+	// Svelte and Astro components — same carve-and-delegate depth as Vue.
+	// Registered before registerForestLanguages so they claim .svelte / .astro
+	// over the generic forest grammars.
+	reg.Register(NewSvelteExtractor())
+	reg.Register(NewAstroExtractor())
 	reg.Register(NewCSSExtractor())
 	reg.Register(NewSQLExtractor())
 	reg.Register(NewKotlinExtractor())

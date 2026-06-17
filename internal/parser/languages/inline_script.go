@@ -1,11 +1,50 @@
 package languages
 
 import (
+	"regexp"
 	"strconv"
 	"strings"
 
 	"github.com/zzet/gortex/internal/parser"
 )
+
+var (
+	markupScriptRe   = regexp.MustCompile(`(?is)<script\b([^>]*)>(.*?)</script>`)
+	markupLangAttrRe = regexp.MustCompile(`(?i)\blang\s*=\s*["']([a-z]+)["']`)
+)
+
+// scriptTagIsTypeScript reports whether a <script> tag's attribute string
+// declares a TypeScript dialect.
+func scriptTagIsTypeScript(attrs []byte) bool {
+	m := markupLangAttrRe.FindSubmatch(attrs)
+	if m == nil {
+		return false
+	}
+	switch strings.ToLower(string(m[1])) {
+	case "ts", "tsx", "typescript":
+		return true
+	}
+	return false
+}
+
+// carveAndDelegateScripts runs every <script>/<script setup> block in src through
+// the TypeScript or JavaScript extractor (per its lang attribute) and merges the
+// result rebased into host-file coordinates. It is the shared carving loop behind
+// the Svelte and Astro extractors.
+func carveAndDelegateScripts(src []byte, filePath, fileID, language string, ts, js parser.Extractor, result *parser.ExtractionResult) {
+	for _, m := range markupScriptRe.FindAllSubmatchIndex(src, -1) {
+		contentStart, contentEnd := m[4], m[5]
+		if contentStart < 0 {
+			continue
+		}
+		delegate := js
+		if scriptTagIsTypeScript(src[m[2]:m[3]]) {
+			delegate = ts
+		}
+		lineOffset := strings.Count(string(src[:contentStart]), "\n")
+		delegateInlineScriptSlice(delegate, src[contentStart:contentEnd], lineOffset, filePath, fileID, language, result)
+	}
+}
 
 // delegateInlineScriptSlice runs delegate over a carved inline-script slice and
 // merges its symbols/edges into result, rebased into the host file's coordinate

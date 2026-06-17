@@ -154,15 +154,9 @@ var httpPatterns = []httpPattern{
 		confidence: 0.9,
 		languages:  []string{"python"},
 	},
-	{
-		re:         regexp.MustCompile(`path\(\s*["']([^"']+)["']`),
-		role:       RoleProvider,
-		method:     "ANY",
-		pathGrp:    1,
-		framework:  "django",
-		confidence: 0.7,
-		languages:  []string{"python"},
-	},
+	// Django path/re_path/url routing is handled by the node-aware
+	// extractDjangoRoutes pass (it resolves the view handler), not the
+	// per-line table.
 
 	// ---- Java providers ----
 	{
@@ -805,6 +799,12 @@ func (h *HTTPExtractor) extract(
 		}
 		if strings.Contains(text, "add_url_rule") {
 			out = append(out, h.extractFlaskAddURLRule(filePath, text, lines, fileNodes, lang, tree)...)
+		}
+		// Django urlpatterns (path / re_path / url / include / .as_view) — the
+		// handler is a symbol declared elsewhere, so it needs a node-aware pass
+		// rather than the per-line provider table.
+		if djangoRouteCallRE.MatchString(text) {
+			out = append(out, h.extractDjangoRoutes(filePath, text, lines, fileNodes, lang, tree)...)
 		}
 	}
 

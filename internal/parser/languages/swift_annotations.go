@@ -175,6 +175,26 @@ func swiftObjCSelector(defNode *sitter.Node, baseName string, src []byte) string
 	return buildSwiftObjCSelector(baseName, swiftArgLabels(swiftParamClause(defNode, src)))
 }
 
+// swiftObjCPropertySelectors computes the Objective-C accessor selectors an
+// @objc property is exposed under: the getter is the property name (or an
+// explicit @objc(custom) override), and a mutable `var` also exposes a
+// `set<Name>:` setter. Returns ("", "") when the property is not @objc, and an
+// empty setter for an immutable `let`.
+func swiftObjCPropertySelectors(defNode *sitter.Node, name string, mutable bool, src []byte) (getter, setter string) {
+	isObjC, explicit := swiftObjCAttr(defNode, src)
+	if !isObjC || name == "" {
+		return "", ""
+	}
+	getter = name
+	if explicit != "" {
+		getter = explicit
+	}
+	if mutable {
+		setter = "set" + capitalizeFirst(getter) + ":"
+	}
+	return getter, setter
+}
+
 // swiftParamClause returns the text inside a declaration's parameter
 // parentheses, skipping any leading attribute parens (`@objc(x)`) by
 // starting the scan after the `func` keyword.

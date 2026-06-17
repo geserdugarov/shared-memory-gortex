@@ -84,6 +84,25 @@ func TestSwiftObjCBaseNameCandidates(t *testing.T) {
 	}
 }
 
+func TestResolveSwiftObjCBridge_PropertyAccessors(t *testing.T) {
+	g := graph.New()
+	// A Swift @objc property exposes a getter (`title`) and setter (`setTitle:`).
+	g.AddNode(&graph.Node{
+		ID: "ios/W.swift::Widget.title", Kind: graph.KindField, Name: "title",
+		FilePath: "ios/W.swift", StartLine: 2, Language: "swift",
+		Meta: map[string]any{"objc_selector": "title", "objc_setter_selector": "setTitle:"},
+	})
+	// Native ObjC accessor methods.
+	objcMethodNode(g, "ios/W.m::title", "title")
+	objcMethodNode(g, "ios/W.m::setTitle:", "setTitle:")
+
+	// One Swift declaration bridged (to both accessors).
+	assert.Equal(t, 1, ResolveSwiftObjCBridge(g))
+	require.NotNil(t, bridgeEdgeBetween(g, "ios/W.swift::Widget.title", "ios/W.m::title"), "getter bridge")
+	require.NotNil(t, bridgeEdgeBetween(g, "ios/W.swift::Widget.title", "ios/W.m::setTitle:"), "setter bridge")
+	require.NotNil(t, bridgeEdgeBetween(g, "ios/W.m::setTitle:", "ios/W.swift::Widget.title"), "reverse setter bridge")
+}
+
 func TestResolveSwiftObjCBridge_SuppressGenericCandidates(t *testing.T) {
 	// Bare NSObject selectors yield no candidates at all.
 	for _, sel := range []string{"init", "copy", "description", "isEqual:", "hash"} {

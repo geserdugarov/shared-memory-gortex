@@ -5,6 +5,13 @@ import "github.com/zzet/gortex/internal/graph"
 // swiftObjCBridgeVia marks a synthesized Swift↔ObjC bridge edge.
 const swiftObjCBridgeVia = "swift.objc.bridge"
 
+// swiftSelRef pairs a Swift declaration node with one Objective-C selector it
+// is exposed under (a method's selector, or a property's getter / setter).
+type swiftSelRef struct {
+	node *graph.Node
+	sel  string
+}
+
 // ResolveSwiftObjCBridge is the framework-dispatch synthesizer for the
 // Swift ↔ Objective-C bridge. The Objective-C extractor names each method
 // node by its canonical selector (`moveFrom:to:`, `viewDidLoad`); the
@@ -32,8 +39,8 @@ func ResolveSwiftObjCBridge(g graph.Store) int {
 
 	objcBySelector := map[string][]*graph.Node{}
 	swiftByName := map[string][]*graph.Node{}
-	var swiftMethods []*graph.Node
-	for _, n := range nodesByKindsOrAll(g, graph.KindMethod, graph.KindFunction) {
+	var swiftExact []swiftSelRef
+	for _, n := range nodesByKindsOrAll(g, graph.KindMethod, graph.KindFunction, graph.KindField) {
 		if n == nil {
 			continue
 		}
@@ -47,8 +54,13 @@ func ResolveSwiftObjCBridge(g graph.Store) int {
 				swiftByName[n.Name] = append(swiftByName[n.Name], n)
 			}
 			if n.Meta != nil {
+				// A method exposes one selector; an @objc property exposes a
+				// getter (objc_selector) and, when mutable, a setter.
 				if sel, _ := n.Meta["objc_selector"].(string); sel != "" {
-					swiftMethods = append(swiftMethods, n)
+					swiftExact = append(swiftExact, swiftSelRef{n, sel})
+				}
+				if sel, _ := n.Meta["objc_setter_selector"].(string); sel != "" {
+					swiftExact = append(swiftExact, swiftSelRef{n, sel})
 				}
 			}
 		}
@@ -70,12 +82,11 @@ func ResolveSwiftObjCBridge(g graph.Store) int {
 		bridged[sm.ID] = true
 	}
 
-	// Exact pass: a Swift @objc method declares the selector it is exposed
-	// under; bind it to the ObjC method node of the same selector.
-	for _, sm := range swiftMethods {
-		sel, _ := sm.Meta["objc_selector"].(string)
-		for _, om := range objcBySelector[sel] {
-			link(sm, om, sel)
+	// Exact pass: a Swift @objc method or property declares the selector(s) it
+	// is exposed under; bind each to the ObjC method node of the same selector.
+	for _, sx := range swiftExact {
+		for _, om := range objcBySelector[sx.sel] {
+			link(sx.node, om, sx.sel)
 		}
 	}
 

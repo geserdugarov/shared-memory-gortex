@@ -38,6 +38,9 @@ const qSwiftAll = `
   (function_declaration
     name: (simple_identifier) @func.name) @func.def
 
+  (property_declaration
+    (pattern (simple_identifier) @property.name)) @property.def
+
   (import_declaration) @import.def
 
   (call_expression
@@ -130,6 +133,9 @@ func (e *SwiftExtractor) Extract(filePath string, src []byte) (*parser.Extractio
 
 		case m.Captures["func.def"] != nil:
 			e.emitFunction(m, filePath, fileID, src, result, seen, annotationSeen, typeRanges)
+
+		case m.Captures["property.def"] != nil:
+			e.emitProperty(m, filePath, fileID, src, result, seen, annotationSeen, typeRanges)
 
 		case m.Captures["import.def"] != nil:
 			e.emitImport(m, filePath, fileID, result)
@@ -389,6 +395,123 @@ func (e *SwiftExtractor) emitFunction(m parser.QueryResult, filePath, fileID str
 		From: fileID, To: id, Kind: graph.EdgeDefines, FilePath: filePath, Line: def.StartLine + 1,
 	})
 	emitSwiftAnnotationEdges(def.Node, id, filePath, src, result, annotationSeen)
+}
+
+// emitProperty extracts a stored property declaration. Inside a type it is a
+// field member; at file scope it is a constant (`let`) or variable (`var`).
+// When the property carries @objc the Objective-C accessor selectors it is
+// exposed under are stamped (`objc_selector` getter, `objc_setter_selector` for
+// a mutable var) so the Swift↔ObjC bridge can pair it with native accessors.
+func (e *SwiftExtractor) emitProperty(m parser.QueryResult, filePath, fileID string, src []byte, result *parser.ExtractionResult, seen, annotationSeen map[string]bool, typeRanges []swiftTypeRange) {
+	nameCap := m.Captures["property.name"]
+	def := m.Captures["property.def"]
+	if nameCap == nil || def == nil || nameCap.Text == "" {
+		return
+	}
+	name := nameCap.Text
+	mutable := swiftPropertyIsMutable(def.Node, src)
+	fieldType := swiftPropertyType(def.Node, src)
+
+	typeName, enclosed := findEnclosingSwiftType(typeRanges, def.StartLine)
+	kind := graph.KindField
+	id := filePath + "::" + name
+	if enclosed {
+		id = filePath + "::" + typeName + "." + name
+	} else if mutable {
+		kind = graph.KindVariable
+	} else {
+		kind = graph.KindConstant
+	}
+	if seen[id] {
+		return
+	}
+	seen[id] = true
+
+	meta := map[string]any{"visibility": swiftVisibility(def.Node, src)}
+	if mutable {
+		meta["mutable"] = true
+	}
+	if fieldType != "" {
+		meta["field_type"] = fieldType
+	}
+	if enclosed {
+		meta["receiver"] = typeName
+	}
+	if getter, setter := swiftObjCPropertySelectors(def.Node, name, mutable, src); getter != "" {
+		meta["objc_selector"] = getter
+		if setter != "" {
+			meta["objc_setter_selector"] = setter
+		}
+	}
+	if doc := ExtractDocAbove(src, def.StartLine, DocLangSlashSlash); doc != "" {
+		meta["doc"] = doc
+	}
+
+	result.Nodes = append(result.Nodes, &graph.Node{
+		ID: id, Kind: kind, Name: name,
+		FilePath: filePath, StartLine: def.StartLine + 1, EndLine: def.EndLine + 1,
+		Language: "swift", Meta: meta,
+	})
+	result.Edges = append(result.Edges, &graph.Edge{
+		From: fileID, To: id, Kind: graph.EdgeDefines, FilePath: filePath, Line: def.StartLine + 1,
+	})
+	if enclosed {
+		result.Edges = append(result.Edges, &graph.Edge{
+			From: id, To: filePath + "::" + typeName, Kind: graph.EdgeMemberOf, FilePath: filePath, Line: def.StartLine + 1,
+		})
+	}
+	if fieldType != "" {
+		result.Edges = append(result.Edges, &graph.Edge{
+			From: id, To: "unresolved::" + fieldType, Kind: graph.EdgeTypedAs, FilePath: filePath, Line: def.StartLine + 1,
+		})
+	}
+	emitSwiftAnnotationEdges(def.Node, id, filePath, src, result, annotationSeen)
+}
+
+// swiftPropertyIsMutable reports whether a property is declared with `var`
+// (mutable) rather than `let`, reading the value_binding_pattern child.
+func swiftPropertyIsMutable(decl *sitter.Node, src []byte) bool {
+	for i := 0; i < int(decl.NamedChildCount()); i++ {
+		if c := decl.NamedChild(i); c != nil && c.Type() == "value_binding_pattern" {
+			return strings.Contains(c.Content(src), "var")
+		}
+	}
+	return strings.Contains(decl.Content(src), "var ")
+}
+
+// swiftPropertyType returns the base type named in a property's
+// type_annotation (`: [Foo]?` → "Foo"), or "" when the type is inferred.
+func swiftPropertyType(decl *sitter.Node, src []byte) string {
+	for i := 0; i < int(decl.NamedChildCount()); i++ {
+		c := decl.NamedChild(i)
+		if c == nil || c.Type() != "type_annotation" {
+			continue
+		}
+		t := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(c.Content(src)), ":"))
+		return swiftBaseTypeName(t)
+	}
+	return ""
+}
+
+// swiftBaseTypeName reduces a Swift type expression to its leaf type name,
+// stripping opaque/existential markers, optionals, array/dictionary sugar,
+// generic arguments and module qualification.
+func swiftBaseTypeName(t string) string {
+	t = strings.TrimSpace(t)
+	t = strings.TrimPrefix(t, "some ")
+	t = strings.TrimPrefix(t, "any ")
+	t = strings.TrimRight(t, "?!")
+	t = strings.Trim(t, "[]")
+	if idx := strings.IndexByte(t, '<'); idx >= 0 {
+		t = t[:idx]
+	}
+	if idx := strings.IndexByte(t, ':'); idx >= 0 { // dictionary value type
+		t = strings.TrimSpace(t[idx+1:])
+	}
+	if idx := strings.LastIndexByte(t, '.'); idx >= 0 {
+		t = t[idx+1:]
+	}
+	return strings.TrimSpace(t)
 }
 
 // swiftFunctionDetails parses a function declaration's header for its real

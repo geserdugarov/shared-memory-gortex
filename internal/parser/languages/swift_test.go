@@ -41,9 +41,14 @@ func TestSwiftExtractor_ClassWithMethods(t *testing.T) {
 	funcs := nodesOfKind(result.Nodes, graph.KindFunction)
 	assert.Len(t, funcs, 0)
 
-	// EdgeMemberOf edges.
+	// The stored property is a field member of the class.
+	fields := nodesOfKind(result.Nodes, graph.KindField)
+	require.Len(t, fields, 1)
+	assert.Equal(t, "port", fields[0].Name)
+
+	// EdgeMemberOf edges: two methods plus the property.
 	memberEdges := edgesOfKind(result.Edges, graph.EdgeMemberOf)
-	assert.Len(t, memberEdges, 2)
+	assert.Len(t, memberEdges, 3)
 	for _, e := range memberEdges {
 		assert.Equal(t, "server.swift::Server", e.To)
 	}

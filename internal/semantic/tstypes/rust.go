@@ -68,14 +68,60 @@ func rustTypeDeclName(n *sitter.Node, src []byte) string {
 }
 
 func rustSupertypes(n *sitter.Node, src []byte) []SuperRef {
-	if n.Type() != "impl_item" {
-		return nil
+	switch n.Type() {
+	case "impl_item":
+		tr := n.ChildByFieldName("trait")
+		if tr == nil {
+			return nil
+		}
+		return []SuperRef{{Name: tr.Content(src), Kind: graph.EdgeImplements, Line: nodeLine(tr)}}
+	case "trait_item":
+		// Supertrait bounds: `trait Sub: Super + Display { ... }` makes Sub
+		// extend each named bound.
+		var refs []SuperRef
+		for i := 0; i < int(n.NamedChildCount()); i++ {
+			bounds := n.NamedChild(i)
+			if bounds == nil || bounds.Type() != "trait_bounds" {
+				continue
+			}
+			for j := 0; j < int(bounds.NamedChildCount()); j++ {
+				b := bounds.NamedChild(j)
+				if name := rustBoundName(b, src); name != "" {
+					refs = append(refs, SuperRef{Name: name, Kind: graph.EdgeExtends, Line: nodeLine(b)})
+				}
+			}
+		}
+		return refs
 	}
-	tr := n.ChildByFieldName("trait")
-	if tr == nil {
-		return nil
+	return nil
+}
+
+// rustBoundName returns the base trait name of a trait-bound node, unwrapping
+// scoped (std::fmt::Display), generic (Iterator<Item=u8>) and higher-ranked
+// (for<'a> Trait) forms; "" for non-type bounds such as lifetimes.
+func rustBoundName(n *sitter.Node, src []byte) string {
+	switch n.Type() {
+	case "type_identifier":
+		return n.Content(src)
+	case "scoped_type_identifier":
+		if name := n.ChildByFieldName("name"); name != nil {
+			return name.Content(src)
+		}
+		for i := int(n.NamedChildCount()) - 1; i >= 0; i-- {
+			if c := n.NamedChild(i); c != nil && c.Type() == "type_identifier" {
+				return c.Content(src)
+			}
+		}
+	case "generic_type":
+		if t := n.ChildByFieldName("type"); t != nil {
+			return rustBoundName(t, src)
+		}
+	case "higher_ranked_trait_bound":
+		if t := n.ChildByFieldName("type"); t != nil {
+			return rustBoundName(t, src)
+		}
 	}
-	return []SuperRef{{Name: tr.Content(src), Kind: graph.EdgeImplements, Line: nodeLine(tr)}}
+	return ""
 }
 
 func rustFields(n *sitter.Node, src []byte) []Binding {

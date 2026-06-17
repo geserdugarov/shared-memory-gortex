@@ -32,7 +32,7 @@ func swiftObjCBaseNameCandidates(selector string) []string {
 		return nil
 	}
 
-	out := []string{head}
+	cands := []string{head}
 	words := splitCamelWords(head)
 	last := -1
 	for i := 1; i < len(words); i++ {
@@ -42,11 +42,44 @@ func swiftObjCBaseNameCandidates(selector string) []string {
 	}
 	if last > 0 {
 		if base := lowerFirstASCII(strings.Join(words[:last], "")); base != "" && base != head {
-			out = append(out, base)
+			cands = append(cands, base)
+		}
+	}
+
+	// Drop ubiquitous NSObject / Cocoa-runtime selectors: matching Swift
+	// methods by these names would bridge unrelated code wholesale. A
+	// specific selector keeps its verbatim candidate (`initWithFrame`) even
+	// when its shortened form (`init`) is generic and suppressed.
+	var out []string
+	for _, c := range cands {
+		if !isGenericCocoaSelector(c) {
+			out = append(out, c)
 		}
 	}
 	return out
 }
+
+// genericCocoaSelectors are the NSObject / Objective-C runtime method names a
+// candidate base name must not match on — memory management, introspection,
+// copying and the universal `init`/`description` family. These appear on
+// effectively every type, so a name-based bridge through them is noise.
+var genericCocoaSelectors = map[string]bool{
+	"init": true, "alloc": true, "allocWithZone": true, "new": true,
+	"dealloc": true, "finalize": true, "load": true, "initialize": true,
+	"copy": true, "mutableCopy": true, "copyWithZone": true, "mutableCopyWithZone": true,
+	"retain": true, "release": true, "autorelease": true, "retainCount": true,
+	"description": true, "debugDescription": true, "hash": true,
+	"isEqual": true, "self": true, "class": true, "superclass": true,
+	"isKindOfClass": true, "isMemberOfClass": true, "isProxy": true, "zone": true,
+	"respondsToSelector": true, "conformsToProtocol": true, "performSelector": true,
+	"methodForSelector": true, "methodSignatureForSelector": true,
+	"doesNotRecognizeSelector": true, "forwardInvocation": true,
+	"forwardingTargetForSelector": true,
+}
+
+// isGenericCocoaSelector reports whether a candidate base name is a universal
+// NSObject / runtime selector that must be excluded from heuristic bridging.
+func isGenericCocoaSelector(name string) bool { return genericCocoaSelectors[name] }
 
 // splitCamelWords breaks a lowerCamelCase / UpperCamelCase identifier into its
 // word components on lower→upper boundaries, keeping runs of capitals (e.g.

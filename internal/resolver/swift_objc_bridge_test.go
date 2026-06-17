@@ -74,7 +74,7 @@ func TestSwiftObjCBaseNameCandidates(t *testing.T) {
 	cases := map[string][]string{
 		"cellForRowAtIndexPath:":            {"cellForRowAtIndexPath", "cellForRow"},
 		"moveFrom:to:":                      {"moveFrom", "move"},
-		"initWithFrame:":                    {"initWithFrame", "init"},
+		"initWithFrame:":                    {"initWithFrame"},
 		"tableView:numberOfRowsInSection:":  {"tableView"},
 		"viewDidLoad":                       {"viewDidLoad"},
 		"dataForKey:":                       {"dataForKey", "data"},
@@ -82,6 +82,28 @@ func TestSwiftObjCBaseNameCandidates(t *testing.T) {
 	for sel, want := range cases {
 		assert.ElementsMatch(t, want, swiftObjCBaseNameCandidates(sel), "selector %q", sel)
 	}
+}
+
+func TestResolveSwiftObjCBridge_SuppressGenericCandidates(t *testing.T) {
+	// Bare NSObject selectors yield no candidates at all.
+	for _, sel := range []string{"init", "copy", "description", "isEqual:", "hash"} {
+		assert.Empty(t, swiftObjCBaseNameCandidates(sel), "generic selector %q must not produce candidates", sel)
+	}
+	// A specific selector keeps its verbatim candidate but drops the generic short form.
+	assert.ElementsMatch(t, []string{"initWithFrame"}, swiftObjCBaseNameCandidates("initWithFrame:"))
+}
+
+func TestResolveSwiftObjCBridge_SuppressGenericBridge(t *testing.T) {
+	g := graph.New()
+	// Swift methods named like NSObject selectors must not candidate-bridge.
+	g.AddNode(&graph.Node{ID: "ios/A.swift::A.init", Kind: graph.KindMethod, Name: "init", FilePath: "ios/A.swift", StartLine: 3, Language: "swift"})
+	g.AddNode(&graph.Node{ID: "ios/A.swift::A.description", Kind: graph.KindMethod, Name: "description", FilePath: "ios/A.swift", StartLine: 6, Language: "swift"})
+	objcMethodNode(g, "ios/B.m::init", "init")
+	objcMethodNode(g, "ios/B.m::description", "description")
+
+	assert.Equal(t, 0, ResolveSwiftObjCBridge(g))
+	assert.Nil(t, bridgeEdgeBetween(g, "ios/A.swift::A.init", "ios/B.m::init"))
+	assert.Nil(t, bridgeEdgeBetween(g, "ios/A.swift::A.description", "ios/B.m::description"))
 }
 
 func TestResolveSwiftObjCBridge_ExplicitSelector(t *testing.T) {

@@ -354,6 +354,10 @@ func JoinRouterPrefixes(reg *Registry, scanFiles []string, srcFor func(filePath 
 		}
 	}
 
+	// NestJS RouterModule cross-module prefixes: controllerClass -> the path
+	// its module is mounted under (walked across module + router-config files).
+	nestModulePrefix := buildNestModulePrefixes(factFiles, srcFor)
+
 	// chainPrefix resolves the full mount prefix for a router var,
 	// walking parent includes so a router mounted into a router
 	// inherits both prefixes. Self-prefix is the router's own
@@ -408,7 +412,7 @@ func JoinRouterPrefixes(reg *Registry, scanFiles []string, srcFor func(filePath 
 			continue
 		}
 
-		prefix := prefixForRoute(c, fw, srcFor, globalSelf, globalMount, selfConflict, mountConflict, chainPrefix)
+		prefix := prefixForRoute(c, fw, srcFor, globalSelf, globalMount, selfConflict, mountConflict, chainPrefix, nestModulePrefix)
 		if prefix == "" {
 			continue
 		}
@@ -428,7 +432,7 @@ func JoinRouterPrefixes(reg *Registry, scanFiles []string, srcFor func(filePath 
 			if joined, _ := items[i].Meta[routePrefixJoinedMeta].(bool); joined {
 				continue
 			}
-			rp := prefixForRoute(items[i], ifw, srcFor, globalSelf, globalMount, selfConflict, mountConflict, chainPrefix)
+			rp := prefixForRoute(items[i], ifw, srcFor, globalSelf, globalMount, selfConflict, mountConflict, chainPrefix, nestModulePrefix)
 			if rp == "" {
 				continue
 			}
@@ -500,6 +504,7 @@ func prefixForRoute(
 	globalSelf, globalMount map[string]string,
 	selfConflict, mountConflict map[string]bool,
 	chainPrefix func(string, map[string]bool) string,
+	nestModulePrefix map[string]string,
 ) string {
 	switch framework {
 	case "fastapi/flask", "flask", "express":
@@ -538,8 +543,15 @@ func prefixForRoute(
 	case "nestjs":
 		// Class-level @Controller('cats') prefix, found by scanning
 		// upward from the route line for the nearest preceding
-		// decorator in the same file.
-		return nestControllerPrefix(c, srcFor)
+		// decorator in the same file, prefixed by the cross-module
+		// RouterModule mount path of the controller's module (if any).
+		ctrlPrefix := nestControllerPrefix(c, srcFor)
+		if len(nestModulePrefix) > 0 {
+			if mp := nestModulePrefix[nestControllerClass(c, srcFor)]; mp != "" {
+				return joinPaths(mp, ctrlPrefix)
+			}
+		}
+		return ctrlPrefix
 	case "spring":
 		return springClassPrefix(c, srcFor)
 	case "rails":

@@ -81,3 +81,94 @@ func TestNestMicroservice_SupportedLanguages(t *testing.T) {
 		t.Errorf("non-microservice file should produce no contracts, got %+v", cs)
 	}
 }
+
+// TestNestCrossModulePrefixAndMessagePatterns proves the two NestJS depth
+// upgrades. (1) RouterModule cross-module prefixing: a controller's route is
+// prefixed by the path its module is mounted under in RouterModule.register —
+// resolved by walking three separate files (router config, @Module, controller)
+// plus the @Controller and child-route nesting, the multi-file reach a same-
+// file regex cannot achieve. (2) @MessagePattern / @EventPattern handlers are
+// first-class topic providers bound to their handler symbol, and @All routes
+// are recognised.
+func TestNestCrossModulePrefixAndMessagePatterns(t *testing.T) {
+	t.Run("cross_module_prefix", func(t *testing.T) {
+		files := map[string]string{
+			"src/app.module.ts": `RouterModule.register([
+  { path: 'admin', module: AdminModule, children: [
+    { path: 'users', module: UsersModule },
+  ] },
+]);`,
+			"src/users/users.module.ts": `@Module({ controllers: [UsersController] })
+export class UsersModule {}`,
+			"src/users/users.controller.ts": `@Controller('list')
+export class UsersController {
+  @Get('/active')
+  active() {}
+  @All('/any')
+  any() {}
+}`,
+		}
+		reg := NewRegistry()
+		h := &HTTPExtractor{}
+		var scan []string
+		for fp, src := range files {
+			for _, c := range h.Extract(fp, []byte(src), nil, nil) {
+				reg.Add(c)
+			}
+			scan = append(scan, fp)
+		}
+		JoinRouterPrefixes(reg, scan, func(fp string) []byte { return []byte(files[fp]) })
+
+		got := map[string]bool{}
+		for _, c := range reg.All() {
+			if c.Type == ContractHTTP {
+				m, _ := c.Meta["method"].(string)
+				p, _ := c.Meta["path"].(string)
+				got[m+" "+p] = true
+			}
+		}
+		// admin (AdminModule) / users (UsersModule under admin's children) /
+		// list (@Controller) / active (@Get) — composed across three files.
+		if !got["GET /admin/users/list/active"] {
+			t.Errorf("cross-module prefix not applied: want GET /admin/users/list/active, got %v", keysOfBool(got))
+		}
+		// @All is recognised (method ALL) and carries the same prefix.
+		if !got["ALL /admin/users/list/any"] {
+			t.Errorf("@All route missing or unprefixed, got %v", keysOfBool(got))
+		}
+	})
+
+	t.Run("message_patterns", func(t *testing.T) {
+		const fp = "users.controller.ts"
+		src := `@Controller()
+export class UsersController {
+  @MessagePattern('user.find')
+  find() {}
+
+  @EventPattern('user.created')
+  onCreated() {}
+}`
+		nodes := []*graph.Node{
+			{ID: fp + "::UsersController.find", Kind: graph.KindMethod, Name: "find", FilePath: fp},
+			{ID: fp + "::UsersController.onCreated", Kind: graph.KindMethod, Name: "onCreated", FilePath: fp},
+		}
+		cs := (&NestMicroserviceExtractor{}).Extract(fp, []byte(src), nodes, nil)
+		find := nestFindByID(cs, "topic::user.find")
+		if find == nil {
+			t.Fatalf("missing topic::user.find contract, got %+v", cs)
+		}
+		if find.Meta["message_kind"] != "MessagePattern" {
+			t.Errorf("message_kind=%v, want MessagePattern", find.Meta["message_kind"])
+		}
+		if find.SymbolID != fp+"::UsersController.find" {
+			t.Errorf("@MessagePattern handler not bound: SymbolID=%q", find.SymbolID)
+		}
+		created := nestFindByID(cs, "topic::user.created")
+		if created == nil || created.Meta["message_kind"] != "EventPattern" {
+			t.Errorf("missing/incorrect topic::user.created (EventPattern), got %+v", created)
+		}
+		if created != nil && created.SymbolID != fp+"::UsersController.onCreated" {
+			t.Errorf("@EventPattern handler not bound: SymbolID=%q", created.SymbolID)
+		}
+	})
+}

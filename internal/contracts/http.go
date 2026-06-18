@@ -153,7 +153,7 @@ var httpPatterns = []httpPattern{
 		languages:  []string{"typescript", "javascript"},
 	},
 	{
-		re:         regexp.MustCompile(`@(Get|Post|Put|Delete|Patch|Head|Options)\(\s*["'` + "`" + `]([^"'` + "`" + `]+)["'` + "`" + `]`),
+		re:         regexp.MustCompile(`@(Get|Post|Put|Delete|Patch|Head|Options|All)\(\s*["'` + "`" + `]([^"'` + "`" + `]+)["'` + "`" + `]`),
 		role:       RoleProvider,
 		methodGrp:  1,
 		pathGrp:    2,

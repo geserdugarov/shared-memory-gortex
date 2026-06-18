@@ -7,7 +7,7 @@ gortex init doctor           Zero-op drift report across all detected agents (hu
 gortex mcp [flags]           Start the MCP stdio server (auto-detects daemon; --no-daemon / --proxy; --server adds HTTP API)
 gortex daemon start [flags]  Start the daemon; --http-addr <addr> serves the HTTP/JSON API under /v1/* plus the MCP /mcp transport (--http-auth-token, --cors-origin)
 gortex daemon <sub>          start / stop / restart / reload / status / logs / install-service / service-status / uninstall-service / server (multi-server roster)
-gortex eval <sub>            Retrieval + token benchmarks — recall / embedders / swebench / tokens / baselines / quality (substrate; prefer `gortex bench` for the user-facing surface)
+gortex eval <sub>            Retrieval + coverage benchmarks — recall / embedders / pack / swebench / stdbench / tokens / baselines / quality / parity (substrate; prefer `gortex bench` for the user-facing surface). `parity` measures per-language cross-file coverage against the committed baseline
 gortex eval-server [flags]   HTTP server used by the swebench harness
 gortex bench <sub>           User-facing benchmark suite — recall / tokens / tokens-efficiency / embedders / perf / daemon-latency / swebench / all
 gortex audit [flags]         A-F repo health grade derived from per-symbol complexity-axis health score
@@ -29,6 +29,7 @@ gortex docs [path]           Generate a "living docs" bundle (recent changes + o
 gortex export [path]         Export the graph to Cypher, GraphML, or Mermaid (--format mermaid --scope all)
 gortex githook <sub>         install / uninstall / status — manage the post-commit hook
 gortex clean                 Remove Gortex files from a project
+gortex telemetry <sub>       on / off / status — control anonymous, opt-in usage telemetry (off by default; honours DO_NOT_TRACK)
 gortex version               Print version
 ```
 

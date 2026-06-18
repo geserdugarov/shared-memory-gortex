@@ -85,6 +85,8 @@ on interface nodes stores the expected method set for implementation matching.
 | OCaml | Full | Full (class) | Types/Modules | Module types | open | Full | Full |
 | Lua | Full | Full (M.func/M:method) | - | - | require() | Full | Full |
 
+Recent extraction refinements (each covered by a per-feature CI golden): Java `@interface` annotation types index as interfaces and participate in implementation matching; Java `new T(){…}` and C# `new { … }` anonymous classes/types become synthetic type nodes with an `extends` edge (to the instantiated type, or to `object` for C#); JS/TS arrow-valued class fields (`x = () => {…}`) are emitted as callable methods; JS/TS named imports emit one `imports` edge per binding (alias-aware via `Edge.Alias`) and barrel re-exports emit `re_exports` edges; chained / factory-call receivers (`New().Build()`) carry an inferred `receiver_type`. See [features.md](features.md) and [architecture.md](architecture.md) for the edge semantics.
+
 ## Data, config, build
 
 | Language | Extensions | What it extracts |

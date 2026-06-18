@@ -194,6 +194,7 @@ func (s *Server) handleResourceSchema(_ context.Context, req mcp.ReadResourceReq
 ## Edge Kinds
 - calls        — function/method A calls function/method B
 - imports      — file A imports file/package B
+- re_exports   — barrel-file re-export forwarding (export {x} / export * from "mod"); distinct from imports so a dependency walk tells forwarding from consumption
 - defines      — file/package A defines symbol B
 - implements   — type A implements interface B (structural inference)
 - extends      — class A extends class B

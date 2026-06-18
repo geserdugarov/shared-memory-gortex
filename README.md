@@ -97,6 +97,7 @@ Your AI assistant now uses graph queries. Full 15-minute walkthrough: [docs/onbo
 - **Composable safety** — `verify_change`, `check_guards`, `audit_agent_config` flag broken callers, guard violations, stale docs before they ship
 - **PR review, end to end** — `gortex prs` triages open PRs (per-PR blast radius, merge-order conflicts via shared communities, AI-ranked queue, reviewer suggestions); `gortex review` emits line-anchored findings with a BLOCK/REVIEW/APPROVE verdict from a graph-grounded rulepack; MCP tools (`pr_risk`, `get_pr_impact`, `review`, `review_pack`, `post_review`, …) expose it to agents → [docs/cli.md](docs/cli.md)
 - **Agent integrations (16)** — `gortex init` configures every detected coding assistant on the machine → [docs/agents.md](docs/agents.md)
+- **Telemetry off by default** — opt-in anonymous tool/command counts only (no code, paths, names, or exact counts); nothing transmitted unless you configure an endpoint. `gortex telemetry on|off|status`; honours `DO_NOT_TRACK` → [docs/telemetry.md](docs/telemetry.md)
 
 Full catalog of features: [docs/features.md](docs/features.md). Complete CLI reference: [docs/cli.md](docs/cli.md).
 
@@ -182,6 +183,7 @@ Data flow, graph schema (node and edge kinds, multi-repo fields, test taxonomy),
 | GCX1 wire format | [wire-format.md](docs/wire-format.md) |
 | Architecture & graph schema | [architecture.md](docs/architecture.md) |
 | Evaluation methodology | [04-evaluation/](docs/04-evaluation/) |
+| Telemetry & privacy | [telemetry.md](docs/telemetry.md) |
 | Versioning policy | [versioning.md](docs/versioning.md) |
 
 ## Building from source

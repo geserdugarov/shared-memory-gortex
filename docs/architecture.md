@@ -36,7 +36,7 @@ gortex binary
 
 **Edge kinds:**
 
-- Calls / structure: `calls`, `imports`, `defines`, `implements`, `extends`, `overrides`, `references`, `member_of`, `instantiates`, `provides`, `consumes`, `composes`, `aliases`, `typed_as`, `returns`, `captures`, `param_of`
+- Calls / structure: `calls`, `imports`, `re_exports`, `defines`, `implements`, `extends`, `overrides`, `references`, `member_of`, `instantiates`, `provides`, `consumes`, `composes`, `aliases`, `typed_as`, `returns`, `captures`, `param_of` — `re_exports` is barrel-file forwarding (`export {x} from "mod"`, `export * from "mod"`, `export * as ns`), kept distinct from `imports` so a dependency walk separates forwarding hops from consumption
 - Concurrency / mutation: `spawns`, `sends`, `recvs`, `reads`, `writes`, `reads_config`, `writes_config`
 - Dataflow (CPG-lite): `value_flow`, `arg_of`, `returns_to`
 - Metadata: `annotated`, `emits`, `throws`, `queries`, `reads_col`, `writes_col`, `toggles_flag`, `depends_on_module`, `matches`, `generated_by`, `tests`, `covered_by`, `owns`, `authored`, `licensed_as`
@@ -46,6 +46,8 @@ gortex binary
 - Cross-repo: `cross_repo_calls` / `cross_repo_implements` / `cross_repo_extends` — materialised whenever a `calls` / `implements` / `extends` edge's endpoints live in different repos
 
 **Multi-repo fields:** Nodes carry `repo_prefix` (empty in single-repo mode). Edges carry `cross_repo` (true when connecting nodes in different repos). Node IDs use `<repo_prefix>/<path>::<Symbol>` format in multi-repo mode.
+
+**Edge.Alias:** per-binding `imports` (`import { x as alias }`) and `re_exports` (`export { x as alias } from`) carry the renamed local / exported identifier on `Edge.Alias`; `To` still targets the upstream original name, so `Alias` is the only place the rename is recorded.
 
 **Test taxonomy:** functions and methods in test files carry `Meta["is_test"]` + `Meta["test_role"]` (`test` / `benchmark` / `fuzz` / `example`) + `Meta["test_runner"]`. The runner identifier is one of `gotest` / `pytest` / `unittest` / `rspec` / `minitest` / `test-unit` / `jest` / `vitest` / `mocha` / `bun-test` / `node-test` / `playwright` / `cypress`, resolved from parser-stamped imports (JS / TS) with a Mocha-TDD `suite()` byte fallback and language-default fill-in (Go is always `gotest`, Python defaults to `pytest`, Ruby uses the `_spec.rb` / `_test.rb` suffix). The owning `KindFile` also gets the same `test_runner` stamp so file-level queries can group tests by runner without walking functions.
 
@@ -78,4 +80,4 @@ Measured on an Apple Silicon laptop with the default CGO build:
 | [microsoft/vscode](https://github.com/microsoft/vscode) | 10,762 | 204,501 | 808,902 | ~1 min | 143 files/s | 580 MB |
 | zzet/gortex (self) | 430 | 5,583 | 53,830 | 3.4s | 127 files/s | 52 MB |
 
-Parsing dominates wall time (65–80%); reference resolution and search-index build scale sub-linearly. Everything runs in-process — no external services, no database, no network.
+Parsing dominates wall time (65–80%); reference resolution and search-index build scale sub-linearly. The indexing and parsing pipeline runs entirely in-process — no external services, no database, no network. Optional features that *do* reach the network (LLM providers, first-run model downloads, PR-review forge calls, the remote-daemon roster) are off by default; anonymous usage telemetry is likewise off by default and transmits nothing unless an endpoint is configured (see [telemetry.md](telemetry.md)).

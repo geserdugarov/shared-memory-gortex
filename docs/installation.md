@@ -161,3 +161,7 @@ go install github.com/zzet/gortex/cmd/gortex@latest
 ```
 
 `go install` drops the binary into `$(go env GOBIN)` (default `~/go/bin`) — make sure that's on your `PATH`.
+
+## Telemetry
+
+Gortex's anonymous usage telemetry is **off by default** and fully opt-in. The first run of `gortex init` prints a one-time notice. Enable, disable, or inspect it with `gortex telemetry on | off | status`, or disable globally with `DO_NOT_TRACK=1`. Full details — what is and isn't collected, where state lives, and transmission gating — are in [telemetry.md](telemetry.md).

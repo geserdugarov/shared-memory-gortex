@@ -194,6 +194,9 @@ func (s *Server) registerCodingTools() {
 			mcp.WithString("project", mcp.Description("Filter results to repositories in a specific project")),
 			mcp.WithString("scope", mcp.Description("Name of a saved scope (see save_scope) — restricts results to that scope's repositories.")),
 			mcp.WithString("path", mcp.Description("Restrict the assembled context to one or more sub-paths (comma-separated) -- a monorepo-service slice. Anchored, slash-segment-boundary prefixes relative to the repo root. Unions with an inline path: clause in the task and a scope's saved paths.")),
+			mcp.WithBoolean("include_call_paths", mcp.Description("Opt in to the in-pack anchored call-paths section (off by default). Overrides the project's smart_context.in_pack config for this call.")),
+			mcp.WithBoolean("include_flows", mcp.Description("Opt in to the in-pack flow-spine and dynamic-boundary section (off by default). Overrides the project's smart_context.in_pack config for this call.")),
+			mcp.WithBoolean("include_confidence", mcp.Description("Opt in to the in-pack retrieval-confidence verdict (off by default). Overrides the project's smart_context.in_pack config for this call.")),
 		),
 		s.handleSmartContext,
 	)
@@ -2094,6 +2097,9 @@ func (s *Server) handleSmartContext(ctx context.Context, req mcp.CallToolRequest
 	if br := s.buildBlastRadius(ctx, relevantSymbols); br != nil {
 		result["blast_radius"] = br
 	}
+
+	// Opt-in in-pack enrichment sections (off by default).
+	s.attachInPackSections(result, s.smartContextSections(req.GetArguments(), entryPoint))
 
 	// Pack-root dedup: hash the assembled context pack. When the
 	// caller passes back the pack root it already holds and nothing

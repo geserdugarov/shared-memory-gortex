@@ -1465,6 +1465,9 @@ type MCPConfig struct {
 	// values from config / data-leaf files. A nil pointer means the default
 	// (redaction ON); set it to false to serve config-leaf values verbatim.
 	RedactConfigSecrets *bool `mapstructure:"redact_config_secrets" yaml:"redact_config_secrets,omitempty"`
+	// SmartContext governs the optional in-pack enrichment sections
+	// smart_context attaches to its pack. Every section is off by default.
+	SmartContext SmartContextConfig `mapstructure:"smart_context" yaml:"smart_context,omitempty"`
 }
 
 // RedactConfigSecretsEnabled reports whether config-leaf secret redaction is

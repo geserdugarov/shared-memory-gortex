@@ -71,6 +71,7 @@ const (
 	SynthSQLCallsite       = "sql-callsite"
 	SynthStoreFactory      = "store-factory"
 	SynthSpeculative       = "speculative-dispatch"
+	SynthFnValue           = SynthFnValueCallback
 )
 
 // StampSynthesized marks an edge as the product of a framework
@@ -142,6 +143,11 @@ func defaultFrameworkSynthesizers() []FrameworkSynthesizer {
 		// unresolved Rust calls land before external-call synthesis
 		// classifies the rest as external.
 		synthFunc{name: SynthRustScope, fn: ResolveRustScopeCalls},
+		// Function-as-value callback registration — binds each captured
+		// value-position function identifier to its same-file definition and
+		// drops unbound candidates. The per-language capture feeds it via
+		// placeholder edges; the pass is inert until those land.
+		synthFunc{name: SynthFnValue, fn: ResolveFnValueCallbacks},
 	}
 }
 

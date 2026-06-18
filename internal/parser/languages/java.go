@@ -430,6 +430,11 @@ func (e *JavaExtractor) Extract(filePath string, src []byte) (*parser.Extraction
 	stampScopePkg(result, javaPackageName(root, src))
 	captureValueRefCandidates(result, root, filePath, src)
 	captureFnValueCandidates(result, root, filePath, src)
+
+	// Spring @Value / @ConfigurationProperties property reads → resolver hints
+	// for the application.yml/.properties config-key graph.
+	mineSpringConfigReads(src, result)
+
 	return result, nil
 }
 

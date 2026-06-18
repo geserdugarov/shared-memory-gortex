@@ -4481,6 +4481,12 @@ func (idx *Indexer) commitContracts(reg *contracts.Registry) {
 		})
 	}
 
+	// Spring application(-profile)?.{yml,properties} config-key graph: emit the
+	// value-redacted config-key nodes and reads_config edges from the @Value /
+	// @ConfigurationProperties beans the Java extractor stamped. Cheap to skip
+	// on non-Spring repos (no config files + no stamped beans = no work).
+	contracts.BindSpringConfig(idx.graph, idx.contractFileSrc)
+
 	// Trace response variables back to their call-site return types.
 	// Handles `source, err := h.svc.Get(...)` → response_type is
 	// whatever `h.svc.Get` returns. The enricher can't do this

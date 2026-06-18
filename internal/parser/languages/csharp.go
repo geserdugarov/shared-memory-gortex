@@ -126,6 +126,7 @@ type csharpDeferredLocal struct {
 }
 
 func (e *CSharpExtractor) Extract(filePath string, src []byte) (*parser.ExtractionResult, error) {
+	src = parser.ApplyPreParse(e, src)
 	tree, err := parser.ParseFile(src, e.lang)
 	if err != nil {
 		return nil, err

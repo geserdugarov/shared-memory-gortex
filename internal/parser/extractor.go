@@ -9,6 +9,36 @@ type Extractor interface {
 	Extract(filePath string, src []byte) (*ExtractionResult, error)
 }
 
+// PreParser is an optional Extractor capability: a source-rewriting hook run
+// before tree-sitter parsing. It lets a language neutralise constructs that
+// confuse the grammar (e.g. C-family conditional-compilation directives that
+// detach an enclosing declaration) without discarding any code.
+//
+// Implementations MUST preserve byte offsets and line counts exactly — the
+// returned slice has the same length as the input and every newline stays in
+// place — so all extracted node ranges, line numbers, and downstream
+// resolution remain byte-accurate. Returning nil means "no rewrite".
+//
+// The hook is a first-class, language-agnostic interface rather than a
+// per-language private step: any extractor opts in by implementing it, and the
+// same offset-preserving rewrite machinery is then reusable across languages.
+type PreParser interface {
+	PreParse(src []byte) []byte
+}
+
+// ApplyPreParse runs e's PreParse hook when e implements PreParser and the hook
+// returns a non-nil rewrite; otherwise it returns src unchanged. The identity
+// default means extractors opt in by implementing PreParser, with no behaviour
+// change for those that don't.
+func ApplyPreParse(e Extractor, src []byte) []byte {
+	if pp, ok := e.(PreParser); ok {
+		if rewritten := pp.PreParse(src); rewritten != nil {
+			return rewritten
+		}
+	}
+	return src
+}
+
 // ExtractionResult holds the nodes and edges extracted from a single
 // file, plus an optional handle to the parse tree the extractor used.
 //

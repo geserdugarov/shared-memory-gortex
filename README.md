@@ -1,49 +1,34 @@
+
 <div align="center">
 <p align="center">
   <img src="assets/wall.svg" alt="Gortex" width="500">
 </p>
 
-### Code graph and intelligence engine that indexes repositories
-#### and exposes it via CLI, MCP Server, and web UI.
+### High-performance and efficient code-intelligence engine for AI agents and IDE
+#### Indexes code and exposes it via CLI, MCP Server, and web UI. Multi-repository support by default.
+#### Single static binary for macOS, Linux, and Windows — no dependency chain, simple installation and use.
 
 ---
-
 [![CI](https://github.com/zzet/gortex/actions/workflows/ci.yml/badge.svg)](https://github.com/zzet/gortex/actions/workflows/ci.yml)
-[![Go Report Card](https://goreportcard.com/badge/github.com/zzet/gortex)](https://goreportcard.com/report/github.com/zzet/gortex)
 [![Latest release](https://img.shields.io/github/v/release/zzet/gortex?logo=github&sort=semver)](https://github.com/zzet/gortex/releases/latest)
-[![Go Reference](https://pkg.go.dev/badge/github.com/zzet/gortex.svg)](https://pkg.go.dev/github.com/zzet/gortex)
-[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/zzet/gortex/badge)](https://scorecard.dev/viewer/?uri=github.com/zzet/gortex)
-
 [![Sigstore signed](https://img.shields.io/badge/sigstore-signed-66D4FF?logo=sigstore&logoColor=white)](docs/installation.md#verifying-releases-supply-chain-security)
 [![SLSA 3](https://img.shields.io/badge/SLSA-Level%203-green)](https://slsa.dev/spec/v1.0/levels#build-l3)
 [![VirusTotal](https://img.shields.io/badge/VirusTotal-0%2F91-brightgreen?logo=virustotal)](https://www.virustotal.com/gui/url/00e1094b39c9bd7db4d5a179b1d56173f85c915075057fd3cc64bfbb9b735b11/detection)
-
 [![macOS](https://img.shields.io/badge/macOS-supported-blue.svg)](#)
 [![Linux](https://img.shields.io/badge/Linux-supported-blue.svg)](#)
 [![Windows](https://img.shields.io/badge/Windows-supported-blue.svg)](#)
 
-[![Claude Code](https://img.shields.io/badge/Claude_Code-supported-blueviolet.svg)](docs/agents.md)
-[![Kiro](https://img.shields.io/badge/Kiro-supported-blueviolet.svg)](docs/agents.md)
-[![Cursor](https://img.shields.io/badge/Cursor-supported-blueviolet.svg)](docs/agents.md)
-[![Windsurf](https://img.shields.io/badge/Windsurf-supported-blueviolet.svg)](docs/agents.md)
-[![VS Code / Copilot](https://img.shields.io/badge/VS_Code-supported-blueviolet.svg)](docs/agents.md)
-[![Continue.dev](https://img.shields.io/badge/Continue.dev-supported-blueviolet.svg)](docs/agents.md)
-[![Cline](https://img.shields.io/badge/Cline-supported-blueviolet.svg)](docs/agents.md)
-[![opencode](https://img.shields.io/badge/opencode-supported-blueviolet.svg)](docs/agents.md)
-[![Antigravity](https://img.shields.io/badge/Antigravity-supported-blueviolet.svg)](docs/agents.md)
-[![Codex CLI](https://img.shields.io/badge/Codex_CLI-supported-blueviolet.svg)](docs/agents.md)
-[![Gemini CLI](https://img.shields.io/badge/Gemini_CLI-supported-blueviolet.svg)](docs/agents.md)
-[![Zed](https://img.shields.io/badge/Zed-supported-blueviolet.svg)](docs/agents.md)
-[![Aider](https://img.shields.io/badge/Aider-supported-blueviolet.svg)](docs/agents.md)
-[![Kilo Code](https://img.shields.io/badge/Kilo_Code-supported-blueviolet.svg)](docs/agents.md)
-[![OpenClaw](https://img.shields.io/badge/OpenClaw-supported-blueviolet.svg)](docs/agents.md)
-[![Hermes](https://img.shields.io/badge/Hermes-supported-blueviolet.svg)](docs/agents.md)
-
-**Up to 50× fewer tokens per response.** See [BENCHMARK.md](BENCHMARK.md) or reproduce it yourself.
-
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/zzet/gortex/badge)](https://scorecard.dev/viewer/?uri=github.com/zzet/gortex)
+[![Go Report Card](https://goreportcard.com/badge/github.com/zzet/gortex)](https://goreportcard.com/report/github.com/zzet/gortex)
+[![Go Reference](https://pkg.go.dev/badge/github.com/zzet/gortex.svg)](https://pkg.go.dev/github.com/zzet/gortex)
 </div>
 
-> Built for 16 AI coding agents (Claude Code, Kiro, Cursor, Windsurf, VS Code / Copilot, Continue.dev, Cline, OpenCode, Antigravity, Codex CLI, Gemini CLI, Zed, Aider, Kilo Code, OpenClaw, Hermes). One install configures every one detected on your machine — see [docs/agents.md](docs/agents.md).
+High-quality parsing 257 languages/grammars through tree-sitter AST analysis, in-process resolvers, enhanced with [compiler-grade resolution](https://github.com/zzet/gortex/blob/main/docs/lsp.md) for Python, TypeScript / JavaScript, PHP, C#, Go, C, C++, Java, Kotlin, Swift, Zig, Rust, Ruby, Elixir, Ocaml, Haskell, and [others](https://github.com/zzet/gortex/blob/main/docs/languages.md#at-a-glance) - producing a persistent provenance-tiered knowledge graph of functions, classes, call chains, HTTP routes, and cross-service contracts and calls with a strong confidence model. 175 (configurable) MCP tools - use only what you need. Zero dependencies. Plug and play across 16 coding agents. **Up to 50× fewer tokens per response**. Reproducible [benchmarks](BENCHMARK.md).
+
+
+> 16 AI coding agents (Claude Code, Kiro, Cursor, Windsurf, VS Code / Copilot, Continue.dev, Cline, OpenCode, Antigravity, Codex CLI, Gemini CLI, Zed, Aider, Kilo Code, OpenClaw, Hermes) supported out of the box.
+>
+> One install configures every one detected on your machine — see [docs/agents.md](docs/agents.md).
 
 <details>
 <summary>Gortex Web UI — force-directed knowledge graph visualization</summary>
@@ -54,10 +39,26 @@
 
 ## Why it matters
 
-- **50× fewer tokens per response** — graph-native lookups beat naive file reads. Agents read the symbol they need, not the 500-line file around it.
-- **Sub-millisecond impact analysis** — a precomputed depth-3 reach index turns blast-radius queries into O(seeds × reach) map lookups. Safe to ask "what breaks if I change this?" on every edit.
-- **Cross-repo by default** — N repos in one graph; contracts, references, and call chains span repo boundaries with evidence-gated resolution.
-- **Zero external dependencies** — single binary, everything in-process. No network, no model download to get started.
+- **50× fewer tokens per response** — graph-native lookups beat naive file reads. Agents read **just what they need**, not the full file, not the 500-line file around it.
+- **Full development cycle** - no 'read file before edit'. Agents ask for sources, tell what to change, and don't waste context of reading noise.
+- **257 languages/grammars** - every file in the repository reachable; no mix of tools and bloating/hallycinating agents. Three tiers (bespoke tree-sitter, regex, forest-backed signatures) plus Jupyter and Databricks notebooks → [docs/languages.md](docs/languages.md)
+- **Cross-repo by default** — N repos in one graph; contracts, references, and call chains span repo boundaries with evidence-gated resolution, contract matching, impact analysis, per-session isolation → [docs/multi-repo.md](docs/multi-repo.md)
+- **Extreamly fast analysis** — a precomputed depth-3 reach index turns blast-radius queries into O(seeds × reach) map lookups. Safe to ask "what breaks if I change this?" on every edit. No dozens of tool calls to grasp context.
+- **Zero external dependencies** — single binary, everything in-process. No network, no model download to get started. Install, start daemon, use.
+- **Agent integrations (16)** — `gortex init` configures every detected coding assistant on the machine → [docs/agents.md](docs/agents.md)
+- **100+ MCP tools, 16 resources, 3 prompts** — symbol lookup, call chains, blast radius, dataflow, clone detection, refactoring, code actions → [docs/mcp.md](docs/mcp.md)
+- **Semantic search default-on** — baked GloVe-50d (3.8 MB embedded), hybrid BM25 + vector + RRF, zero deps; opt-in MiniLM / Ollama / OpenAI → [docs/semantic-search.md](docs/semantic-search.md)
+- **Speculative execution** — `preview_edit` / `simulate_chain` answer "what would change if I applied this WorkspaceEdit?" without touching disk
+- **Live editor overlays** — push unsaved buffers as a shadow graph; tools read through it. Branching for parallel speculative sessions
+- **GCX1 wire format** — published, round-trippable. **An additional −27% tokens vs JSON** at same fidelity → [docs/wire-format.md](docs/wire-format.md)
+- **Long-living daemon** — one process serves every IDE window; live fsnotify, on-disk snapshots, restart, OS-supervised lifecycle
+- **9 LLM providers (optional)** — local llama.cpp, Anthropic, OpenAI, Ollama, Claude / Codex CLI subprocess, Gemini, Bedrock, DeepSeek → [docs/llm.md](docs/llm.md)
+- **Composable safety** — `verify_change`, `check_guards`, `audit_agent_config` flag broken callers, guard violations, stale docs before they ship
+- **PR review, end to end** — `gortex prs` triages open PRs (per-PR blast radius, merge-order conflicts via shared communities, AI-ranked queue, reviewer suggestions); `gortex review` emits line-anchored findings with a BLOCK/REVIEW/APPROVE verdict from a graph-grounded rulepack; MCP tools (`pr_risk`, `get_pr_impact`, `review`, `review_pack`, `post_review`, …) expose it to agents → [docs/cli.md](docs/cli.md)
+- **HTTP server + Web UI** — versioned `/v1/*` API + MCP 2026 Streamable HTTP; standalone Next.js 15 UI with five 3D graph modes → [docs/server.md](docs/server.md)
+- **Telemetry off by default** — opt-in anonymous tool/command counts only (no code, paths, names, or exact counts); nothing transmitted unless you configure an endpoint. `gortex telemetry on|off|status`; honours `DO_NOT_TRACK` → [docs/telemetry.md](docs/telemetry.md)
+
+Full catalog of features: [docs/features.md](docs/features.md). Complete CLI reference: [docs/cli.md](docs/cli.md).
 
 ## Install
 
@@ -81,25 +82,6 @@ cd ~/projects/myapp && gortex init      # per-repo: .mcp.json, hooks, community 
 ```
 
 Your AI assistant now uses graph queries. Full 15-minute walkthrough: [docs/onboarding.md](docs/onboarding.md).
-
-## Highlights
-
-- **257 languages** — three tiers (bespoke tree-sitter, regex, forest-backed signatures) plus Jupyter and Databricks notebooks → [docs/languages.md](docs/languages.md)
-- **100+ MCP tools, 16 resources, 3 prompts** — symbol lookup, call chains, blast radius, dataflow, clone detection, refactoring, code actions → [docs/mcp.md](docs/mcp.md)
-- **Semantic search default-on** — baked GloVe-50d (3.8 MB embedded), hybrid BM25 + vector + RRF, zero deps; opt-in MiniLM / Ollama / OpenAI → [docs/semantic-search.md](docs/semantic-search.md)
-- **Multi-repo workspaces** — cross-repo symbol resolution, contract matching, impact analysis, per-session isolation → [docs/multi-repo.md](docs/multi-repo.md)
-- **Speculative execution** — `preview_edit` / `simulate_chain` answer "what would change if I applied this WorkspaceEdit?" without touching disk
-- **Live editor overlays** — push unsaved buffers as a shadow graph; tools read through it. Branching for parallel speculative sessions
-- **GCX1 wire format** — published, round-trippable. **−27 % tokens vs JSON** at same fidelity → [docs/wire-format.md](docs/wire-format.md)
-- **Long-living daemon** — one process serves every IDE window; live fsnotify, on-disk snapshots, sub-second restart, OS-supervised lifecycle
-- **9 LLM providers (optional)** — local llama.cpp, Anthropic, OpenAI, Ollama, Claude / Codex CLI subprocess, Gemini, Bedrock, DeepSeek → [docs/llm.md](docs/llm.md)
-- **HTTP server + Web UI** — versioned `/v1/*` API + MCP 2026 Streamable HTTP; standalone Next.js 15 UI with five 3D graph modes → [docs/server.md](docs/server.md)
-- **Composable safety** — `verify_change`, `check_guards`, `audit_agent_config` flag broken callers, guard violations, stale docs before they ship
-- **PR review, end to end** — `gortex prs` triages open PRs (per-PR blast radius, merge-order conflicts via shared communities, AI-ranked queue, reviewer suggestions); `gortex review` emits line-anchored findings with a BLOCK/REVIEW/APPROVE verdict from a graph-grounded rulepack; MCP tools (`pr_risk`, `get_pr_impact`, `review`, `review_pack`, `post_review`, …) expose it to agents → [docs/cli.md](docs/cli.md)
-- **Agent integrations (16)** — `gortex init` configures every detected coding assistant on the machine → [docs/agents.md](docs/agents.md)
-- **Telemetry off by default** — opt-in anonymous tool/command counts only (no code, paths, names, or exact counts); nothing transmitted unless you configure an endpoint. `gortex telemetry on|off|status`; honours `DO_NOT_TRACK` → [docs/telemetry.md](docs/telemetry.md)
-
-Full catalog of features: [docs/features.md](docs/features.md). Complete CLI reference: [docs/cli.md](docs/cli.md).
 
 ## Cross-Repo API Contracts
 

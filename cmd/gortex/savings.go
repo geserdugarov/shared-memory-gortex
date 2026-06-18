@@ -294,7 +294,7 @@ func emitSavingsDashboard(snap savings.File, buckets []savings.Bucket, modelTota
 	// and priced at that model's real rate.
 	fmt.Println()
 	if tty {
-		fmt.Println("  " + progress.Heading("cost avoided per model (all time)"))
+		fmt.Println("  " + progress.StyleStrong.Render("Cost avoided per model (all time):"))
 	} else {
 		fmt.Println("Cost avoided per model (all time):")
 	}
@@ -334,7 +334,7 @@ func emitSavingsDashboard(snap savings.File, buckets []savings.Bucket, modelTota
 	if len(clientTotals) > 0 {
 		fmt.Println()
 		if tty {
-			fmt.Println("  " + progress.Heading("savings by client (all time)"))
+			fmt.Println("  " + progress.StyleStrong.Render("Savings by client (all time):"))
 		} else {
 			fmt.Println("Savings by client (all time):")
 		}
@@ -485,7 +485,7 @@ func printBucket(title string, bucket map[string]*savings.Totals, tty bool, head
 	}
 	fmt.Println()
 	if tty {
-		fmt.Println("  " + progress.Heading(title))
+		fmt.Println("  " + progress.StyleStrong.Render(title+":"))
 	} else {
 		fmt.Println(title + ":")
 	}

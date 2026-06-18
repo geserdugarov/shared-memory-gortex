@@ -1536,6 +1536,24 @@ func encodeSmartContext(result map[string]any) ([]byte, error) {
 				}
 			}
 		}
+		if conf, ok := inPack["confidence"].(map[string]any); ok && len(conf) > 0 {
+			cEnc := newGCX(&buf, "smart_context.confidence",
+				[]string{"verdict", "top1", "top2", "ratio_top1_top2", "k", "std_dev"},
+			)
+			if err := cEnc.WriteRow(
+				str(conf["verdict"]),
+				conf["top1"],
+				conf["top2"],
+				conf["ratio_top1_top2"],
+				conf["k"],
+				conf["std_dev"],
+			); err != nil {
+				return nil, err
+			}
+			if err := cEnc.Close(); err != nil {
+				return nil, err
+			}
+		}
 	}
 
 	return buf.Bytes(), nil

@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/zzet/gortex/internal/config"
+	"github.com/zzet/gortex/internal/eval/quality"
 	"github.com/zzet/gortex/internal/graph"
 )
 
@@ -181,5 +182,43 @@ func TestSmartContextBoundary(t *testing.T) {
 	}
 	if !strings.Contains(string(out), "smart_context.flow_boundaries") || !strings.Contains(string(out), "dynamicCall") {
 		t.Errorf("GCX missing flow_boundaries:\n%s", out)
+	}
+}
+
+func TestSmartContextConfidence(t *testing.T) {
+	// Sharp top-1 → high (ratio 5.0).
+	high := buildConfidenceVerdict(quality.ConfidenceFromScores("q", []float64{10, 2, 1}))
+	if high == nil || high["verdict"] != "high" {
+		t.Errorf("expected high verdict, got %+v", high)
+	}
+	// Modest lead → medium (ratio 1.3).
+	med := buildConfidenceVerdict(quality.ConfidenceFromScores("q", []float64{1.3, 1.0}))
+	if med == nil || med["verdict"] != "medium" {
+		t.Errorf("expected medium verdict, got %+v", med)
+	}
+	// Flat → low (ratio 1.0).
+	low := buildConfidenceVerdict(quality.ConfidenceFromScores("q", []float64{1.0, 1.0, 1.0}))
+	if low == nil || low["verdict"] != "low" {
+		t.Errorf("expected low verdict, got %+v", low)
+	}
+	// Single candidate → single.
+	one := buildConfidenceVerdict(quality.ConfidenceFromScores("q", []float64{4.2}))
+	if one == nil || one["verdict"] != "single" {
+		t.Errorf("expected single verdict, got %+v", one)
+	}
+	// Empty → nil.
+	if buildConfidenceVerdict(quality.ConfidenceFromScores("q", nil)) != nil {
+		t.Errorf("empty scores should yield nil verdict")
+	}
+
+	// GCX encodes a confidence section.
+	result := map[string]any{"relevant_symbols": []map[string]any{}}
+	addInPackSection(result, "confidence", high)
+	out, err := encodeSmartContext(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(out), "smart_context.confidence") || !strings.Contains(string(out), "high") {
+		t.Errorf("GCX missing confidence section:\n%s", out)
 	}
 }

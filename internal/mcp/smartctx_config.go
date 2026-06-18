@@ -1,9 +1,13 @@
 package mcp
 
 import (
+	"context"
+
 	"github.com/zzet/gortex/internal/callpath"
 	"github.com/zzet/gortex/internal/config"
+	"github.com/zzet/gortex/internal/eval/quality"
 	"github.com/zzet/gortex/internal/graph"
+	"github.com/zzet/gortex/internal/query"
 )
 
 // smartContextSections resolves which in-pack enrichment sections a
@@ -72,6 +76,71 @@ func (s *Server) inPackFlows(symbols []*graph.Node) map[string]any {
 		return nil
 	}
 	return out
+}
+
+// addInPackSection records one section on result["in_pack"], creating the block
+// if it does not exist yet.
+func addInPackSection(result map[string]any, key string, val any) {
+	inPack, _ := result["in_pack"].(map[string]any)
+	if inPack == nil {
+		inPack = map[string]any{}
+	}
+	inPack[key] = val
+	result["in_pack"] = inPack
+}
+
+// inPackConfidence builds the retrieval-confidence verdict for a task: it runs a
+// ranked search for the task and summarises the candidate-score distribution
+// (how sharply the top result beats the rest) into a high/medium/low verdict.
+// Returns nil when the search yields nothing.
+func (s *Server) inPackConfidence(ctx context.Context, task string) map[string]any {
+	eng := s.engineFor(ctx)
+	if eng == nil || task == "" {
+		return nil
+	}
+	cands := eng.SearchSymbolsRanked(task, 10, query.QueryOptions{}, nil)
+	if len(cands) == 0 {
+		return nil
+	}
+	scores := make([]float64, 0, len(cands))
+	for _, c := range cands {
+		if c != nil {
+			scores = append(scores, c.Score)
+		}
+	}
+	return buildConfidenceVerdict(quality.ConfidenceFromScores(task, scores))
+}
+
+// buildConfidenceVerdict reduces a confidence record to the in-pack verdict map.
+// Returns nil for an empty record.
+func buildConfidenceVerdict(rec quality.ConfidenceRecord) map[string]any {
+	if rec.K == 0 {
+		return nil
+	}
+	return map[string]any{
+		"verdict":         confidenceVerdict(rec),
+		"top1":            rec.Top1,
+		"top2":            rec.Top2,
+		"ratio_top1_top2": rec.Ratio12,
+		"k":               rec.K,
+		"std_dev":         rec.StdDev,
+	}
+}
+
+// confidenceVerdict classifies a confidence record: a single candidate is
+// "single", a sharp top-1 (≥2× the runner-up) is "high", a modest lead
+// "medium", and a flat distribution "low" (the ranker is unsure).
+func confidenceVerdict(rec quality.ConfidenceRecord) string {
+	switch {
+	case rec.K <= 1:
+		return "single"
+	case rec.Ratio12 >= 2.0:
+		return "high"
+	case rec.Ratio12 >= 1.25:
+		return "medium"
+	default:
+		return "low"
+	}
 }
 
 // flowSpine greedily walks forward from the focus over resolved CALLS/REFERENCES

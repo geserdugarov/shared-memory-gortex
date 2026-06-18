@@ -104,3 +104,42 @@ end
 	calls := edgesOfKind(result.Edges, graph.EdgeCalls)
 	assert.GreaterOrEqual(t, len(calls), 2)
 }
+
+// TestLuaRobloxInstanceRequires is the C7 test: Roblox / Luau instance-path
+// requires (script.Parent.X, game.Service.X, script:WaitForChild("X")) resolve
+// to import edges keyed by the module leaf, with the full instance path kept on
+// the edge — and the same shared resolver drives both the Lua and Luau
+// extractors. Classic string requires keep working.
+func TestLuaRobloxInstanceRequires(t *testing.T) {
+	src := []byte("local A = require(script.Parent.Module)\n" +
+		"local B = require(game.ReplicatedStorage.Shared.Foo)\n" +
+		"local C = require(script:WaitForChild(\"Bar\"))\n" +
+		"local D = require(\"std.path\")\n")
+
+	check := func(t *testing.T, edges []*graph.Edge) {
+		imports := map[string]string{} // target -> roblox_path
+		for _, e := range edges {
+			if e.Kind == graph.EdgeImports {
+				p := ""
+				if e.Meta != nil {
+					p, _ = e.Meta["roblox_path"].(string)
+				}
+				imports[e.To] = p
+			}
+		}
+		assert.Equal(t, "script.Parent.Module", imports["unresolved::import::Module"], "instance-path leaf + path")
+		assert.Equal(t, "game.ReplicatedStorage.Shared.Foo", imports["unresolved::import::Foo"])
+		assert.Equal(t, "script:WaitForChild(\"Bar\")", imports["unresolved::import::Bar"], "WaitForChild leaf")
+		if _, ok := imports["unresolved::import::std.path"]; !ok {
+			t.Fatalf("classic string require should still resolve; got %v", imports)
+		}
+	}
+
+	lua, err := NewLuaExtractor().Extract("m.lua", src)
+	require.NoError(t, err)
+	t.Run("lua", func(t *testing.T) { check(t, lua.Edges) })
+
+	luau, err := NewLuauExtractor().Extract("m.luau", src)
+	require.NoError(t, err)
+	t.Run("luau", func(t *testing.T) { check(t, luau.Edges) })
+}

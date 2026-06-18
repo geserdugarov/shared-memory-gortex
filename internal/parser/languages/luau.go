@@ -76,13 +76,14 @@ func (e *LuauExtractor) Extract(filePath string, src []byte) (*parser.Extraction
 			// `M.foo = function() ... end` — emit methods too.
 			e.extractAssignmentFunc(child, src, filePath, fileNode, result, seen)
 
-		case "function_call":
-			e.extractTopLevelCall(child, src, filePath, fileNode, result)
-
 		case "type_definition":
 			e.extractType(child, src, filePath, fileNode, result, seen)
 		}
 	}
+
+	// require() imports — classic string and Roblox instance-path forms,
+	// in any position (shared with the Lua extractor).
+	extractLuaRequires(root, src, filePath, fileNode.ID, result)
 
 	// Call sites inside functions.
 	funcRanges := buildFuncRanges(result)
@@ -431,37 +432,6 @@ func (e *LuauExtractor) extractType(
 				FilePath: filePath, Line: startLine,
 			})
 		}
-	}
-}
-
-// extractTopLevelCall handles top-level require() calls as imports.
-func (e *LuauExtractor) extractTopLevelCall(
-	node *sitter.Node, src []byte, filePath string, fileNode *graph.Node,
-	result *parser.ExtractionResult,
-) {
-	funcName := ""
-	arg := ""
-	if fn := node.ChildByFieldName("name"); fn != nil {
-		funcName = strings.TrimSpace(fn.Content(src))
-	}
-	if args := node.ChildByFieldName("arguments"); args != nil {
-		for j := 0; j < int(args.NamedChildCount()); j++ {
-			argNode := args.NamedChild(j)
-			if argNode == nil {
-				continue
-			}
-			if argNode.Type() == "string" {
-				arg = strings.Trim(argNode.Content(src), `"'`)
-				break
-			}
-		}
-	}
-
-	if funcName == "require" && arg != "" {
-		result.Edges = append(result.Edges, &graph.Edge{
-			From: fileNode.ID, To: "unresolved::import::" + arg,
-			Kind: graph.EdgeImports, FilePath: filePath, Line: int(node.StartPoint().Row) + 1,
-		})
 	}
 }
 

@@ -63,12 +63,12 @@ func (e *LuaExtractor) Extract(filePath string, src []byte) (*parser.ExtractionR
 		case "assignment_statement":
 			// `M.foo = function() ... end` — emit methods too.
 			e.extractAssignmentFunc(child, src, filePath, fileNode, result, seen)
-
-		case "function_call":
-			// Top-level calls (require, etc.)
-			e.extractTopLevelCall(child, src, filePath, fileNode, result)
 		}
 	}
+
+	// require() imports — top-level, in a `local x = require(...)` binding, or
+	// nested; classic string and Roblox instance-path forms.
+	extractLuaRequires(root, src, filePath, fileNode.ID, result)
 
 	// Call sites inside functions.
 	funcRanges := buildFuncRanges(result)
@@ -326,37 +326,100 @@ func (e *LuaExtractor) extractAssignmentFunc(
 	}
 }
 
-// extractTopLevelCall handles top-level require() calls as imports.
-func (e *LuaExtractor) extractTopLevelCall(
-	node *sitter.Node, src []byte, filePath string, fileNode *graph.Node,
-	result *parser.ExtractionResult,
-) {
-	// Check if it's require("module"). The new grammar labels the
-	// callee via the `name` field.
-	funcName := ""
-	arg := ""
-	if fn := node.ChildByFieldName("name"); fn != nil {
-		funcName = strings.TrimSpace(fn.Content(src))
-	}
-	if args := node.ChildByFieldName("arguments"); args != nil {
-		for j := 0; j < int(args.NamedChildCount()); j++ {
-			argNode := args.NamedChild(j)
-			if argNode == nil {
-				continue
-			}
-			if argNode.Type() == "string" {
-				arg = strings.Trim(argNode.Content(src), `"'`)
+// extractLuaRequires walks every require() call — top-level, inside a
+// `local x = require(...)` binding, or nested — and emits an import edge. It
+// handles both classic string requires (`require("std.path")`) and Roblox /
+// Luau instance-path requires (`require(script.Parent.Module)`,
+// `require(game.ReplicatedStorage.Shared.Foo)`,
+// `require(script:WaitForChild("Bar"))`), which previous extraction dropped
+// because the argument is an expression, not a string. Shared by the Lua and
+// Luau extractors (resolveLuaRequireTarget is grammar-agnostic).
+func extractLuaRequires(root *sitter.Node, src []byte, filePath, fileID string, result *parser.ExtractionResult) {
+	seen := map[string]bool{}
+	walkNodes(root, func(n *sitter.Node) {
+		if n.Type() != "function_call" {
+			return
+		}
+		callee := n.ChildByFieldName("name")
+		if callee == nil || callee.Type() != "identifier" || callee.Content(src) != "require" {
+			return
+		}
+		args := n.ChildByFieldName("arguments")
+		if args == nil {
+			return
+		}
+		var arg *sitter.Node
+		for i := 0; i < int(args.NamedChildCount()); i++ {
+			if a := args.NamedChild(i); a != nil {
+				arg = a
 				break
 			}
 		}
-	}
+		if arg == nil {
+			return
+		}
+		name, ipath := resolveLuaRequireTarget(arg, src)
+		if name == "" {
+			return
+		}
+		key := name + "\x00" + ipath
+		if seen[key] {
+			return
+		}
+		seen[key] = true
+		edge := &graph.Edge{
+			From: fileID, To: "unresolved::import::" + name,
+			Kind: graph.EdgeImports, FilePath: filePath, Line: int(n.StartPoint().Row) + 1,
+		}
+		if ipath != "" {
+			edge.Meta = map[string]any{"roblox_path": ipath}
+		}
+		result.Edges = append(result.Edges, edge)
+	})
+}
 
-	if funcName == "require" && arg != "" {
-		result.Edges = append(result.Edges, &graph.Edge{
-			From: fileNode.ID, To: "unresolved::import::" + arg,
-			Kind: graph.EdgeImports, FilePath: filePath, Line: int(node.StartPoint().Row) + 1,
-		})
+// resolveLuaRequireTarget resolves a require() argument to (moduleName,
+// instancePath). instancePath is "" for a classic string require; for a Roblox
+// instance-path it is the full traversal expression (kept on the edge so an
+// agent can see `script.Parent.Module`), and moduleName is the leaf the resolver
+// binds by.
+func resolveLuaRequireTarget(arg *sitter.Node, src []byte) (name, ipath string) {
+	switch arg.Type() {
+	case "string":
+		return strings.Trim(arg.Content(src), `"'`+"`"), ""
+	case "dot_index_expression", "bracket_index_expression":
+		// e.g. script.Parent.Module → leaf "Module", path the whole expr.
+		return luaIndexLeaf(arg, src), strings.TrimSpace(arg.Content(src))
+	case "function_call":
+		// e.g. script:WaitForChild("Bar") → leaf is the string argument.
+		if a := arg.ChildByFieldName("arguments"); a != nil {
+			for i := 0; i < int(a.NamedChildCount()); i++ {
+				if s := a.NamedChild(i); s != nil && s.Type() == "string" {
+					return strings.Trim(s.Content(src), `"'`+"`"), strings.TrimSpace(arg.Content(src))
+				}
+			}
+		}
+	case "identifier":
+		// require(modVar) — a local holding the path/instance; use its name.
+		return arg.Content(src), ""
 	}
+	return "", ""
+}
+
+// luaIndexLeaf returns the final component of a dot/bracket index expression
+// (the module name), preferring the grammar's `field` then the last identifier.
+func luaIndexLeaf(n *sitter.Node, src []byte) string {
+	if f := n.ChildByFieldName("field"); f != nil {
+		return strings.TrimSpace(strings.Trim(f.Content(src), `"'[]`+"`"))
+	}
+	leaf := ""
+	for i := 0; i < int(n.NamedChildCount()); i++ {
+		c := n.NamedChild(i)
+		if c.Type() == "identifier" || c.Type() == "string" {
+			leaf = strings.TrimSpace(strings.Trim(c.Content(src), `"'`+"`"))
+		}
+	}
+	return leaf
 }
 
 // extractCalls walks the AST for function_call nodes inside functions.

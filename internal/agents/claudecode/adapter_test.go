@@ -180,6 +180,63 @@ func TestClaudeCodeGlobalModeWritesUserFiles(t *testing.T) {
 	}
 }
 
+func TestClaudeCodeGlobalModeHonorsClaudeConfigDir(t *testing.T) {
+	env, _ := agentstest.NewEnv(t)
+	env.Mode = agents.ModeGlobal
+	env.InstallGlobalInstructions = true
+	configDir := filepath.Join(t.TempDir(), "work-profile")
+	t.Setenv("CLAUDE_CONFIG_DIR", configDir)
+	a := New()
+
+	res, err := a.Apply(env, agents.ApplyOpts{})
+	if err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	if !res.Configured {
+		t.Fatal("expected Configured=true in global mode")
+	}
+
+	expected := []string{
+		filepath.Join(configDir, ".claude.json"),
+		filepath.Join(configDir, "settings.json"),
+		filepath.Join(configDir, "settings.local.json"),
+		filepath.Join(configDir, "CLAUDE.md"),
+	}
+	for name := range SlashCommands {
+		expected = append(expected, filepath.Join(configDir, "commands", name))
+	}
+	for name := range GlobalSkills {
+		expected = append(expected, filepath.Join(configDir, "skills", name, "SKILL.md"))
+	}
+	for name := range SubAgents {
+		expected = append(expected, filepath.Join(configDir, "agents", name))
+	}
+	for _, p := range expected {
+		if _, err := os.Stat(p); err != nil {
+			t.Errorf("missing CLAUDE_CONFIG_DIR artifact %s: %v", p, err)
+		}
+	}
+
+	for _, p := range []string{
+		filepath.Join(env.Home, ".claude.json"),
+		filepath.Join(env.Home, ".claude"),
+	} {
+		if _, err := os.Stat(p); err == nil {
+			t.Errorf("global mode unexpectedly wrote HOME artifact %s", p)
+		}
+	}
+
+	plan, err := a.Plan(env)
+	if err != nil {
+		t.Fatalf("plan: %v", err)
+	}
+	for _, f := range plan.Files {
+		if !strings.HasPrefix(f.Path, configDir+string(os.PathSeparator)) {
+			t.Errorf("planned path %s did not use CLAUDE_CONFIG_DIR %s", f.Path, configDir)
+		}
+	}
+}
+
 // TestClaudeCodeGlobalMode_NoClaudeMd skips the rule block when the
 // caller opts out via InstallGlobalInstructions=false (i.e.
 // `gortex install --no-claude-md`).

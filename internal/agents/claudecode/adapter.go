@@ -57,15 +57,16 @@ func (a *Adapter) Plan(env agents.Env) (*agents.Plan, error) {
 		if env.InstallGlobalInstructions {
 			p.Files = append(p.Files, agents.FileAction{Path: userClaudeMdPath(env.Home), Action: agents.ActionWouldMerge, Keys: []string{"gortex-rules-block"}})
 		}
-		if env.Home != "" {
+		configDir := userClaudeConfigDir(env.Home)
+		if configDir != "" {
 			for name := range GlobalSkills {
-				p.Files = append(p.Files, agents.FileAction{Path: filepath.Join(env.Home, ".claude", "skills", name, "SKILL.md"), Action: agents.ActionWouldCreate})
+				p.Files = append(p.Files, agents.FileAction{Path: filepath.Join(configDir, "skills", name, "SKILL.md"), Action: agents.ActionWouldCreate})
 			}
 			for name := range SlashCommands {
-				p.Files = append(p.Files, agents.FileAction{Path: filepath.Join(env.Home, ".claude", "commands", name), Action: agents.ActionWouldCreate})
+				p.Files = append(p.Files, agents.FileAction{Path: filepath.Join(configDir, "commands", name), Action: agents.ActionWouldCreate})
 			}
 			for name := range SubAgents {
-				p.Files = append(p.Files, agents.FileAction{Path: filepath.Join(env.Home, ".claude", "agents", name), Action: agents.ActionWouldCreate})
+				p.Files = append(p.Files, agents.FileAction{Path: filepath.Join(configDir, "agents", name), Action: agents.ActionWouldCreate})
 			}
 		}
 		return p, nil
@@ -309,7 +310,7 @@ func installPermissions(w io.Writer, settingsPath string, opts agents.ApplyOpts)
 // exist (users may have customised their copy).
 func installGlobalSkills(w io.Writer, home string, opts agents.ApplyOpts) ([]agents.FileAction, error) {
 	out := make([]agents.FileAction, 0, len(GlobalSkills))
-	skillsDir := filepath.Join(home, ".claude", "skills")
+	skillsDir := filepath.Join(userClaudeConfigDir(home), "skills")
 	for name, content := range GlobalSkills {
 		dir := filepath.Join(skillsDir, name)
 		path := filepath.Join(dir, "SKILL.md")
@@ -329,7 +330,7 @@ func installGlobalSkills(w io.Writer, home string, opts agents.ApplyOpts) ([]age
 // `gortex install`.
 func installGlobalSlashCommands(w io.Writer, home string, opts agents.ApplyOpts) ([]agents.FileAction, error) {
 	out := make([]agents.FileAction, 0, len(SlashCommands))
-	dir := filepath.Join(home, ".claude", "commands")
+	dir := filepath.Join(userClaudeConfigDir(home), "commands")
 	for name, content := range SlashCommands {
 		path := filepath.Join(dir, name)
 		action, err := agents.WriteIfNotExists(w, path, content, opts)
@@ -347,7 +348,7 @@ func installGlobalSlashCommands(w io.Writer, home string, opts agents.ApplyOpts)
 // re-installs. Mirrors installGlobalSkills / installGlobalSlashCommands.
 func installGlobalSubAgents(w io.Writer, home string, opts agents.ApplyOpts) ([]agents.FileAction, error) {
 	out := make([]agents.FileAction, 0, len(SubAgents))
-	dir := filepath.Join(home, ".claude", "agents")
+	dir := filepath.Join(userClaudeConfigDir(home), "agents")
 	for name, content := range SubAgents {
 		path := filepath.Join(dir, name)
 		action, err := agents.WriteIfNotExists(w, path, content, opts)
@@ -404,11 +405,14 @@ func upsertGlobalMCPConfig(w io.Writer, path string, opts agents.ApplyOpts) (age
 // Paths — user-level files.
 
 func userClaudeJSONPath(home string) string {
+	if dir := claudeConfigDirOverride(); dir != "" {
+		return filepath.Join(dir, ".claude.json")
+	}
 	return filepath.Join(home, ".claude.json")
 }
 
 func userSettingsLocalPath(home string) string {
-	return filepath.Join(home, ".claude", "settings.local.json")
+	return filepath.Join(userClaudeConfigDir(home), "settings.local.json")
 }
 
 // userSettingsPath is the user-level counterpart to
@@ -416,14 +420,25 @@ func userSettingsLocalPath(home string) string {
 // in settings.local.json) so they survive when the user wipes the
 // "local" overrides file.
 func userSettingsPath(home string) string {
-	return filepath.Join(home, ".claude", "settings.json")
+	return filepath.Join(userClaudeConfigDir(home), "settings.json")
 }
 
 // userClaudeMdPath is the machine-wide CLAUDE.md Claude Code reads on
 // every session, regardless of cwd. We merge a marker-fenced rule
 // block into it so the agent sees the Gortex rules from turn one.
 func userClaudeMdPath(home string) string {
-	return filepath.Join(home, ".claude", "CLAUDE.md")
+	return filepath.Join(userClaudeConfigDir(home), "CLAUDE.md")
+}
+
+func userClaudeConfigDir(home string) string {
+	if dir := claudeConfigDirOverride(); dir != "" {
+		return dir
+	}
+	return filepath.Join(home, ".claude")
+}
+
+func claudeConfigDirOverride() string {
+	return strings.TrimSpace(os.Getenv("CLAUDE_CONFIG_DIR"))
 }
 
 func logf(w io.Writer, format string, args ...any) {

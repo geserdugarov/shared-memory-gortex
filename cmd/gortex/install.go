@@ -26,6 +26,7 @@ var (
 	installYes         bool
 	installInteractive bool
 	installAgents      string
+	installPrintConfig string
 	installAgentsSkip  string
 	installJSON        bool
 	installDryRun      bool
@@ -76,6 +77,7 @@ func init() {
 	installCmd.Flags().StringVar(&installTrackPath, "track-path", ".", "repository to track when --track is set (default: current directory)")
 	installCmd.Flags().BoolVar(&installTelemetry, "telemetry", false, "opt in to anonymous usage telemetry (tool/command counts only; off by default)")
 	installCmd.Flags().BoolVar(&installNoTelemetry, "no-telemetry", false, "explicitly opt out of anonymous usage telemetry")
+	installCmd.Flags().StringVar(&installPrintConfig, "print-config", "", "print the config a single agent would install (JSON, zero writes) and exit")
 
 	rootCmd.AddCommand(installCmd)
 }
@@ -94,6 +96,15 @@ func runInstall(cmd *cobra.Command, _ []string) (err error) {
 	}
 	if home == "" {
 		return fmt.Errorf("gortex install needs a home directory; $HOME is empty")
+	}
+
+	// --print-config <agent>: a zero-write dry-run of one adapter's planned
+	// config, as JSON, then exit. Useful for "what would `gortex install`
+	// write for cursor?" without touching disk.
+	if installPrintConfig != "" {
+		root, _ := filepath.Abs(".")
+		return agents.PrintConfig(cmd.OutOrStdout(), buildRegistry(), installPrintConfig,
+			agents.Env{Root: root, Home: home, Mode: agents.ModeGlobal})
 	}
 
 	// Machine-global telemetry choice. An explicit --telemetry / --no-telemetry

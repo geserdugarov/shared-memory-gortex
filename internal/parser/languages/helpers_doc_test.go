@@ -200,3 +200,52 @@ func TestVisibilityFromModifiers(t *testing.T) {
 		}
 	}
 }
+
+// TestDocCommentWrapperClimb covers F16's wrapper-climb: the doc-comment scan
+// skips a decorator / export wrapper line that sits between the doc and the
+// declaration, and the new dash-comment family (Lua) is stripped.
+func TestDocWrapperClimb(t *testing.T) {
+	t.Run("climbs_past_decorator", func(t *testing.T) {
+		// row0=// doc, row1=@Component, row2=class Foo (startRow0=2)
+		src := []byte("// the widget component\n@Component\nclass Foo {}\n")
+		if got := ExtractDocAbove(src, 2, DocLangSlashSlash); got != "the widget component" {
+			t.Errorf("decorator climb = %q, want %q", got, "the widget component")
+		}
+	})
+
+	t.Run("climbs_past_export_keyword", func(t *testing.T) {
+		src := []byte("// the public constant\nexport\nconst X = 1\n")
+		if got := ExtractDocAbove(src, 2, DocLangSlashSlash); got != "the public constant" {
+			t.Errorf("export climb = %q, want %q", got, "the public constant")
+		}
+	})
+
+	t.Run("python_decorator_climb", func(t *testing.T) {
+		src := []byte("# the route handler\n@app.route(\"/\")\ndef handler():\n")
+		if got := ExtractDocAbove(src, 2, DocLangHash); got != "the route handler" {
+			t.Errorf("python decorator climb = %q, want %q", got, "the route handler")
+		}
+	})
+
+	t.Run("lua_dash_comment", func(t *testing.T) {
+		src := []byte("-- the lua function\nfunction f() end\n")
+		if got := ExtractDocAbove(src, 1, DocLangDashDash); got != "the lua function" {
+			t.Errorf("lua -- = %q, want %q", got, "the lua function")
+		}
+	})
+
+	t.Run("lua_triple_dash_doc", func(t *testing.T) {
+		src := []byte("--- the documented function\nfunction g() end\n")
+		if got := ExtractDocAbove(src, 1, DocLangDashDash); got != "the documented function" {
+			t.Errorf("lua --- = %q, want %q", got, "the documented function")
+		}
+	})
+
+	t.Run("no_false_climb_on_real_code", func(t *testing.T) {
+		// A non-wrapper code line between the comment and the decl terminates.
+		src := []byte("// unrelated comment\nsomeRealCode()\nfunc Bar() {}\n")
+		if got := ExtractDocAbove(src, 2, DocLangSlashSlash); got != "" {
+			t.Errorf("must not climb past real code; got %q", got)
+		}
+	})
+}

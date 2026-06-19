@@ -183,15 +183,30 @@ func upsertGlobalConfig(w io.Writer, path, command, hookMode string, installHook
 		if err != nil {
 			return false, err
 		}
+		// Enable the gortex CLI platform toolset so the agent can shell the
+		// gortex verbs alongside the MCP server.
+		toolsetChanged, err := enablePlatformToolsetCLI(root, opts.Force)
+		if err != nil {
+			return false, err
+		}
 		if !installHooks {
-			return serverChanged, nil
+			return serverChanged || toolsetChanged, nil
 		}
 		hooksChanged, err := upsertGortexHooks(root, hookMode, opts.Force)
 		if err != nil {
 			return false, err
 		}
-		return serverChanged || hooksChanged, nil
+		return serverChanged || toolsetChanged || hooksChanged, nil
 	}, opts)
+}
+
+// enablePlatformToolsetCLI ensures Hermes' `platform_toolsets.cli` toolset is
+// turned on, so the gortex CLI verbs the agent can shell out to are available
+// alongside the MCP server. force overwrites an explicit user value; otherwise
+// an existing entry is left untouched.
+func enablePlatformToolsetCLI(root *yaml.Node, force bool) (bool, error) {
+	return agents.UpsertYAMLMapEntry(root, "platform_toolsets", "cli",
+		&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!bool", Value: "true"}, force)
 }
 
 // hermesHookModeLabel renders the posture name for the install log,

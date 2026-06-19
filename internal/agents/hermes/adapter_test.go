@@ -362,3 +362,24 @@ func TestHermesDryRunWritesNothing(t *testing.T) {
 		t.Error("dry-run wrote the skill")
 	}
 }
+
+// TestHermesToolsetEnable proves F16's platform_toolsets.cli enablement: the
+// gortex CLI toolset is turned on in the Hermes global config.
+func TestHermesToolsetEnable(t *testing.T) {
+	root := &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map"}
+	changed, err := enablePlatformToolsetCLI(root, false)
+	if err != nil {
+		t.Fatalf("enablePlatformToolsetCLI: %v", err)
+	}
+	if !changed {
+		t.Fatal("enabling the cli toolset on an empty config must report a change")
+	}
+	pt := agents.YAMLMapValue(root, "platform_toolsets")
+	if pt == nil {
+		t.Fatal("platform_toolsets mapping must be created")
+	}
+	cli := agents.YAMLMapValue(pt, "cli")
+	if cli == nil || cli.Value != "true" {
+		t.Fatalf("platform_toolsets.cli = %v, want scalar true", cli)
+	}
+}

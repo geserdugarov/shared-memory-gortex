@@ -5,6 +5,8 @@ mcp_servers:
     args: [mcp]
     connect_timeout: 60
     timeout: 120
+platform_toolsets:
+  cli: true
 === home/.hermes/skills/analysis/gortex-architecture-review/SKILL.md ===
 ---
 name: gortex-architecture-review

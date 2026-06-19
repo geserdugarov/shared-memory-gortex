@@ -30,7 +30,42 @@ const (
 	DocLangHash
 	// DocLangCSharpXML strips C# XML doc markers (/// <summary>...).
 	DocLangCSharpXML
+	// DocLangDashDash strips a leading "--" (and optional space). Captures
+	// Lua (-- / ---), SQL, Haskell, and Ada line comments above a
+	// declaration. Pascal/Delphi `//` doc comments are served by
+	// DocLangSlashSlash; this adds the dash-comment family.
+	DocLangDashDash
 )
+
+// docWrapperKeywords are the leading tokens of a "wrapper" line that sits
+// between a doc comment and the real declaration — export / visibility
+// modifiers the doc lives above. Matched as a whole line or as a leading word.
+var docWrapperKeywords = []string{
+	"export", "export default", "default",
+	"public", "private", "protected", "internal", "pub",
+	"module.exports", "abstract", "final",
+}
+
+// isDocWrapperLine reports whether a non-comment line is a declaration wrapper
+// the doc-comment climb should skip over (rather than terminate on) when no
+// comment has been collected yet: a decorator / annotation (`@Component`,
+// `@app.route(...)`, `@dataclass`) or an export / visibility keyword that
+// commonly sits on its own line between the doc and the declaration.
+func isDocWrapperLine(trimmed []byte) bool {
+	if len(trimmed) == 0 {
+		return false
+	}
+	if trimmed[0] == '@' { // decorator / annotation
+		return true
+	}
+	s := string(trimmed)
+	for _, w := range docWrapperKeywords {
+		if s == w || strings.HasPrefix(s, w+" ") {
+			return true
+		}
+	}
+	return false
+}
 
 // ExtractDocAbove walks upward from startRow0 collecting contiguous
 // comment lines that sit above the declaration, and returns the first
@@ -94,6 +129,7 @@ func ExtractDocAbove(src []byte, startRow0 int, lang docCommentLang) string {
 		tripleSlash = []byte("///")
 		blockEnd    = []byte("*/")
 		blockStart  = []byte("/**")
+		dashDash    = []byte("--")
 	)
 
 	// Walk upward from the line just above the declaration. `end`
@@ -122,6 +158,9 @@ func ExtractDocAbove(src []byte, startRow0 int, lang docCommentLang) string {
 			if bytes.HasPrefix(trimmed, slashSlash) {
 				collected = append(collected, stripLineCommentPrefixBytes(trimmed, slashSlash))
 				continue
+			}
+			if len(collected) == 0 && isDocWrapperLine(trimmed) {
+				continue // climb past a decorator / export wrapper to the doc
 			}
 			goto done
 
@@ -169,6 +208,9 @@ func ExtractDocAbove(src []byte, startRow0 int, lang docCommentLang) string {
 				collected = append(collected, stripLineCommentPrefixBytes(trimmed, slashSlash))
 				continue
 			}
+			if len(collected) == 0 && isDocWrapperLine(trimmed) {
+				continue
+			}
 			goto done
 
 		case DocLangHash:
@@ -182,6 +224,25 @@ func ExtractDocAbove(src []byte, startRow0 int, lang docCommentLang) string {
 				collected = append(collected, stripLineCommentPrefixBytes(trimmed, hash))
 				continue
 			}
+			if len(collected) == 0 && isDocWrapperLine(trimmed) {
+				continue
+			}
+			goto done
+
+		case DocLangDashDash:
+			if len(trimmed) == 0 {
+				if len(collected) == 0 {
+					continue
+				}
+				goto done
+			}
+			if bytes.HasPrefix(trimmed, dashDash) {
+				collected = append(collected, stripDashCommentBytes(trimmed))
+				continue
+			}
+			if len(collected) == 0 && isDocWrapperLine(trimmed) {
+				continue
+			}
 			goto done
 
 		case DocLangCSharpXML:
@@ -193,6 +254,9 @@ func ExtractDocAbove(src []byte, startRow0 int, lang docCommentLang) string {
 			}
 			if bytes.HasPrefix(trimmed, tripleSlash) {
 				collected = append(collected, stripCSharpXMLLineBytes(trimmed))
+				continue
+			}
+			if len(collected) == 0 && isDocWrapperLine(trimmed) {
 				continue
 			}
 			goto done
@@ -294,6 +358,16 @@ func stripLineCommentPrefixBytes(line, prefix []byte) string {
 func stripBlockStarLineBytes(line []byte) string {
 	s := bytes.TrimSpace(line)
 	s = bytes.TrimPrefix(s, []byte("*"))
+	s = bytes.TrimPrefix(s, []byte(" "))
+	return string(s)
+}
+
+// stripDashCommentBytes strips a leading "--" (Lua/SQL/Haskell/Ada line
+// comment), the optional extra "-" of Lua's "---" doc form, and a trailing
+// space, returning a freshly allocated string.
+func stripDashCommentBytes(line []byte) string {
+	s := bytes.TrimPrefix(line, []byte("--"))
+	s = bytes.TrimPrefix(s, []byte("-"))
 	s = bytes.TrimPrefix(s, []byte(" "))
 	return string(s)
 }

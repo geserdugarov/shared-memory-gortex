@@ -296,6 +296,13 @@ func TestLSP_Enrich_DocLifecyclePairedAndBounded(t *testing.T) {
 
 	require.NoError(t, runEnrich(t, p, g, repoRoot, 10*time.Second))
 
+	// The instrumented server reads the message stream asynchronously, so
+	// wait for it to drain every didOpen/didClose before sampling counts.
+	require.Eventually(t, func() bool {
+		_, o, c := server.stats()
+		return o == nFiles && c == nFiles
+	}, 2*time.Second, 5*time.Millisecond, "server should drain all didOpen/didClose")
+
 	peak, opens, closes := server.stats()
 	assert.Equal(t, opens, closes, "every didOpen must be matched by a didClose (opens=%d closes=%d)", opens, closes)
 	assert.Equal(t, nFiles, opens, "expected one didOpen per distinct file")
@@ -331,6 +338,12 @@ func TestLSP_Enrich_DocClosedEvenOnHoverError(t *testing.T) {
 	defer cleanup()
 
 	require.NoError(t, runEnrich(t, p, g, repoRoot, 10*time.Second))
+
+	// Wait for the async server to drain the message stream before sampling.
+	require.Eventually(t, func() bool {
+		_, o, c := server.stats()
+		return o == nFiles && c == nFiles
+	}, 2*time.Second, 5*time.Millisecond, "server should drain all didOpen/didClose")
 
 	_, opens, closes := server.stats()
 	assert.Equal(t, opens, closes, "didClose must fire even when hover errors (opens=%d closes=%d)", opens, closes)
@@ -531,6 +544,12 @@ func TestLSP_Enrich_ReopensDocsOnNewServerAfterReconnect(t *testing.T) {
 	p.maxDialBackoff = 5 * time.Millisecond
 
 	require.NoError(t, runEnrich(t, p, g, repoRoot, 15*time.Second))
+
+	// Wait for the fresh server to drain its didOpen/didClose before sampling.
+	require.Eventually(t, func() bool {
+		_, o, c := server2.stats()
+		return o >= 1 && o == c
+	}, 2*time.Second, 5*time.Millisecond, "fresh server should drain its didOpen/didClose")
 
 	_, opens2, closes2 := server2.stats()
 	assert.GreaterOrEqual(t, opens2, 1,

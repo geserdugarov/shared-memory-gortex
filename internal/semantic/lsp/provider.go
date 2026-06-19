@@ -438,6 +438,30 @@ func (p *Provider) EnrichRepo(g graph.Store, repoPrefix, repoRoot string) (*sema
 		ft.nodes = append(ft.nodes, n)
 	}
 
+	// Call- and type-hierarchy hops are collected during the concurrent
+	// per-file phase (while each file is open) and applied to the graph
+	// afterwards, so the graph mutations stay single-threaded like the
+	// hover stamps while each file is still opened exactly once per pass.
+	type callHop struct {
+		n          *graph.Node
+		other      CallHierarchyItem
+		asOutgoing bool
+	}
+	type typeHop struct {
+		n           *graph.Node
+		other       TypeHierarchyItem
+		asSupertype bool
+	}
+	var callHops []callHop
+	var typeHops []typeHop
+
+	// Only interrogate the server for call / type hierarchy when it
+	// advertised the capability. Skipping otherwise avoids the
+	// "non-added document" / method-not-found churn against servers (or
+	// languages) that do not implement it.
+	callHierOK := p.Supports("textDocument/prepareCallHierarchy")
+	typeHierOK := p.Supports("textDocument/prepareTypeHierarchy")
+
 	// fileSem bounds the number of simultaneously-open documents; hoverSem
 	// bounds concurrent hovers across all open files. Both at maxParallel:
 	// holding a file open never consumes a hover slot, so one file with
@@ -599,6 +623,68 @@ func (p *Provider) EnrichRepo(g graph.Store, repoPrefix, repoRoot string) (*sema
 				}(n)
 			}
 			nodeWg.Wait()
+
+			// While the file is still open on the server, interrogate it for
+			// call- and type-hierarchy edges the AST extractor may have missed.
+			// Running here (not in a later pass) means the document is already
+			// added — prepare* would otherwise fail with "non-added document" —
+			// while keeping exactly one didOpen per file. Raw hops are
+			// collected; the graph mutation runs single-threaded after wg.Wait.
+			if !aborted.Load() && (callHierOK || typeHierOK) {
+				var cHops []callHop
+				var tHops []typeHop
+				for _, n := range ft.nodes {
+					col := identifierColumn(content, n.StartLine, n.Name)
+					switch n.Kind {
+					case graph.KindFunction, graph.KindMethod:
+						if !callHierOK {
+							continue
+						}
+						items, err := p.prepareCallHierarchy(absRoot, ft.rel, n.StartLine-1, col)
+						if err != nil {
+							continue
+						}
+						for _, item := range items {
+							if outs, oerr := p.outgoingCalls(item); oerr == nil {
+								for _, oc := range outs {
+									cHops = append(cHops, callHop{n: n, other: oc.To, asOutgoing: true})
+								}
+							}
+							if ins, ierr := p.incomingCalls(item); ierr == nil {
+								for _, ic := range ins {
+									cHops = append(cHops, callHop{n: n, other: ic.From, asOutgoing: false})
+								}
+							}
+						}
+					case graph.KindType, graph.KindInterface:
+						if !typeHierOK {
+							continue
+						}
+						items, err := p.prepareTypeHierarchy(absRoot, ft.rel, n.StartLine-1, col)
+						if err != nil {
+							continue
+						}
+						for _, item := range items {
+							if sups, serr := p.supertypes(item); serr == nil {
+								for _, s := range sups {
+									tHops = append(tHops, typeHop{n: n, other: s, asSupertype: true})
+								}
+							}
+							if subs, serr := p.subtypes(item); serr == nil {
+								for _, s := range subs {
+									tHops = append(tHops, typeHop{n: n, other: s, asSupertype: false})
+								}
+							}
+						}
+					}
+				}
+				if len(cHops) > 0 || len(tHops) > 0 {
+					mu.Lock()
+					callHops = append(callHops, cHops...)
+					typeHops = append(typeHops, tHops...)
+					mu.Unlock()
+				}
+			}
 		}(ft)
 	}
 	wg.Wait()
@@ -672,18 +758,17 @@ func (p *Provider) EnrichRepo(g graph.Store, repoPrefix, repoRoot string) (*sema
 		}
 	}
 
-	// Call hierarchy: ask gopls/jdtls/rust-analyzer/... for
-	// outgoing calls per indexed function and use them to promote
-	// existing call edges to lsp_resolved (or add edges that AST
-	// extraction missed when the callee is in another file).
-	p.enrichCallHierarchy(g, repoPrefix, absRoot, result)
-
-	// Type hierarchy: ask the server for super- and sub-types of
-	// each indexed type/interface and emit EdgeExtends /
-	// EdgeImplements / EdgeComposes — the single biggest non-Go
-	// win because the AST extractor handles interface and type
-	// inheritance with very low fidelity outside Go.
-	p.enrichTypeHierarchy(g, repoPrefix, absRoot, result)
+	// Apply the call- and type-hierarchy hops collected while each file was
+	// open. Single-threaded: recordHierarchyCall / linkTypeHierarchy mutate
+	// the graph — promoting AST-missed call edges to lsp_resolved, or adding
+	// the cross-file call / extends / implements edges the AST extractor
+	// could not follow (the single biggest non-Go win).
+	for _, h := range callHops {
+		p.recordHierarchyCall(g, repoPrefix, absRoot, h.n, h.other, h.asOutgoing, result)
+	}
+	for _, h := range typeHops {
+		p.linkTypeHierarchy(g, repoPrefix, absRoot, h.n, h.other, h.asSupertype, result)
+	}
 
 	// Query references for AMBIGUOUS edges to confirm/refute.
 	for _, t := range targets {
@@ -1583,42 +1668,6 @@ func (p *Provider) Source(repoRoot, relPath string) []byte {
 	return p.getSource(repoRoot, relPath)
 }
 
-// enrichCallHierarchy walks every function/method node in p.languages
-// and uses callHierarchy/{prepare, outgoingCalls} to either promote a
-// matching ast_inferred / text_matched EdgeCalls to lsp_resolved, or
-// add a fresh EdgeCalls when the AST extractor missed the link
-// (cross-file calls in languages without compile-unit info).
-func (p *Provider) enrichCallHierarchy(g graph.Store, repoPrefix, absRoot string, result *semantic.EnrichResult) {
-	for _, n := range g.AllNodes() {
-		if n.Kind != graph.KindFunction && n.Kind != graph.KindMethod {
-			continue
-		}
-		if n.RepoPrefix != repoPrefix || !p.languageMatches(n.Language) {
-			continue
-		}
-		rel := nodeRelPath(n)
-		col := identifierColumn(p.getSource(absRoot, rel), n.StartLine, n.Name)
-		items, err := p.prepareCallHierarchy(absRoot, rel, n.StartLine-1, col)
-		if err != nil || len(items) == 0 {
-			continue
-		}
-		for _, item := range items {
-			calls, err := p.outgoingCalls(item)
-			if err == nil {
-				for _, c := range calls {
-					p.recordHierarchyCall(g, repoPrefix, absRoot, n, c.To, true, result)
-				}
-			}
-			incoming, err := p.incomingCalls(item)
-			if err == nil {
-				for _, c := range incoming {
-					p.recordHierarchyCall(g, repoPrefix, absRoot, n, c.From, false, result)
-				}
-			}
-		}
-	}
-}
-
 // recordHierarchyCall lands one call-hierarchy hop into the graph.
 // asOutgoing=true means "this node calls other"; false means "other
 // calls this node" (incoming-calls direction). Existing edges get
@@ -1652,43 +1701,6 @@ func (p *Provider) recordHierarchyCall(g graph.Store, repoPrefix, absRoot string
 	semantic.AddSemanticEdge(g, from.ID, to.ID, graph.EdgeCalls,
 		from.FilePath, from.StartLine, p.Name())
 	result.EdgesAdded++
-}
-
-// enrichTypeHierarchy walks every type / interface node and uses
-// typeHierarchy/{prepare, supertypes, subtypes} to fill EdgeExtends
-// / EdgeImplements / EdgeComposes for non-Go languages where AST
-// extraction can't follow `extends X` / `implements I` across files.
-//
-//   - supertypes(T) = the parents T extends/implements. Emits
-//     EdgeExtends T → super for class hierarchy and EdgeImplements
-//     T → super when the super is an interface kind.
-//   - subtypes(T) = the children of T. Emits EdgeImplements child
-//     → T when T is an interface; EdgeExtends otherwise.
-func (p *Provider) enrichTypeHierarchy(g graph.Store, repoPrefix, absRoot string, result *semantic.EnrichResult) {
-	for _, n := range g.AllNodes() {
-		if n.Kind != graph.KindType && n.Kind != graph.KindInterface {
-			continue
-		}
-		if n.RepoPrefix != repoPrefix || !p.languageMatches(n.Language) {
-			continue
-		}
-		rel := nodeRelPath(n)
-		col := identifierColumn(p.getSource(absRoot, rel), n.StartLine, n.Name)
-		items, err := p.prepareTypeHierarchy(absRoot, rel, n.StartLine-1, col)
-		if err != nil || len(items) == 0 {
-			continue
-		}
-		for _, item := range items {
-			supers, _ := p.supertypes(item)
-			for _, s := range supers {
-				p.linkTypeHierarchy(g, repoPrefix, absRoot, n, s, true, result)
-			}
-			subs, _ := p.subtypes(item)
-			for _, s := range subs {
-				p.linkTypeHierarchy(g, repoPrefix, absRoot, n, s, false, result)
-			}
-		}
-	}
 }
 
 // linkTypeHierarchy emits the right edge kind for one super/subtype

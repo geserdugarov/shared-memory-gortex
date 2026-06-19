@@ -119,6 +119,13 @@ func providerWithFakeServer(t *testing.T, server *fakeLSPServer, languages []str
 
 	p := NewProvider("fake-lsp", nil, languages, false, 0, zap.NewNop())
 	p.client = c // skip ensureClient — the client is already wired.
+	// The wired client skips the initialize handshake, so advertise the
+	// capabilities the fake server can answer; capability-gated dispatch
+	// sites (call / type hierarchy) only fire when the server announced them.
+	p.caps = ServerCapabilities{
+		CallHierarchyProvider: true,
+		TypeHierarchyProvider: true,
+	}
 	return p, cleanup
 }
 

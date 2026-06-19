@@ -818,6 +818,9 @@ func (s *Server) handleGetSymbolSource(ctx context.Context, req mcp.CallToolRequ
 	if resolveErr != nil {
 		return mcp.NewToolResultError(resolveErr.Error()), nil
 	}
+	if guardErr := s.guardSymlinkWithinRepo(absPath); guardErr != nil {
+		return mcp.NewToolResultError(guardErr.Error()), nil
+	}
 
 	source, startLine, totalFileChars, err := s.readLinesForCtx(ctx, absPath, node.StartLine, node.EndLine, contextLines)
 	if err != nil {

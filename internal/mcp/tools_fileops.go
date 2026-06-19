@@ -242,6 +242,62 @@ func pathContainedIn(abs, root string) bool {
 	return true
 }
 
+// guardSymlinkWithinRepo refuses to serve a file whose REAL (symlink-resolved)
+// location is outside every tracked repository root. resolveFilePath /
+// resolveNodePath already block lexical `../` traversal, but a symlink INSIDE
+// the repo can still point at an arbitrary file on disk (repo/link ->
+// /etc/passwd) that os.ReadFile would happily follow. This closes that hole by
+// resolving the real path and requiring it to stay within an indexed root.
+// Roots are symlink-resolved too, so a repo under a symlinked prefix (macOS
+// /tmp -> /private/tmp, a temp-dir test root) still matches. A broken / missing
+// target, or a control client with no known roots, is left to the normal read
+// path — there is nothing to leak.
+func (s *Server) guardSymlinkWithinRepo(absPath string) error {
+	roots := s.guardRepoRoots()
+	if len(roots) == 0 {
+		return nil // no known roots (control client / unindexed) — nothing to enforce
+	}
+	real, err := filepath.EvalSymlinks(absPath)
+	if err != nil {
+		// Unresolvable (broken symlink / not-yet-created file): fall back to the
+		// lexical path so an in-repo miss still reaches the normal not-found
+		// error, while an out-of-repo miss is still refused here.
+		real = filepath.Clean(absPath)
+	}
+	for _, root := range roots {
+		if pathContainedIn(real, root) {
+			return nil
+		}
+	}
+	return fmt.Errorf("%w: %q resolves to %q, outside every indexed repository root", errPathEscape, absPath, real)
+}
+
+// guardRepoRoots returns the symlink-resolved root paths of every tracked repo
+// (multi-repo) plus the lone indexer (single-repo), for guardSymlinkWithinRepo.
+func (s *Server) guardRepoRoots() []string {
+	var roots []string
+	add := func(root string) {
+		if root == "" {
+			return
+		}
+		if real, err := filepath.EvalSymlinks(root); err == nil {
+			root = real
+		}
+		roots = append(roots, filepath.Clean(root))
+	}
+	if s.multiIndexer != nil {
+		for _, prefix := range s.multiIndexer.RepoPrefixes() {
+			if root, ok := s.multiIndexer.RepoRoot(prefix); ok {
+				add(root)
+			}
+		}
+	}
+	if s.indexer != nil {
+		add(s.indexer.RootPath())
+	}
+	return roots
+}
+
 // resolveNodePath returns the absolute filesystem path for a graph node.
 // Uses node.RepoPrefix to find the owning repo's root in multi-repo mode;
 // falls back to the lone indexer's RootPath in single-repo mode. Returns an
@@ -847,6 +903,9 @@ func (s *Server) handleReadFile(ctx context.Context, req mcp.CallToolRequest) (*
 	absPath, relPath, resolveErr := s.resolveFilePath(rawPath)
 	if resolveErr != nil {
 		return mcp.NewToolResultError(resolveErr.Error()), nil
+	}
+	if guardErr := s.guardSymlinkWithinRepo(absPath); guardErr != nil {
+		return mcp.NewToolResultError(guardErr.Error()), nil
 	}
 	info, statErr := os.Stat(absPath)
 	if statErr != nil {

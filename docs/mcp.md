@@ -48,6 +48,8 @@ By default the server ships a curated **`core`** preset in **`defer`** mode (see
 
 Returned tools are auto-promoted (`promote:false` opts out) and the server fires `notifications/tools/list_changed`. The `tool_profile` tool reports the active surface — which tools are live vs. deferred, their scopes and categories, the active preset (below), and (with a `tool` argument) a single tool's enabled status.
 
+**Two front doors over one set of handlers.** The same tool handlers back both the MCP transport and the `gortex` CLI. The daemon routes a tool call **by name** over its socket, independent of which tools a given client eagerly published in `tools/list` — so the CLI reaches the **full** surface, including tools that are deferred under the `core` preset, with no `tools_search` round-trip. `gortex call <tool>` invokes any tool by name, and the dedicated CLI verb groups (`gortex edit …`, `gortex memory …`, `gortex analyze`, `gortex flow` / `taint` / `clones` / `feedback`) are ergonomic front-ends over the most-used tools. Driving Gortex through those verbs mounts no tool schemas into the model's context — see [`cli.md`](cli.md#full-tool-surface-from-the-cli) and the consumption-path trade-off in [`cli.md`](cli.md#choosing-a-consumption-path).
+
 ## Restricting the tool surface (presets)
 
 The full ~180-tool surface is more than many agents need. A **tool preset** picks what the server publishes — the basis both for the lean shipped default and for a minimal, headless editing harness (an agent on a trusted box driving a remote daemon through a small, fixed tool set).

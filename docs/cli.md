@@ -124,6 +124,160 @@ gortex review --base main --post --pr 1234   # post the gated findings as inline
 
 The deterministic correctness rulepack always runs (graph-grounded to drop false positives); `--use-llm` adds LLM findings relocated to exact lines. Posting to a public / fork PR is opt-in via `--confirm-public`; `--dry-run` prints the already-redacted payloads without any network call. The same surface is exposed to agents over MCP — see [mcp.md](mcp.md#pr-review).
 
+## Full tool surface from the CLI
+
+The verbs below give the `gortex` CLI parity with the daemon's MCP tool surface — the same handlers back both front doors. Each verb is a thin shell over one MCP tool on the daemon that owns the repo, so a skill (or a shell script) can drive the whole graph-query, edit-safety, and memory workflow with **no MCP transport mounted and no tool schemas loaded into the model's context**. Every group accepts `--index`/`--repo <path>` (default `.`) to name the repository the daemon must track, and `--format` to pick the wire format.
+
+Because the daemon dispatches a tool call **by name** regardless of which tools are eagerly published, every MCP tool is reachable from the CLI even under the lean `core` preset — including tools that are otherwise [deferred behind `tools_search`](mcp.md#tool-discovery-lazy-mode). `gortex call <tool>` is the generic escape hatch; the dedicated verb groups are ergonomic front-ends over the most-used tools.
+
+### Shared structured-input convention
+
+The edit verbs that take a JSON-shaped parameter (an array of changes, a WorkspaceEdit, a steps/edits array, a ranges array) accept it three interchangeable ways — pick whichever suits the caller:
+
+- **inline** — `--<name> '<json>'` (e.g. `--workspace-edit '{…}'`)
+- **file** — `--<name>-file <path>` (e.g. `--edits-file ./edits.json`)
+- **stdin** — `--<name> -` (a lone `-` reads the JSON from stdin)
+
+The bytes are validated as well-formed JSON before the call. The same `inline / -file / -` triad covers `verify`'s `--changes`, `preview`/`contract`'s `--workspace-edit`, `simulate`'s `--steps`, `batch`'s `--edits`, and `contract`'s `--ranges`.
+
+### `--arg` coercion (`call` and `analyze`)
+
+`gortex call` and `gortex analyze` assemble their argument object from `--arg key=value` pairs (repeatable). Coercion is deterministic:
+
+| Token | Lowered value |
+|---|---|
+| `key=true` / `key=false` | bool |
+| `key=42` / `key=1.5` | number |
+| `key=null` | null |
+| `key=[…]` / `key={…}` | parsed JSON array / object (falls back to the literal string if it doesn't parse) |
+| `key:=<raw>` | the right-hand side is parsed as raw JSON — `version:="1.0"` stays the **string** `"1.0"` |
+| `key=` | the empty string |
+| anything else | string |
+
+Repeating a key replaces the earlier value. For `call`, a base object can also come from `--json '<obj>'`, `--json-file <path>`, or `--json -` (stdin); precedence is **file < `--json` < `--arg`** (last wins per key).
+
+### `gortex call <tool>` — invoke any tool by name
+
+The generic relay: invoke any tool the daemon's MCP surface registers, even one with no dedicated verb. Best-effort name validation runs against the live catalog (an unknown name lists the nearest matches and points at `gortex tools search`); calling a mutating tool prints a one-line stderr note unless `--quiet`.
+
+| Flag | Meaning |
+|---|---|
+| `--arg key=value` | one argument, repeatable; coercion table above |
+| `--json '<obj>'` / `--json -` | base object inline or from stdin |
+| `--json-file <path>` | base object from a file |
+| `--format json\|gcx\|toon\|text` | wire format forwarded to the tool (default `json`) |
+| `--dry` | print the lowered argument object + target tool **without** calling the daemon (works offline) |
+| `--quiet` | suppress the mutating-tool stderr note |
+
+```bash
+gortex call smart_context --arg task="add rate limiting to the login handler"
+gortex call find_usages --arg id="internal/auth/login.go::Login" --format gcx
+gortex call overlay_push --json-file ./buffer.json          # reach a deferred tool by name
+gortex call edit_file --arg path=README.md --arg old_string=foo --arg new_string=bar --dry
+```
+
+### `gortex tools …` — discover & describe the surface
+
+| Verb | MCP tool | Key flags |
+|---|---|---|
+| `tools list` | `tool_profile` | `--category <c>`, `--mutating`, `--preset core\|edit\|nav\|readonly`, `--format text\|json` |
+| `tools search <q>` | `tools_search` | `--limit <n>` (default 10) — ranks the deferred surface |
+| `tools describe <name>` | `tools_search select:<name>` | prints the tool's full parameter schema |
+| `tools receipt` | `tool_profile` | `--format yaml\|json` (default `yaml`) |
+
+`tools list` prints a `NAME · CATEGORY · R/W · PRESETS · SUMMARY` table. `tools receipt` emits a **context-budget receipt** — transport, advertised vs deferred tool counts, and `registered_tool_schemas: 0` — the auditable record that driving Gortex through the CLI mounts no tool schemas into the model's context. Searches and describes are inspection-only: they never promote a tool into the live set.
+
+### `gortex edit …` — edit-safety verbs
+
+The daemon's safe-edit surface as CLI verbs. The read-only verbs (`context`, `verify`, `plan`, `preview`, `simulate`, `guards`, `tests`, `contract`, `rename`) never write; the mutating verbs (`apply`, `symbol`, `batch`, `safe-delete`) touch the working tree.
+
+| Verb | MCP tool | Key flags |
+|---|---|---|
+| `edit context <file>` | `get_editing_context` | `--detail brief\|full`, `--compress` |
+| `edit verify` | `verify_change` | `--change 'id=newsig'` (repeatable sugar) **or** `--changes` / `--changes-file` / `-`; `--compact` |
+| `edit plan` | `get_edit_plan` | `--ids <csv>` (required), `--depth` (default 3) |
+| `edit preview` | `preview_edit` | `--workspace-edit` / `--workspace-edit-file` / `-`; `--no-diagnostics`, `--inherit-overlay` |
+| `edit simulate` | `simulate_chain` | `--steps` / `--steps-file` / `-`; `--keep`, `--no-stop-on-error`, `--inherit-overlay` |
+| `edit batch` | `batch_edit` | `--edits` / `--edits-file` / `-`; `--dry-run`, `--compact` |
+| `edit apply <file>` | `edit_file` | `--old`, `--new` (required), `--replace-all`, `--dry-run`, `--allow-parse-errors`, `--expected <n>` |
+| `edit symbol <id>` | `edit_symbol` | `--old`, `--new` (required), `--dry-run` |
+| `edit rename <id>` | `rename_symbol` | `--to <name>` (required) — **plan-only, never writes** |
+| `edit guards` | `check_guards` | `--ids <csv>` (required), `--compact` |
+| `edit tests` | `get_test_targets` | `--ids <csv>` (required), `--depth` (default 3) |
+| `edit contract` | `change_contract` | `--source auto\|diff\|edit\|symbols\|ranges`, `--lens api`, `--risk-gate`, `--ack`, `--base <ref>`, `--workspace-edit*`, `--symbols <csv>`, `--ranges*` / `--path` + `--start-line` + `--end-line` |
+| `edit safe-delete <id>` | `safe_delete_symbol` | **dry run unless `--apply`**; `--force`, `--cascade off\|preview\|apply`, `--cascade-into-tests`, `--propagate` |
+
+```bash
+gortex edit context internal/auth/login.go --compress
+gortex edit verify --change 'internal/auth/login.go::Login=func(ctx context.Context) error'
+gortex edit apply README.md --old "old text" --new "new text" --dry-run
+gortex edit safe-delete 'internal/legacy/old.go::Unused' --propagate   # dry run; add --apply to commit
+```
+
+### `gortex memory …` — session & durable memory
+
+Session notes are scoped to a session and survive context compactions; durable memories are workspace-wide and survive daemon restarts and team rotation.
+
+| Verb | MCP tool | Key flags |
+|---|---|---|
+| `memory note` | `save_note` | `--body`, `--symbol`, `--file`, `--tags`, `--links`, `--pin`, `--id`, `--no-autolink` |
+| `memory notes` | `query_notes` | `--symbol`, `--file`, `--tag`, `--text`, `--session`, `--since`, `--limit`, `--pinned` |
+| `memory distill` | `distill_session` | `--session`, `--max-symbols`, `--max-files`, `--max-tags`, `--max-recent` |
+| `memory store` | `store_memory` | `--body`, `--title`, `--symbols`, `--files`, `--tags`, `--kind`, `--source`, `--importance`, `--confidence`, `--pin`, `--supersedes`, `--scope`, `--id`, `--no-autolink` |
+| `memory recall` | `query_memories` | `--symbol`, `--file`, `--tag`, `--kind`, `--source`, `--author`, `--text`, `--since`, `--min-importance`, `--pinned`, `--include-superseded`, `--limit`, `--scope` |
+| `memory surface` | `surface_memories` | `--task`, `--symbols`, `--files`, `--limit`, `--min-score`, `--include-superseded`, `--scope` |
+
+```bash
+gortex memory surface --task "fix the auth bug" --symbols internal/auth/login.go::Login
+gortex memory store --kind invariant --importance 5 --symbols pkg/foo.go::Bar \
+  --body "Bar must hold the lock before mutating the cache"
+gortex memory note --tags decision --body "chose token bucket over leaky bucket because of burst tolerance"
+```
+
+### `gortex analyze` — unified analysis dispatcher
+
+`gortex analyze --kind <k>` runs the daemon's `analyze` dispatcher. `gortex analyze kinds` lists the valid kinds (no daemon needed). Universal typed flags (`--limit`, `--compact`, `--path-prefix`, `--format json|gcx|toon|text`) cover the common parameters; kind-specific parameters ride on `--arg key=value` (same coercion as `call`, and a `--arg` pair overrides the matching typed flag).
+
+```bash
+gortex analyze kinds
+gortex analyze --kind hotspots --arg threshold:=0.8 --limit 5
+gortex analyze --kind coverage_gaps --path-prefix internal/auth/ --arg max_pct:=80 --format gcx
+gortex analyze --kind todos --arg tag=FIXME --arg has_assignee=true
+```
+
+### `gortex flow` / `taint` / `clones` / `feedback`
+
+| Verb | MCP tool | Key flags |
+|---|---|---|
+| `flow` | `flow_between` | `--from` / `--to` (required), `--max-depth`, `--max-paths`, `--min-tier`, `--format` |
+| `taint` | `taint_paths` | `--source` / `--sink` (required, pattern syntax), `--max-depth`, `--limit`, `--min-tier`, `--format` |
+| `clones` | `find_clones` | `--dead-only`, `--min-similarity`, `--path-prefix`, `--repo-filter`, `--limit`, `--format` |
+| `feedback record` | `feedback action=record` | `--task`, `--useful`, `--not-needed`, `--missing`, `--tool-source` |
+| `feedback query` | `feedback action=query` | `--tool-source`, `--top-n`, `--compact` |
+
+`taint`'s `--source` / `--sink` take a pattern (a bare token is a case-insensitive substring on the symbol name; `exact:Foo`, `path:dir/`, `kind:method`, combined with spaces).
+
+```bash
+gortex flow --from pkg/a.go::Input --to pkg/b.go::Sink --max-depth 6
+gortex taint --source 'path:handlers/' --sink 'exact:Exec' --limit 30
+gortex clones --dead-only --path-prefix internal/
+gortex feedback record --task "fix the auth bug" --useful pkg/a.go::Foo,pkg/b.go::Bar
+```
+
+### Choosing a consumption path
+
+The CLI verbs and the MCP install are two front doors to the **same** handlers. Pick by how much of the agent's context budget you want to spend on tool schemas versus what transport-level features you need:
+
+| | MCP install (full / core) | skill + CLI |
+|---|---|---|
+| Baseline context | high (full surface) / ~34 schemas (core) | zero schemas |
+| Push notifications | yes | no |
+| Overlay sessions | yes | no (use `gortex call overlay_*`) |
+| Edit-safety + memory workflow | yes | yes |
+| Discovery | `tools_search` | `gortex tools search` |
+
+The skill-driven CLI path trades the live transport features (server-pushed `notifications/*`, session-bound overlay shadow graphs) for a zero-schema baseline: nothing is loaded into the model's context until a verb is actually run. Overlay tools remain reachable by name through `gortex call overlay_*`, but without a persistent MCP session they don't compose into a per-session shadow graph the way the MCP transport does. The edit-safety and memory workflows are fully available on both paths.
+
 ## Other commands
 
 ```bash

@@ -55,6 +55,7 @@ func (idx *Indexer) linkContentToCode() {
 		if text == "" {
 			continue
 		}
+		signal := mineDocSignal(text)
 		for _, sym := range artifacts.ScanSymbolRefs([]byte(text), nameIndex) {
 			if sym == chunk.ID {
 				continue
@@ -66,7 +67,7 @@ func (idx *Indexer) linkContentToCode() {
 			edges = append(edges, &graph.Edge{
 				From: chunk.ID, To: sym, Kind: graph.EdgeMotivates,
 				FilePath: chunk.FilePath, Origin: graph.OriginTextMatched,
-				Meta: map[string]any{"signal": "lexical"},
+				Meta: map[string]any{"signal": signal},
 			})
 			added++
 		}

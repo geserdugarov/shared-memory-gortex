@@ -128,11 +128,42 @@ func (m *Manager) EnrichAll(g graph.Store, roots map[string]string) ([]*EnrichRe
 	// registered via RegisterProvider.
 	langProviders := m.selectProviders()
 
+	// Languages actually present (in symbol-bearing nodes) across the repos
+	// being enriched, from the indexed repo-scoped node scan. A provider — and
+	// the LSP server spawn it would trigger — is skipped when none of its
+	// languages are present, so a clangd / sourcekit / ruby-lsp never starts
+	// for a repo that has no C / Swift / Ruby. This is the same condition the
+	// per-provider EnrichRepo gate already applies, lifted ahead of the spawn.
+	//
+	// The gate fires only on POSITIVE evidence of absence: when the repo set
+	// has indexed symbols (present is non-empty) but none in a provider's
+	// languages. An empty / unindexed graph yields no evidence, so we don't
+	// gate — providers fall through to their own per-pass gate as before.
+	present := m.repoLanguages(g, roots)
+	gateOnPresence := len(present) > 0
+	if gateOnPresence {
+		langs := make([]string, 0, len(present))
+		for l := range present {
+			langs = append(langs, l)
+		}
+		sort.Strings(langs)
+		m.logger.Info("semantic enrichment: repo languages present",
+			zap.Strings("languages", langs),
+		)
+	}
+
 	var results []*EnrichResult
 
 	for lang, provider := range langProviders {
 		if !provider.Available() {
 			m.logger.Debug("semantic provider unavailable, skipping",
+				zap.String("provider", provider.Name()),
+				zap.String("language", lang),
+			)
+			continue
+		}
+		if gateOnPresence && !anyLangPresent(provider.Languages(), present) {
+			m.logger.Debug("semantic provider skipped, no nodes for its languages",
 				zap.String("provider", provider.Name()),
 				zap.String("language", lang),
 			)
@@ -162,6 +193,13 @@ func (m *Manager) EnrichAll(g graph.Store, roots map[string]string) ([]*EnrichRe
 			}
 			for _, lang := range m.lspRouter.SpecLanguages(name) {
 				if _, eagerCovered := langProviders[lang]; eagerCovered {
+					continue
+				}
+				// Only compete for a language the repo set actually contains —
+				// a spec that wins no present language never enters runOrder and
+				// so is never spawned via ProviderForSpec. Skipped when there is
+				// no presence evidence at all (empty / unindexed graph).
+				if gateOnPresence && !present[lang] {
 					continue
 				}
 				cur, exists := bestSpec[lang]
@@ -211,10 +249,49 @@ func (m *Manager) EnrichAll(g graph.Store, roots map[string]string) ([]*EnrichRe
 		if len(langs) == 0 {
 			continue
 		}
+		if gateOnPresence && !anyLangPresent(langs, present) {
+			continue
+		}
 		results = m.runEnrichForProvider(g, roots, langs[0], p, results)
 	}
 
 	return results, nil
+}
+
+// repoLanguages returns the union of languages present (in symbol-bearing
+// nodes) across the given repo roots, computed from the indexed repo-scoped
+// node scan. Used to skip providers — and the LSP server spawns they would
+// trigger — for languages a repo set does not contain. Mirrors the
+// node-language condition the per-provider EnrichRepo gate applies, so a
+// provider is gated here exactly when its own pass would have found no work.
+func (m *Manager) repoLanguages(g graph.Store, roots map[string]string) map[string]bool {
+	present := make(map[string]bool)
+	for repoPrefix := range roots {
+		nodes := g.GetRepoNodes(repoPrefix)
+		if len(nodes) == 0 && repoPrefix == "" {
+			nodes = g.AllNodes()
+		}
+		for _, n := range nodes {
+			// Include file/import nodes too: the per-provider EnrichRepo gate
+			// can spawn on an ambiguous edge sourced from a file/import node, so
+			// presence here must be at least as permissive — otherwise we would
+			// gate out a provider whose own pass would have run.
+			if n.RepoPrefix == repoPrefix && n.Language != "" {
+				present[n.Language] = true
+			}
+		}
+	}
+	return present
+}
+
+// anyLangPresent reports whether any of langs is in the present set.
+func anyLangPresent(langs []string, present map[string]bool) bool {
+	for _, l := range langs {
+		if present[l] {
+			return true
+		}
+	}
+	return false
 }
 
 // providerDisabled reports an explicit `enabled: false` config entry

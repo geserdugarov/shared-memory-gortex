@@ -66,6 +66,17 @@ func (p *Provider) Available() bool {
 }
 
 func (p *Provider) Enrich(g graph.Store, repoRoot string) (*semantic.EnrichResult, error) {
+	return p.EnrichRepo(g, "", repoRoot)
+}
+
+// EnrichRepo runs the go/types enrichment pass with its graph scans scoped
+// to repoPrefix (the multi-repo scope key; "" for a single-repo / in-memory
+// graph). The go/packages load is already scoped to repoRoot; scoping the
+// graph-side symbol count and implements-edge scan to one repo stops a
+// multi-repo warmup from paying a whole-graph AllNodes / AllEdges walk per
+// repo. Implementing this makes the provider a semantic.RepoScopedProvider,
+// so the manager dispatches it per repo with the repo's prefix.
+func (p *Provider) EnrichRepo(g graph.Store, repoPrefix, repoRoot string) (*semantic.EnrichResult, error) {
 	start := time.Now()
 
 	absRoot, err := filepath.Abs(repoRoot)
@@ -128,9 +139,12 @@ func (p *Provider) Enrich(g graph.Store, repoRoot string) (*semantic.EnrichResul
 		}
 	}
 
-	// Count total Go symbols.
-	for _, n := range g.AllNodes() {
-		if n.Language == "go" && n.Kind != graph.KindFile && n.Kind != graph.KindImport {
+	// Count total Go symbols in this repo via the indexed repo-scoped scan
+	// rather than a whole-graph AllNodes walk (which, in a multi-repo graph,
+	// also wrongly counted every other repo's Go nodes against this repo's
+	// coverage).
+	for _, n := range repoGoNodes(g, repoPrefix) {
+		if n.Kind != graph.KindFile && n.Kind != graph.KindImport {
 			result.SymbolsTotal++
 		}
 	}
@@ -241,7 +255,7 @@ func (p *Provider) Enrich(g graph.Store, repoRoot string) (*semantic.EnrichResul
 	result.NodesEnriched += externals.nodesAdded
 
 	// Phase 3: Interface implementations via go/types.
-	result.EdgesConfirmed += p.enrichImplements(g, pkgs, objToNode)
+	result.EdgesConfirmed += p.enrichImplements(g, repoPrefix, pkgs, objToNode)
 	result.EdgesAdded += p.addMissingImplements(g, pkgs, objToNode, absRoot)
 
 	// Phase 4: Enrich node metadata with type info.
@@ -542,8 +556,39 @@ func (p *Provider) loadPackages(dir string) ([]*packages.Package, *token.FileSet
 	return valid, cfg.Fset, nil
 }
 
+// repoGoNodes returns the repo's Go-language nodes via the indexed
+// GetRepoNodes scan, falling back to a language-filtered AllNodes pass for
+// the embedded single-repo ("") path where GetRepoNodes can come back empty.
+func repoGoNodes(g graph.Store, repoPrefix string) []*graph.Node {
+	filter := func(nodes []*graph.Node) []*graph.Node {
+		out := make([]*graph.Node, 0, len(nodes))
+		for _, n := range nodes {
+			if n.Language == "go" && n.RepoPrefix == repoPrefix {
+				out = append(out, n)
+			}
+		}
+		return out
+	}
+	out := filter(g.GetRepoNodes(repoPrefix))
+	if len(out) == 0 && repoPrefix == "" {
+		return filter(g.AllNodes())
+	}
+	return out
+}
+
+// repoGoEdges returns the edges whose source node belongs to repoPrefix via
+// the indexed GetRepoEdges scan, falling back to AllEdges only for the
+// embedded single-repo ("") path where GetRepoEdges returns nothing.
+func repoGoEdges(g graph.Store, repoPrefix string) []*graph.Edge {
+	edges := g.GetRepoEdges(repoPrefix)
+	if len(edges) == 0 && repoPrefix == "" {
+		return g.AllEdges()
+	}
+	return edges
+}
+
 // enrichImplements confirms existing EdgeImplements edges using go/types.
-func (p *Provider) enrichImplements(g graph.Store, pkgs []*packages.Package, objToNode map[types.Object]string) int {
+func (p *Provider) enrichImplements(g graph.Store, repoPrefix string, pkgs []*packages.Package, objToNode map[types.Object]string) int {
 	confirmed := 0
 
 	// Collect all interfaces from the loaded packages.
@@ -556,8 +601,9 @@ func (p *Provider) enrichImplements(g graph.Store, pkgs []*packages.Package, obj
 		}
 	}
 
-	// Check existing EdgeImplements edges.
-	for _, e := range g.AllEdges() {
+	// Check existing EdgeImplements edges (scoped to this repo's edges; the
+	// implementing type must live in this repo's loaded packages to confirm).
+	for _, e := range repoGoEdges(g, repoPrefix) {
 		if e.Kind != graph.EdgeImplements {
 			continue
 		}

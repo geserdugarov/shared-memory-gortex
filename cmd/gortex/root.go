@@ -6,7 +6,10 @@ import (
 	"os"
 	"strings"
 
+	"time"
+
 	"github.com/spf13/cobra"
+	"github.com/zzet/gortex/internal/persistence"
 	"github.com/zzet/gortex/internal/platform"
 	"github.com/zzet/gortex/internal/telemetry"
 	"go.uber.org/zap"
@@ -52,7 +55,51 @@ var rootCmd = &cobra.Command{
 	// the command's exit.
 	PersistentPostRun: func(cmd *cobra.Command, args []string) {
 		recordCLIUsage(cmd, telemetry.NewStore(platform.TelemetryDir()), os.Getenv)
+		recordCLIEvent(cmd, os.Getenv)
 	},
+}
+
+// cliEventSidecarPath resolves the sidecar database the consent-free CLI-verb
+// ledger writes. A package var so tests can redirect it away from the real
+// ~/.gortex without touching the home layout.
+var cliEventSidecarPath = func() string {
+	return persistence.DefaultSidecarPath(platform.DataDir())
+}
+
+// recordCLIEvent records one cli_events row for the verb that just ran,
+// CONSENT-FREE, scoped by the GORTEX_SESSION_ID correlation id. It is the
+// grounded source for a context-budget receipt's cli_verbs_used /
+// safety_steps_run: telemetry is opt-in-OFF and keeps only daily counts with
+// no session dimension, so it cannot answer "which verbs did THIS session
+// run". This ledger can.
+//
+// Gating, in order, so the default interactive path pays zero cost:
+//   - No GORTEX_SESSION_ID → return early (no sidecar opened). Only an agent
+//     session that stamps the id pays the per-invocation sqlite write.
+//   - Skip the same cases recordCLIUsage skips: a re-spawned daemon child, an
+//     empty verb, and the self-referential telemetry subcommand.
+//
+// Best-effort and fail-silent: any error opening or writing the sidecar is
+// swallowed so accounting never affects the command's exit.
+func recordCLIEvent(cmd *cobra.Command, getenv func(string) string) {
+	sessionID := getenv("GORTEX_SESSION_ID")
+	if sessionID == "" {
+		return
+	}
+	if getenv("GORTEX_DAEMON_CHILD") == "1" {
+		return
+	}
+	verb := cliCommandDim(cmd)
+	if verb == "" || verb == "telemetry" || strings.HasPrefix(verb, "telemetry.") {
+		return
+	}
+
+	sc, err := persistence.OpenSidecar(cliEventSidecarPath())
+	if err != nil || sc == nil {
+		return
+	}
+	defer func() { _ = sc.Close() }()
+	_ = sc.AddCLIEvent(time.Now(), sessionID, verb)
 }
 
 // cliCommandDim renders a cobra command's path below the root as a dim-safe

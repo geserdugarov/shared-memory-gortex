@@ -180,6 +180,15 @@ CREATE TABLE IF NOT EXISTS savings_meta (
 	key   TEXT NOT NULL PRIMARY KEY,
 	value INTEGER NOT NULL DEFAULT 0
 ) WITHOUT ROWID;
+
+CREATE TABLE IF NOT EXISTS cli_events (
+	id         INTEGER PRIMARY KEY AUTOINCREMENT,
+	ts         INTEGER NOT NULL DEFAULT 0,
+	session_id TEXT NOT NULL DEFAULT '',
+	verb       TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_cli_events_ts      ON cli_events (ts);
+CREATE INDEX IF NOT EXISTS idx_cli_events_session ON cli_events (session_id, ts);
 `
 
 // DefaultSidecarPath is the canonical location of the side-store DB:

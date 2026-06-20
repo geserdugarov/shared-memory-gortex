@@ -4,10 +4,13 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/require"
+	"github.com/zzet/gortex/internal/persistence"
 	"gopkg.in/yaml.v3"
 )
 
@@ -25,11 +28,25 @@ const cannedToolProfileCountsJSON = `{
   "deferred": ["edit_file", "rename_symbol"]
 }`
 
-// newToolsReceiptTestCmd resets receipt flag state and binds a buffer.
+// newToolsReceiptTestCmd resets receipt flag state and binds a buffer. It also
+// redirects Part B's CLI-verb ledger to an isolated temp sidecar and clears the
+// session-id seam, so a receipt build in a test never reads the developer's
+// real ~/.gortex (and Part B is empty unless the test seeds it).
 func newToolsReceiptTestCmd(t *testing.T) (*cobra.Command, *bytes.Buffer) {
 	t.Helper()
 	toolsIndex = "."
 	toolsReceiptFormat = "yaml"
+	toolsReceiptSince = time.Hour
+
+	path := filepath.Join(t.TempDir(), "sidecar.sqlite")
+	origPath := receiptSidecarPath
+	origSession := receiptSessionID
+	receiptSidecarPath = func() string { return path }
+	receiptSessionID = func() string { return "" }
+	t.Cleanup(func() {
+		receiptSidecarPath = origPath
+		receiptSessionID = origSession
+	})
 
 	buf := &bytes.Buffer{}
 	cmd := &cobra.Command{Use: "receipt", RunE: runToolsReceipt}
@@ -156,4 +173,117 @@ func TestToolsReceipt_BadFormat(t *testing.T) {
 	err := runToolsReceipt(cmd, nil)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "unknown --format")
+}
+
+// stubDaemonReachable points toolsDaemonTool at the canned tool_profile so a
+// Part B test gets a normal Part A without a live daemon.
+func stubDaemonReachable(t *testing.T) {
+	t.Helper()
+	orig := toolsDaemonTool
+	t.Cleanup(func() { toolsDaemonTool = orig })
+	toolsDaemonTool = func(string, string, map[string]any) (json.RawMessage, error) {
+		return json.RawMessage(cannedToolProfileCountsJSON), nil
+	}
+}
+
+// seedCLIEvents writes verbs for a session id into the receipt's redirected
+// sidecar, so Part B has something to read back.
+func seedCLIEvents(t *testing.T, sessionID string, verbs ...string) {
+	t.Helper()
+	sc, err := persistence.OpenSidecar(receiptSidecarPath())
+	require.NoError(t, err)
+	defer sc.Close()
+	base := time.Date(2026, 6, 1, 9, 0, 0, 0, time.UTC)
+	for i, v := range verbs {
+		require.NoError(t, sc.AddCLIEvent(base.Add(time.Duration(i)*time.Minute), sessionID, v))
+	}
+}
+
+// TestToolsReceipt_PartB_BySession: with GORTEX_SESSION_ID set, the receipt
+// reports that session's distinct verbs and the safety steps derived from them,
+// while Part A is unchanged.
+func TestToolsReceipt_PartB_BySession(t *testing.T) {
+	stubDaemonReachable(t)
+	cmd, buf := newToolsReceiptTestCmd(t)
+	// Scope to a session and seed verbs (with a duplicate to prove dedup, and a
+	// non-safety verb to prove it contributes no safety step).
+	receiptSessionID = func() string { return "agent-sess" }
+	seedCLIEvents(t, "agent-sess", "edit.verify", "edit.guards", "edit.verify", "query.stats")
+
+	require.NoError(t, runToolsReceipt(cmd, nil))
+
+	var env receiptEnvelope
+	require.NoError(t, yaml.Unmarshal(buf.Bytes(), &env))
+	r := env.GortexContextBudget
+
+	// Part A unchanged.
+	require.Equal(t, "skill_cli", r.Transport)
+	require.Equal(t, 34, r.AdvertisedTools)
+
+	// Part B: distinct verbs in first-seen order; safety steps sorted + deduped.
+	require.Equal(t, []string{"edit.verify", "edit.guards", "query.stats"}, r.CLIVerbsUsed)
+	require.Equal(t, []string{"check_guards", "verify_change"}, r.SafetyStepsRun)
+	// With a session id set there is no "set GORTEX_SESSION_ID" note.
+	require.Empty(t, r.Note)
+}
+
+// TestToolsReceipt_PartB_NoSession: with no session id, Part B falls back to the
+// --since window and carries the note. Events outside the window are excluded.
+func TestToolsReceipt_PartB_NoSession(t *testing.T) {
+	stubDaemonReachable(t)
+	cmd, buf := newToolsReceiptTestCmd(t)
+	// No session id (helper already cleared it). Seed under any id — the Since
+	// read ignores the session dimension. Pin the clock so the seeded events
+	// (base 2026-06-01 09:00) fall inside the window.
+	origNow := receiptNow
+	t.Cleanup(func() { receiptNow = origNow })
+	receiptNow = func() time.Time { return time.Date(2026, 6, 1, 9, 30, 0, 0, time.UTC) }
+	toolsReceiptSince = time.Hour
+	seedCLIEvents(t, "whoever", "edit.tests", "edit.contract")
+
+	require.NoError(t, runToolsReceipt(cmd, nil))
+
+	var env receiptEnvelope
+	require.NoError(t, yaml.Unmarshal(buf.Bytes(), &env))
+	r := env.GortexContextBudget
+	require.Equal(t, []string{"edit.tests", "edit.contract"}, r.CLIVerbsUsed)
+	require.Equal(t, []string{"change_contract", "get_test_targets"}, r.SafetyStepsRun)
+	require.Contains(t, r.Note, "GORTEX_SESSION_ID")
+}
+
+// TestToolsReceipt_PartB_EmptyWhenNoEvents: with nothing recorded the two
+// fields are present as empty lists (never nil/omitted), and Part A still
+// renders. The redirected sidecar is created on read but holds no rows.
+func TestToolsReceipt_PartB_EmptyWhenNoEvents(t *testing.T) {
+	stubDaemonReachable(t)
+	cmd, buf := newToolsReceiptTestCmd(t)
+
+	require.NoError(t, runToolsReceipt(cmd, nil))
+
+	var env receiptEnvelope
+	require.NoError(t, yaml.Unmarshal(buf.Bytes(), &env))
+	r := env.GortexContextBudget
+	require.NotNil(t, r.CLIVerbsUsed)
+	require.NotNil(t, r.SafetyStepsRun)
+	require.Empty(t, r.CLIVerbsUsed)
+	require.Empty(t, r.SafetyStepsRun)
+	// The raw YAML carries both keys explicitly.
+	require.Contains(t, buf.String(), "cli_verbs_used:")
+	require.Contains(t, buf.String(), "safety_steps_run:")
+}
+
+// TestSafetyStepsForVerbs unit-tests the verb→safety-tool map: it dedups
+// (two verbs that map to feedback yield one), preserves the documented
+// mappings, and a non-safety verb contributes nothing.
+func TestSafetyStepsForVerbs(t *testing.T) {
+	require.Equal(t,
+		[]string{"change_contract", "check_guards", "get_test_targets", "verify_change"},
+		safetyStepsForVerbs([]string{"edit.verify", "edit.guards", "edit.tests", "edit.contract"}),
+	)
+	// feedback.record + feedback.query both map to the same tool — dedup.
+	require.Equal(t, []string{"feedback"}, safetyStepsForVerbs([]string{"feedback.record", "feedback.query"}))
+	// A non-safety verb maps to nothing.
+	require.Empty(t, safetyStepsForVerbs([]string{"query.stats", "daemon.start"}))
+	// Empty input is empty output.
+	require.Empty(t, safetyStepsForVerbs(nil))
 }

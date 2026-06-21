@@ -543,6 +543,13 @@ func (idx *Indexer) shouldIndexForSearch(n *graph.Node) bool {
 	if n.Kind == graph.KindBuiltin {
 		return false
 	}
+	// CONTENT (data_class="content") section nodes live in the dedicated
+	// content index (content_fts), never the symbol search — keeping the
+	// symbol corpus code-only and bounded. Markdown prose (KindDoc without
+	// data_class=content) is unaffected and still honours IndexProse below.
+	if isContentNode(n) {
+		return false
+	}
 	// Prose-section nodes are searchable only when prose indexing is
 	// enabled (search.index_prose); the rest of the graph is
 	// unaffected by the toggle.

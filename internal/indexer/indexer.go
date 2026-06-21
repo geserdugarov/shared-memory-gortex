@@ -3428,6 +3428,15 @@ func (idx *Indexer) collectEmbedTexts(nodes []*graph.Node) (texts []string, ids 
 		if n.Kind == graph.KindFile || n.Kind == graph.KindImport {
 			continue
 		}
+		// CONTENT section bodies are served by the content index, not the
+		// vector store — excluding them keeps the embed-text count (and the
+		// 100k auto-disable check) code-only, so a content-heavy repo no
+		// longer drowns the embedding pass in hundreds of thousands of
+		// section texts.
+		if isContentNode(n) {
+			skipped++
+			continue
+		}
 		if config.ShouldSkipEmbed(idx.config.SkipEmbed, n.Language, string(n.Kind)) {
 			skipped++
 			continue

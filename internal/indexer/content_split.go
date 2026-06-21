@@ -16,17 +16,10 @@ import (
 // holds ~240 B × N in the graph instead of ~4 KB × N (~17× less text).
 const contentSnippetCap = 240
 
-// isContentNode reports whether n is a CONTENT section node
-// (data_class="content") — text / pdf / pptx / xlsx chunks carrying a
-// section body. Markdown prose (KindDoc without data_class=content) and
-// data assets (data_class="data") are deliberately excluded so they keep
-// their existing treatment in the symbol search.
+// isContentNode is the indexer-local alias for graph.IsContentNode — the
+// shared predicate for a CONTENT section node (KindDoc, data_class=content).
 func isContentNode(n *graph.Node) bool {
-	if n == nil || n.Kind != graph.KindDoc || n.Meta == nil {
-		return false
-	}
-	dc, _ := n.Meta["data_class"].(string)
-	return dc == "content"
+	return graph.IsContentNode(n)
 }
 
 // contentBody returns the full section text carried on a content node, or

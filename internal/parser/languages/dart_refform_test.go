@@ -224,6 +224,98 @@ func TestDartRefForm_Negatives(t *testing.T) {
 	}
 }
 
+// TestDartRefForm_GenericArgs verifies that the element type(s) of a
+// parameterised type surface as generic_arg references in every position:
+// a class field annotation, a parameter, a return type, a typed local, a
+// supertype clause (extends / with / implements), and nested generics. Each
+// rides EdgeReferences with Meta["ref_context"]="generic_arg" and
+// OriginASTResolved. Primitive element types (String) are filtered, and the
+// generic *parameter* declaration `<T>` (a type_parameters node, not a use) is
+// never read as a reference.
+func TestDartRefForm_GenericArgs(t *testing.T) {
+	src := []byte(`class Box<T> extends Base<Sup> with Mix<MixArg> implements Iface<IfArg> {
+  List<Field> field = [];
+  Map<String, List<Nested>> nested = {};
+
+  Future<Ret> fetch(Set<Param> accts, [List<Opt>? logs]) async {
+    List<Local> users = [];
+    return get();
+  }
+}
+`)
+	res, err := NewDartExtractor().Extract("box.dart", src)
+	require.NoError(t, err)
+
+	gen := func(typeName string) bool {
+		return dartRefEdge(res.Edges, graph.EdgeReferences, typeName, graph.RefContextGenericArg)
+	}
+
+	// Every element type, in every position, surfaces as a generic_arg.
+	assert.True(t, gen("Field"), "field List<Field> element; edges=%v", res.Edges)
+	assert.True(t, gen("Nested"), "nested Map<String, List<Nested>> element")
+	assert.True(t, gen("Ret"), "return Future<Ret> element")
+	assert.True(t, gen("Param"), "parameter Set<Param> element")
+	assert.True(t, gen("Opt"), "optional parameter List<Opt>? element")
+	assert.True(t, gen("Local"), "typed local List<Local> element")
+	assert.True(t, gen("Sup"), "supertype extends Base<Sup> element")
+	assert.True(t, gen("MixArg"), "mixin with Mix<MixArg> element")
+	assert.True(t, gen("IfArg"), "interface implements Iface<IfArg> element")
+
+	// Primitive element type String must never surface.
+	assert.False(t, gen("String"), "primitive generic arg String must not surface")
+
+	// The generic *parameter* declaration `<T>` is a type_parameters node, not a
+	// use — T must not be read as a generic_arg reference.
+	assert.False(t, gen("T"), "generic parameter declaration <T> must not be a use")
+
+	// Generic-arg references ride OriginASTResolved.
+	for _, e := range res.Edges {
+		if e.Kind == graph.EdgeReferences && e.Meta != nil &&
+			e.Meta["ref_context"] == graph.RefContextGenericArg {
+			assert.Equal(t, graph.OriginASTResolved, e.Origin,
+				"generic_arg reference Origin must be OriginASTResolved")
+		}
+	}
+
+	// Generic args inside fetch() attribute to the enclosing method; the
+	// supertype / field args (outside any function) fall back to the file node.
+	for _, e := range res.Edges {
+		if e.Kind != graph.EdgeReferences || e.Meta == nil ||
+			e.Meta["ref_context"] != graph.RefContextGenericArg {
+			continue
+		}
+		switch e.To {
+		case "unresolved::Ret", "unresolved::Param", "unresolved::Opt", "unresolved::Local":
+			assert.Equal(t, "box.dart::Box.fetch", e.From,
+				"generic arg %s should attribute to the enclosing method", e.To)
+		case "unresolved::Sup", "unresolved::MixArg", "unresolved::IfArg", "unresolved::Field", "unresolved::Nested":
+			assert.Equal(t, "box.dart", e.From,
+				"generic arg %s outside any function should attribute to the file node", e.To)
+		}
+	}
+}
+
+// TestDartRefForm_GenericArgsNoDuplicate guards the per-(owner,type,line,
+// ref_context) dedup: the same generic element type repeated on one line emits
+// a single generic_arg edge.
+func TestDartRefForm_GenericArgsNoDuplicate(t *testing.T) {
+	src := []byte(`void run() {
+  Map<Key, Key> m = {};
+}
+`)
+	res, err := NewDartExtractor().Extract("d.dart", src)
+	require.NoError(t, err)
+
+	n := 0
+	for _, e := range res.Edges {
+		if e.Kind == graph.EdgeReferences && e.To == "unresolved::Key" &&
+			e.Meta != nil && e.Meta["ref_context"] == graph.RefContextGenericArg {
+			n++
+		}
+	}
+	assert.Equal(t, 1, n, "Map<Key, Key> must dedup to one generic_arg edge for Key")
+}
+
 // TestDartRefForm_NoDuplicateEdges guards the per-(owner,type,line,ref_context)
 // dedup: the same static access twice on one line emits a single edge.
 func TestDartRefForm_NoDuplicateEdges(t *testing.T) {

@@ -25,6 +25,11 @@ import (
 //   - STATIC ACCESS   `Foo.constant` / `Foo.staticMethod()` / `Foo.named()`
 //     — a member/static access whose head is a bare Capitalized identifier
 //     → EdgeReferences, Meta["ref_context"]="static_access"
+//   - GENERIC ARG     the element type(s) of a parameterised type
+//     `List<Foo>` / `Map<String, Bar>` / `Future<Response>` / a supertype
+//     `extends Base<Foo>`, in any position (variable annotation, parameter,
+//     return, supertype, or nested) → EdgeReferences,
+//     Meta["ref_context"]="generic_arg"
 //
 // Each edge attributes to the enclosing function / method (the file node when
 // nothing encloses the line) so find_usages lands the reference without a
@@ -56,9 +61,11 @@ import (
 //     chained `a.b.C` (whose head identifier is `a`) are all excluded, so a
 //     field read on an instance is never read as a static type reference.
 //   - The mixin / interface / superclass type identifiers are taken from the
-//     dedicated grammar clauses (superclass / mixins / interfaces), never from
-//     a generic type_identifier walk, so type arguments and annotations are
-//     not pulled in.
+//     dedicated grammar clauses (superclass / mixins / interfaces), so the
+//     inherit edge names the supertype itself and not its annotations. The
+//     supertype's *generic arguments* (`extends Base<Foo>`) are surfaced
+//     separately by the position-independent type_arguments walk as
+//     generic_arg references, not as inherit references.
 func (e *DartExtractor) emitDartReferenceForms(
 	root *sitter.Node, src []byte, filePath string, fileNode *graph.Node,
 	result *parser.ExtractionResult,
@@ -157,6 +164,24 @@ func (e *DartExtractor) emitDartReferenceForms(
 				emit(name, line, graph.EdgeReferences, graph.RefContextCast)
 			}
 
+		case "type_arguments":
+			// `<Foo>` / `<String, Bar>` — generic argument list. This is the
+			// position-independent generic-arg surface: a `type_arguments` node
+			// appears verbatim in every position a parameterised type can occur
+			// (variable annotation `List<Foo>`, parameter `Set<Account>`, return
+			// `Future<Response>`, a supertype clause `extends Base<Foo>` /
+			// `with Mix<Bar>` / `implements Iface<Baz>`, and nested inside another
+			// type_arguments `Map<String, List<Bar>>`). Each direct
+			// type_identifier child is an element type used here; a nested
+			// type_arguments child is its own node that walkNodes visits
+			// separately, so emitting only the *direct* element types avoids
+			// double-counting while still surfacing every level. The grammar's
+			// declaration-position node for `<T>` is type_parameters (a distinct
+			// node), so a generic *parameter* declaration is never misread as a
+			// use. The emit closure applies the Capitalization + primitive gate
+			// and the per-(owner,type,line,ref_context) dedup.
+			emitDartGenericArgs(n, src, line, emit)
+
 		case "identifier":
 			// A bare identifier that heads an expression: it is either an
 			// unadorned construction `Foo(...)` or a static access `Foo.member`
@@ -182,9 +207,11 @@ func (e *DartExtractor) emitDartReferenceForms(
 //	    implements
 //	    type_identifier ...    <- interfaces
 //
-// Only the dedicated clause type_identifiers are taken, so generic arguments
-// and the class's own name are never pulled in. The emit closure applies the
-// Capitalization + primitive gate, so a malformed clause yields nothing.
+// Only the dedicated clause type_identifiers are taken as inherit references,
+// so a supertype's generic arguments and the class's own name are never pulled
+// in here — the supertype's type_arguments (`extends Base<Foo>`) ride the
+// generic_arg walk instead. The emit closure applies the Capitalization +
+// primitive gate, so a malformed clause yields nothing.
 func emitDartInheritanceClauses(classNode *sitter.Node, src []byte, emit func(rawType string, line int, kind graph.EdgeKind, refContext string)) {
 	for i := 0; i < int(classNode.ChildCount()); i++ {
 		clause := classNode.Child(i)
@@ -292,6 +319,26 @@ func emitDartIdentifierHead(n *sitter.Node, src []byte, line int, localTypes map
 				emit(head, line, graph.EdgeInstantiates, "")
 			}
 			return
+		}
+	}
+}
+
+// emitDartGenericArgs emits a generic_arg reference for every direct
+// type_identifier child of a type_arguments node. Each element type rides
+// EdgeReferences with Meta["ref_context"]="generic_arg" and OriginASTResolved.
+//
+// Only *direct* children are read: a nested generic (`List<Bar>` inside
+// `Map<String, List<Bar>>`) is its own type_arguments node that the walk visits
+// independently, so descending here would double-count it. The line is the
+// outer type_arguments node's start row (the use site of these element types).
+func emitDartGenericArgs(targs *sitter.Node, src []byte, line int, emit func(rawType string, line int, kind graph.EdgeKind, refContext string)) {
+	if targs == nil {
+		return
+	}
+	for i := 0; i < int(targs.NamedChildCount()); i++ {
+		c := targs.NamedChild(i)
+		if c != nil && c.Type() == "type_identifier" {
+			emit(c.Content(src), line, graph.EdgeReferences, graph.RefContextGenericArg)
 		}
 	}
 }

@@ -186,7 +186,7 @@ public class C {
 				continue
 			}
 			c := to[0]
-			if !(c >= 'A' && c <= 'Z') {
+			if c < 'A' || c > 'Z' {
 				t.Errorf("reference-form edge to non-Capitalized target %q (ref_context=%s) — capitalization gate leaked", e.To, uk)
 			}
 		}

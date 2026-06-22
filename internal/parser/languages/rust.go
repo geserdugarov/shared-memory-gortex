@@ -351,6 +351,12 @@ func (e *RustExtractor) Extract(filePath string, src []byte) (*parser.Extraction
 		}
 	}
 
+	// Emit the reference-form edges (construction, trait impls / bounds,
+	// casts, path / static access, derive attributes) the declaration-only
+	// type-use pass above does not cover. Owner attribution reuses the same
+	// funcRanges line map (file-node fallback).
+	emitRustReferenceForms(root, funcRanges, fileID, filePath, src, result)
+
 	captureValueRefCandidates(result, root, filePath, src)
 	captureFnValueCandidates(result, root, filePath, src)
 	return result, nil

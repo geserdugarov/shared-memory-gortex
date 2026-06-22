@@ -1233,6 +1233,12 @@ func (e *GoExtractor) Extract(filePath string, src []byte) (*parser.ExtractionRe
 	// Gin middleware-chain dispatcher + route registrations → resolver hints.
 	mineGinMiddleware(src, result)
 
+	// Composite/generic element type references — generic arguments,
+	// map key/value, channel element. These positions are dropped by the
+	// bare-name type passes, so without this find_usages of a type misses
+	// every place it appears only as an argument/element type.
+	emitGoTypeArgReferences(root, src, filePath, fileID, funcRanges, result)
+
 	return result, nil
 }
 

@@ -26,6 +26,12 @@ import (
 //     → EdgeReferences, Meta["ref_context"]="static_access"
 //   - ATTRIBUTE TYPE  `[Foo]` / `[Foo(...)]` (attribute) names the type Foo
 //     → EdgeReferences, Meta["ref_context"]="attribute"
+//   - GENERIC ARG     the type arguments inside a `<…>` (type_argument_list):
+//     `List<Foo>`, `Dictionary<string, Bar>`, `Task<Baz>`, nested
+//     `Dictionary<int, List<Qux>>`. The annotation / param / return type-use
+//     pass canonicalises a generic to its head and drops the arguments, so
+//     these element types would otherwise be invisible.
+//     → EdgeReferences, Meta["ref_context"]="generic_arg"
 //
 // Inheritance (`class X : Base, IFoo`) is intentionally NOT handled here:
 // emitCSharpBaseList already splits the base_list into EdgeExtends /
@@ -163,6 +169,44 @@ func emitCSharpReferenceForms(root *sitter.Node, src []byte, filePath, fileID st
 			// `[Foo]` / `[Foo(...)]` names the attribute type Foo.
 			if name := csharpAttributeTypeName(n, src); name != "" {
 				emit(name, line, graph.EdgeReferences, "attribute")
+			}
+
+		case "type_argument_list":
+			// The `<…>` of a generic spelling (`List<Foo>`,
+			// `Dictionary<string, Bar>`, `Task<Baz>`, `Foo<Bar<Baz>>`).
+			// The annotation / param / return type-use pass strips the
+			// argument list when it canonicalises a type to its head, so the
+			// element types are otherwise invisible to find_usages. Each
+			// argument is a direct named child here; emit a reference for the
+			// ones that name a user type. A nested generic argument
+			// (`List<Qux>` in `Dictionary<int, List<Qux>>`) is its own
+			// generic_name whose own type_argument_list this walker visits in
+			// turn, so emitting that argument's *head* (List) here and letting
+			// the inner list contribute Qux covers every depth without a
+			// manual recursion. Predefined primitives (`int`, `string`) parse
+			// as predefined_type and are skipped; the canon/primitive/
+			// capitalization gate in emit drops everything else lowercase.
+			for i := 0; i < int(n.NamedChildCount()); i++ {
+				arg := n.NamedChild(i)
+				if arg == nil {
+					continue
+				}
+				switch arg.Type() {
+				case "predefined_type":
+					// `int` / `string` / … — never a user type.
+					continue
+				case "generic_name":
+					// `List<Qux>` — its head names a type; the nested
+					// type_argument_list (<Qux>) is visited separately.
+					if head := csharpFirstChildOfType(arg, "identifier"); head != nil {
+						emit(strings.TrimSpace(head.Content(src)), line, graph.EdgeReferences, "generic_arg")
+					}
+				case "identifier", "qualified_name", "nullable_type", "array_type":
+					// `Foo`, `Ns.Foo`, `Foo?`, `Foo[]` — canonicalizeCSharpTypeRef
+					// (called inside emit) strips the namespace / nullable /
+					// array decoration down to the bare named type.
+					emit(strings.TrimSpace(arg.Content(src)), line, graph.EdgeReferences, "generic_arg")
+				}
 			}
 		}
 	})

@@ -175,6 +175,56 @@ func TestCSharpRefForm_OriginASTResolved(t *testing.T) {
 	}
 }
 
+// TestCSharpRefForm_GenericArgs verifies that the type arguments inside a
+// generic spelling — in a field/var annotation, a parameter, and a nested
+// generic — each emit an EdgeReferences with ref_context "generic_arg". The
+// canonicalising type-use pass strips the `<…>` and would otherwise lose
+// these element types. Predefined primitives (int/string) and the `var`
+// keyword must NOT produce a generic_arg edge.
+func TestCSharpRefForm_GenericArgs(t *testing.T) {
+	src := `using System.Collections.Generic;
+using System.Threading.Tasks;
+
+public class Svc {
+	private List<RestClient> _clients;
+
+	public Dictionary<string, RestError> Handle(Task<RestRequest> a) {
+		var d = new Dictionary<int, List<RestResponse>>();
+		return null;
+	}
+}
+`
+	_, edges := runCSharpExtract(t, "x/Svc.cs", src)
+
+	// Field annotation argument (List<RestClient>) — attributed to the file
+	// node, since a field declaration has no enclosing function.
+	if !hasCSharpRefEdge(edges, "x/Svc.cs", "RestClient", graph.EdgeReferences, "generic_arg") {
+		t.Errorf("expected EdgeReferences (generic_arg) from file → RestClient (field annotation)")
+	}
+
+	// Parameter argument (Task<RestRequest>), return-type arguments
+	// (Dictionary<string, RestError>), and the nested-generic arguments
+	// (new Dictionary<int, List<RestResponse>>()) are all inside the method,
+	// so they attribute to the method node.
+	for _, tgt := range []string{"RestRequest", "RestError", "List", "RestResponse"} {
+		if !hasCSharpRefEdge(edges, csharpRefMethodID, tgt, graph.EdgeReferences, "generic_arg") {
+			t.Errorf("expected EdgeReferences (generic_arg) %s → %s", csharpRefMethodID, tgt)
+		}
+	}
+
+	// Primitives inside the type arguments (string, int) and the `var`
+	// keyword must never be emitted as a generic_arg reference.
+	for _, e := range edges {
+		if rc, _ := e.Meta["ref_context"].(string); rc != "generic_arg" {
+			continue
+		}
+		switch e.To {
+		case "unresolved::string", "unresolved::int", "unresolved::var":
+			t.Errorf("generic_arg must not emit %s for a primitive / var", e.To)
+		}
+	}
+}
+
 // TestCSharpRefForm_Negatives confirms the scope guards: a lowercase free
 // call (`bar()`), an instance member access (`this.x`, `local.Foo`), a
 // primitive (`int`), and `var` produce no reference-form edge.

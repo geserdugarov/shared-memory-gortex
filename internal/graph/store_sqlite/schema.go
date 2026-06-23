@@ -48,6 +48,8 @@ CREATE TABLE IF NOT EXISTS nodes (
     file_path     TEXT NOT NULL,
     start_line    INTEGER NOT NULL DEFAULT 0,
     end_line      INTEGER NOT NULL DEFAULT 0,
+    start_column  INTEGER NOT NULL DEFAULT 0,
+    end_column    INTEGER NOT NULL DEFAULT 0,
     language      TEXT NOT NULL DEFAULT '',
     repo_prefix   TEXT NOT NULL DEFAULT '',
     workspace_id  TEXT NOT NULL DEFAULT '',
@@ -56,6 +58,12 @@ CREATE TABLE IF NOT EXISTS nodes (
     visibility    TEXT,
     doc           TEXT,
     external      INTEGER,
+    return_type   TEXT,
+    is_async      INTEGER,
+    is_static     INTEGER,
+    is_abstract   INTEGER,
+    is_exported   INTEGER,
+    updated_at    INTEGER,
     meta          BLOB
 ) WITHOUT ROWID;
 

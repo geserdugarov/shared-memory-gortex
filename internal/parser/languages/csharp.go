@@ -401,6 +401,8 @@ func (e *CSharpExtractor) extractCSharp(filePath string, src []byte) (*parser.Ex
 	captureValueRefCandidates(result, root, filePath, src)
 	captureFnValueCandidates(result, root, filePath, src)
 
+	captureMediatRDispatch(result, root, filePath, src)
+
 	return result, hadError, nil
 }
 

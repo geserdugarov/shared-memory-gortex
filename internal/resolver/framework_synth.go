@@ -99,6 +99,7 @@ const (
 	SynthVuexDispatch      = "vuex-dispatch"
 	SynthCelery            = "celery-dispatch"
 	SynthSpringEvent       = "spring-event"
+	SynthMediatR           = "mediatr-dispatch"
 	SynthGinMiddleware     = "gin-middleware"
 	SynthSvelteKitLoad     = "sveltekit-load"
 	SynthSpeculative       = "speculative-dispatch"
@@ -209,6 +210,9 @@ func defaultFrameworkSynthesizers() []FrameworkSynthesizer {
 		// Spring application events: publishEvent(new X()) → every
 		// @EventListener / ApplicationListener<X>, type-keyed fan-out.
 		synthFunc{name: SynthSpringEvent, fn: ResolveSpringEventCalls},
+		// MediatR CQRS dispatch: Send(new X()) → the IRequestHandler<X>
+		// Handle, Publish(new X()) → every INotificationHandler<X>.
+		synthFunc{name: SynthMediatR, fn: ResolveMediatRCalls},
 		// Gin middleware-chain dispatcher → registered handlers. Bridges the
 		// `c.handlers[idx](c)` indirection so ServeHTTP→handler reachability
 		// flows; repo-scoped, gated on a dispatcher existing.

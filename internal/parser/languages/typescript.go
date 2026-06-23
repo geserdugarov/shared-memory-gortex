@@ -562,17 +562,26 @@ func (e *TypeScriptExtractor) Extract(filePath string, src []byte) (*parser.Extr
 
 	// --- Event pub/sub edges ---
 	var pubsubEvents []pubsubEvent
+	var emitterEvents []jsEmitterEvent
 	for _, c := range calls {
 		if !c.isMember || c.expr == nil {
 			continue
 		}
 		if ev, ok := detectJSPubsubCall(c.expr, c.method, src, importPaths, c.line); ok {
 			pubsubEvents = append(pubsubEvents, ev)
+			continue
+		}
+		// Fallback: a bare emitter literal the import gate declined.
+		if em, ok := detectJSEmitterLiteralCall(c.expr, c.method, c.receiver, src, c.line); ok {
+			emitterEvents = append(emitterEvents, em)
 		}
 	}
 	// WebSocket / EventSource real-time client channels.
 	pubsubEvents = append(pubsubEvents, detectJSRealtimeEvents(src)...)
 	emitPubsubEvents(pubsubEvents,
+		func(line int) string { return findEnclosingFunc(funcRanges, line) },
+		filePath, "typescript", result)
+	emitJSEmitterLiteralEvents(emitterEvents,
 		func(line int) string { return findEnclosingFunc(funcRanges, line) },
 		filePath, "typescript", result)
 

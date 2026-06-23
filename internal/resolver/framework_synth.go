@@ -95,6 +95,7 @@ const (
 	SynthStoreFactory      = "store-factory"
 	SynthReduxThunk        = "redux-thunk"
 	SynthObjectRegistry    = "object-registry"
+	SynthRTKQuery          = "rtk-query"
 	SynthGinMiddleware     = "gin-middleware"
 	SynthSvelteKitLoad     = "sveltekit-load"
 	SynthSpeculative       = "speculative-dispatch"
@@ -193,6 +194,9 @@ func defaultFrameworkSynthesizers() []FrameworkSynthesizer {
 		// `new registry[key]().execute()`. Runs before the speculative
 		// pass so a claimed dispatch site suppresses the hidden best-guess.
 		synthFunc{name: SynthObjectRegistry, fn: ResolveObjectRegistryCalls},
+		// RTK Query generated-hook → createApi endpoint, and component →
+		// generated hook. Typed tier: the hook naming is RTK-contractual.
+		synthFunc{name: SynthRTKQuery, fn: ResolveRTKQueryCalls},
 		// Gin middleware-chain dispatcher → registered handlers. Bridges the
 		// `c.handlers[idx](c)` indirection so ServeHTTP→handler reachability
 		// flows; repo-scoped, gated on a dispatcher existing.

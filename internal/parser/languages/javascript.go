@@ -438,6 +438,7 @@ func (e *JavaScriptExtractor) Extract(filePath string, src []byte) (*parser.Extr
 	captureFnValueCandidates(result, root, filePath, src)
 	captureReduxThunkDispatches(result, root, filePath, src)
 	captureObjectRegistryDispatches(result, root, filePath, src)
+	captureRTKQueryEndpoints(result, root, filePath, "javascript", src)
 	return result, nil
 }
 

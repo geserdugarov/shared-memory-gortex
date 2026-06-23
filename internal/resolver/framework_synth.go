@@ -44,9 +44,32 @@ const (
 	// MetaProvenance records that an edge is a heuristic materialisation
 	// rather than a compiler-verified fact.
 	MetaProvenance = "provenance"
-	// ProvenanceHeuristic is the MetaProvenance value every framework
-	// synthesizer stamps — these edges are framework-dispatch inferences.
+	// ProvenanceHeuristic is the MetaProvenance value the string- and
+	// name-keyed framework synthesizers stamp — these edges are
+	// framework-dispatch inferences correlated by a literal (an event
+	// name, a dispatch string, a registry key) with no type evidence.
 	ProvenanceHeuristic = "heuristic"
+	// ProvenanceFramework is the MetaProvenance value the typed,
+	// decorator-, base-list- or type-keyed synthesizers stamp — the
+	// framework's own contract (a decorator, a generic base, a typed
+	// listener parameter) names the target, so the edge carries more
+	// confidence than a string-correlated guess. analyze kind=synthesizers
+	// reports the two tiers separately from the same MetaProvenance read.
+	ProvenanceFramework = "framework"
+)
+
+// Confidence tiers the framework synthesizers stamp on a landed edge.
+// Typed/decorator/base-list/type-keyed passes (RTK Query, Celery, Spring,
+// MediatR, Sidekiq, Laravel, GoFrame) use ConfidenceTyped; the string-
+// and name-keyed passes (Vuex, Redux-thunk, object-registry, fn-pointer,
+// Django) use ConfidenceHeuristic.
+const (
+	// ConfidenceTyped is the confidence for a type-/decorator-/base-list-
+	// keyed dispatch edge — the framework contract names the target.
+	ConfidenceTyped = 0.85
+	// ConfidenceHeuristic is the confidence for a string-/name-keyed
+	// dispatch edge — correlated by a literal, not by a type.
+	ConfidenceHeuristic = 0.6
 )
 
 // Stable per-synthesizer provenance names. Used both as the registry
@@ -92,6 +115,23 @@ func StampSynthesized(e *graph.Edge, name string) {
 	if _, ok := e.Meta[MetaProvenance]; !ok {
 		e.Meta[MetaProvenance] = ProvenanceHeuristic
 	}
+}
+
+// StampSynthesizedTyped marks an edge as the product of a typed-tier
+// framework synthesizer: like StampSynthesized, but records
+// ProvenanceFramework instead of ProvenanceHeuristic so the
+// type-/decorator-/base-list-keyed passes (RTK Query, Celery, Spring,
+// MediatR, Sidekiq, Laravel, GoFrame) separate from the string-keyed
+// ones in analyze kind=synthesizers. Safe on an edge with a nil Meta map.
+func StampSynthesizedTyped(e *graph.Edge, name string) {
+	if e == nil {
+		return
+	}
+	if e.Meta == nil {
+		e.Meta = map[string]any{}
+	}
+	e.Meta[MetaProvenance] = ProvenanceFramework
+	StampSynthesized(e, name)
 }
 
 // UnstampSynthesized clears the provenance markers an edge picked up from

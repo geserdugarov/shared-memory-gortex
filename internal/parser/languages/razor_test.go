@@ -188,3 +188,38 @@ func TestRazorComponentTagAndGenericArg(t *testing.T) {
 		t.Errorf("a generic container inside @code must not become a component-tag reference")
 	}
 }
+
+func TestRazorBlazorBuiltinsSkipped(t *testing.T) {
+	src := []byte(`<EditForm Model="m">
+  <InputText @bind-Value="name" />
+  <ValidationSummary />
+  <Router />
+  <MyWidget />
+</EditForm>
+`)
+	res, err := NewRazorExtractor().Extract("Pages/Form.razor", src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const comp = "Pages/Form.razor::Form"
+	for _, b := range []string{"EditForm", "InputText", "ValidationSummary", "Router"} {
+		if razorTagRef(res.Edges, comp, b) != nil {
+			t.Errorf("Blazor framework component %s must not emit a reference", b)
+		}
+	}
+	if razorTagRef(res.Edges, comp, "MyWidget") == nil {
+		t.Errorf("user component MyWidget should still be referenced")
+	}
+}
+
+func TestBlazorBuiltinNotSuppressedInSvelte(t *testing.T) {
+	// `EditForm` is a Blazor builtin but a plausible user component elsewhere —
+	// the suppression must be scoped to Razor, not leak into other languages.
+	res, err := NewSvelteExtractor().Extract("Form.svelte", []byte("<EditForm />\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if razorTagRef(res.Edges, "Form.svelte::Form", "EditForm") == nil {
+		t.Errorf("a user EditForm component in Svelte must NOT be suppressed (language-scoping)")
+	}
+}

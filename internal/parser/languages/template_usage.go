@@ -31,6 +31,54 @@ var templateBuiltins = map[string]bool{
 	"ClientOnly": true, "DevOnly": true,
 }
 
+// blazorBuiltins are Blazor framework components that ship with ASP.NET Core
+// and have no user component file — so a `<Router>` / `<EditForm>` /
+// `<InputText>` markup tag must never become a dangling cross-file reference.
+// Scoped to Razor only (via templateBuiltinsFor), because several of these
+// names (EditForm, InputText, …) are plausible user component names in other
+// template languages.
+var blazorBuiltins = map[string]bool{
+	"Router": true, "RouteView": true, "AuthorizeRouteView": true, "Found": true,
+	"NotFound": true, "Navigating": true, "LayoutView": true, "NavLink": true,
+	"CascadingValue": true, "CascadingAuthenticationState": true,
+	"DynamicComponent": true, "ErrorBoundary": true, "FocusOnNavigate": true,
+	"HeadContent": true, "HeadOutlet": true, "PageTitle": true,
+	"SectionContent": true, "SectionOutlet": true, "Virtualize": true,
+	"AntiforgeryToken": true, "FormMappingScope": true,
+	// Forms.
+	"EditForm": true, "DataAnnotationsValidator": true, "ObjectGraphDataAnnotationsValidator": true,
+	"ValidationSummary": true, "ValidationMessage": true, "InputText": true,
+	"InputTextArea": true, "InputNumber": true, "InputSelect": true,
+	"InputCheckbox": true, "InputDate": true, "InputRadio": true,
+	"InputRadioGroup": true, "InputFile": true,
+	// Authorization.
+	"AuthorizeView": true, "Authorized": true, "NotAuthorized": true, "Authorizing": true,
+}
+
+// razorBuiltins is the union of the shared template builtins and the Blazor
+// framework components, precomputed so the Razor tag scan skips both.
+var razorBuiltins = unionStringSets(templateBuiltins, blazorBuiltins)
+
+// unionStringSets returns the set union of its arguments.
+func unionStringSets(sets ...map[string]bool) map[string]bool {
+	out := map[string]bool{}
+	for _, s := range sets {
+		for k := range s {
+			out[k] = true
+		}
+	}
+	return out
+}
+
+// templateBuiltinsFor returns the framework-component skip set for a template
+// language — the shared set everywhere, plus the Blazor builtins for Razor.
+func templateBuiltinsFor(lang string) map[string]bool {
+	if lang == "razor" {
+		return razorBuiltins
+	}
+	return templateBuiltins
+}
+
 // stripNuxtLazyPrefix removes the Nuxt `Lazy` auto-import prefix so a
 // `<LazyBaseButton>` lazy-hydrated usage references the same `BaseButton`
 // component as `<BaseButton>`. Only strips when `Lazy` is followed by an
@@ -50,7 +98,8 @@ func stripNuxtLazyPrefix(name string) string {
 // that makes a child component a resolved dependent. Kebab-case custom elements
 // are normalized to PascalCase (my-button -> MyButton); plain HTML elements and
 // framework special elements (svelte:, astro:) are skipped.
-func mineTemplateComponentUsages(src []byte, filePath, componentID string, result *parser.ExtractionResult) {
+func mineTemplateComponentUsages(src []byte, filePath, componentID, lang string, result *parser.ExtractionResult) {
+	builtins := templateBuiltinsFor(lang)
 	tmpl := templateBlockRe.ReplaceAllFunc(src, blankPreservingNewlines)
 	for _, idx := range templateTagRe.FindAllSubmatchIndex(tmpl, -1) {
 		// idx[0:2] spans the whole `<Tag` match; idx[2:4] is the captured name.
@@ -59,7 +108,7 @@ func mineTemplateComponentUsages(src []byte, filePath, componentID string, resul
 			continue
 		}
 		name := stripNuxtLazyPrefix(componentRefName(raw))
-		if name == "" || templateBuiltins[name] {
+		if name == "" || builtins[name] {
 			continue
 		}
 		// One positioned edge per render site — NOT deduplicated by name. The

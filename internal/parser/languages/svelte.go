@@ -47,7 +47,7 @@ func (e *SvelteExtractor) Extract(filePath string, src []byte) (*parser.Extracti
 	})
 
 	carveAndDelegateScripts(src, filePath, fileNode.ID, "svelte", e.ts, e.js, result)
-	mineTemplateComponentUsages(src, filePath, componentID, result)
+	mineTemplateComponentUsages(src, filePath, componentID, "svelte", result)
 	applyFrameworkTemplatePasses(src, filePath, componentID, "svelte", result)
 	return result, nil
 }

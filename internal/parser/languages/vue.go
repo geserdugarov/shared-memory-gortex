@@ -72,7 +72,7 @@ func (e *VueExtractor) Extract(filePath string, src []byte) (*parser.ExtractionR
 		}
 		delegateInlineScriptSlice(delegate, content, lineOffset, filePath, fileNode.ID, "vue", result)
 	}
-	mineTemplateComponentUsages(src, filePath, componentID, result)
+	mineTemplateComponentUsages(src, filePath, componentID, "vue", result)
 	applyFrameworkTemplatePasses(src, filePath, componentID, "vue", result)
 	return result, nil
 }

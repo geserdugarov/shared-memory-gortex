@@ -90,7 +90,7 @@ func (e *RazorExtractor) Extract(filePath string, src []byte) (*parser.Extractio
 	// for tags.
 	if componentID != "" {
 		blanked := razorBlankCode(src)
-		mineTemplateComponentUsages(blanked, filePath, componentID, result)
+		mineTemplateComponentUsages(blanked, filePath, componentID, "razor", result)
 		for _, m := range razorGenericArgRE.FindAllSubmatch(blanked, -1) {
 			emitRazorTypeRef(result, fileNode.ID, filePath, string(m[1]))
 		}

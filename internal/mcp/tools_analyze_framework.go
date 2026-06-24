@@ -200,6 +200,45 @@ func (s *Server) handleAnalyzeSwiftUIViews(ctx context.Context, req mcp.CallTool
 	return s.respondJSONOrTOON(ctx, req, map[string]any{"roles": rows, "total": len(rows)})
 }
 
+// handleAnalyzeUIKitClasses groups UIKit types by their classified role
+// (view_controller / view / cell), stamped on Meta["uikit_role"].
+func (s *Server) handleAnalyzeUIKitClasses(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	roleFilter := strings.TrimSpace(stringArg(req.GetArguments(), "role"))
+	byRole := map[string][]string{}
+	for _, n := range s.graph.AllNodes() {
+		if n == nil || n.Meta == nil {
+			continue
+		}
+		role, _ := n.Meta["uikit_role"].(string)
+		if role == "" || (roleFilter != "" && role != roleFilter) {
+			continue
+		}
+		byRole[role] = append(byRole[role], n.ID)
+	}
+	type roleRow struct {
+		Role    string   `json:"role"`
+		Classes []string `json:"classes"`
+		Count   int      `json:"count"`
+	}
+	rows := make([]roleRow, 0, len(byRole))
+	for r, ids := range byRole {
+		sort.Strings(ids)
+		rows = append(rows, roleRow{Role: r, Classes: ids, Count: len(ids)})
+	}
+	sort.Slice(rows, func(i, j int) bool { return rows[i].Role < rows[j].Role })
+	if isCompact(req) {
+		var b strings.Builder
+		for _, r := range rows {
+			fmt.Fprintf(&b, "%s: %d\n", r.Role, r.Count)
+		}
+		if len(rows) == 0 {
+			b.WriteString("no uikit classes\n")
+		}
+		return mcp.NewToolResultText(b.String()), nil
+	}
+	return s.respondJSONOrTOON(ctx, req, map[string]any{"roles": rows, "total": len(rows)})
+}
+
 func (s *Server) handleAnalyzeDrupalHooks(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	nameFilter := strings.TrimSpace(stringArg(req.GetArguments(), "name"))
 	hooks := map[string][]string{}

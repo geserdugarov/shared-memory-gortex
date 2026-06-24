@@ -84,6 +84,7 @@ var analyzeKinds = []string{
 	"temporal_verify",
 	"tests_as_edges",
 	"todos",
+	"uikit_classes",
 	"unclosed_channels",
 	"unreferenced_tables",
 	"unsafe_patterns",

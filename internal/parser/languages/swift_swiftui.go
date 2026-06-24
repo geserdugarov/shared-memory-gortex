@@ -6,13 +6,14 @@ import (
 	sitter "github.com/zzet/gortex/internal/parser/tsitter"
 )
 
-// captureSwiftUIRoles classifies SwiftUI types: a struct/class conforming to
-// `View` is a component; an `@main` struct conforming to `App` is the app
-// entry point. The role is stamped on the type node's Meta["swiftui_role"],
-// and an app entry additionally carries Meta["entry_point"]=true so the
-// dead-code and process analyzers treat it as a root. Runs at the tail of
-// Extract so the type nodes already exist.
-func captureSwiftUIRoles(result *parser.ExtractionResult, root *sitter.Node, filePath string, src []byte) {
+// captureAppleUIRoles classifies Apple-UI types from their inheritance clause:
+// a SwiftUI `View` conformer is a component, an `@main` `App` is the app entry
+// point, and a `UIViewController` / `UIView` / `UITableViewCell` subclass is a
+// UIKit view-controller / view / cell. The role is stamped on the type node's
+// Meta["swiftui_role"] or Meta["uikit_role"]; an app entry additionally carries
+// Meta["entry_point"]=true so the dead-code and process analyzers treat it as a
+// root. Runs at the tail of Extract so the type nodes already exist.
+func captureAppleUIRoles(result *parser.ExtractionResult, root *sitter.Node, filePath string, src []byte) {
 	if root == nil || result == nil {
 		return
 	}
@@ -25,14 +26,15 @@ func captureSwiftUIRoles(result *parser.ExtractionResult, root *sitter.Node, fil
 			return
 		}
 		conf := swiftUIConformances(n, src)
-		role := ""
+		swiftRole := ""
 		switch {
 		case swiftUIHasMainAttr(n, src) && conf["App"]:
-			role = "app_entry"
+			swiftRole = "app_entry"
 		case conf["View"]:
-			role = "component"
+			swiftRole = "component"
 		}
-		if role == "" {
+		uikitRole := uikitRoleFor(conf)
+		if swiftRole == "" && uikitRole == "" {
 			return
 		}
 		nd := findSwiftUITypeNode(result.Nodes, name, int(n.StartPoint().Row)+1)
@@ -42,11 +44,31 @@ func captureSwiftUIRoles(result *parser.ExtractionResult, root *sitter.Node, fil
 		if nd.Meta == nil {
 			nd.Meta = map[string]any{}
 		}
-		nd.Meta["swiftui_role"] = role
-		if role == "app_entry" {
-			nd.Meta["entry_point"] = true
+		if swiftRole != "" {
+			nd.Meta["swiftui_role"] = swiftRole
+			if swiftRole == "app_entry" {
+				nd.Meta["entry_point"] = true
+			}
+		}
+		if uikitRole != "" {
+			nd.Meta["uikit_role"] = uikitRole
 		}
 	})
+}
+
+// uikitRoleFor classifies a UIKit subclass by the framework base type in its
+// inheritance clause. Cell base types are checked before UIView since they are
+// themselves UIView subclasses by name shape only.
+func uikitRoleFor(conf map[string]bool) string {
+	switch {
+	case conf["UIViewController"], conf["UITableViewController"], conf["UICollectionViewController"], conf["UINavigationController"], conf["UITabBarController"]:
+		return "view_controller"
+	case conf["UITableViewCell"], conf["UICollectionViewCell"]:
+		return "cell"
+	case conf["UIView"]:
+		return "view"
+	}
+	return ""
 }
 
 // swiftUITypeName returns the declared name of a class_declaration — its first

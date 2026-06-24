@@ -110,6 +110,7 @@ const (
 	SynthFastAPIResolve    = "fastapi-resolve"
 	SynthRailsResolve      = "rails-resolve"
 	SynthSwiftUIResolve    = "swiftui-resolve"
+	SynthUIKitResolve      = "uikit-resolve"
 	SynthGinMiddleware     = "gin-middleware"
 	SynthSvelteKitLoad     = "sveltekit-load"
 	SynthSpeculative       = "speculative-dispatch"
@@ -257,6 +258,10 @@ func defaultFrameworkSynthesizers() []FrameworkSynthesizer {
 		// `*ViewModel` / `*Store` / `*Manager` / PascalCase-model reference
 		// binds to its /Views/ /ViewModels/ /Stores/ /Models/ definition.
 		synthFunc{name: SynthSwiftUIResolve, fn: ResolveSwiftUIRefs},
+		// UIKit directory-convention fallback: a residual `*ViewController` /
+		// `*Cell` / `*Delegate` / `*DataSource` reference binds to its
+		// /ViewControllers/ /Cells/ /Delegates/ definition.
+		synthFunc{name: SynthUIKitResolve, fn: ResolveUIKitRefs},
 		// GoFrame reflective route → controller method, joined by the
 		// method's request-struct type rather than its name.
 		synthFunc{name: SynthGoFrameRoute, fn: ResolveGoFrameRoutes},

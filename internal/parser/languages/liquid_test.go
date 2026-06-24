@@ -97,3 +97,28 @@ func TestLiquidExtractor_SnippetImportNodes(t *testing.T) {
 	}
 	assert.Equal(t, 2, importEdges, "both render-card usages keep their EdgeImports")
 }
+
+func TestLiquidExtractor_SectionImportNode(t *testing.T) {
+	src := []byte("{% section 'header' %}\n")
+	res, err := NewLiquidExtractor().Extract("templates/page.liquid", src)
+	require.NoError(t, err)
+
+	var sect *graph.Node
+	for _, n := range res.Nodes {
+		if n.Kind == graph.KindImport {
+			sect = n
+		}
+	}
+	require.NotNil(t, sect, "section import node minted")
+	assert.Equal(t, "header", sect.Name)
+	assert.Equal(t, "section", sect.Meta["liquid_tag"])
+	assert.Equal(t, "sections/header.liquid", sect.Meta["target"])
+
+	var hasEdge bool
+	for _, e := range res.Edges {
+		if e.Kind == graph.EdgeImports && e.To == "unresolved::import::sections/header.liquid" {
+			hasEdge = true
+		}
+	}
+	assert.True(t, hasEdge, "EdgeImports to sections/header.liquid preserved")
+}

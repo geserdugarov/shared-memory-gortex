@@ -481,11 +481,14 @@ var httpPatterns = []httpPattern{
 	// receiver is anchored to the conventional names (app / routes /
 	// router) — same trade-off express makes for route-group vars.
 	{
-		re:         regexp.MustCompile(`\b(?:app|routes|router)\.(get|post|put|delete|patch)\(\s*"([^"]+)"(?:[^{)]*?\buse:\s*(\w+))?`),
+		// Receiver is captured (group 1) — not just app/routes/router — so a
+		// route declared on a `.grouped(...)` group var carries its receiver
+		// for the prefix-join pass. The `use:` label binds the handler.
+		re:         regexp.MustCompile(`\b(\w+)\.(get|post|put|delete|patch)\(\s*"([^"]+)"(?:[^{)]*?\buse:\s*(\w+))?`),
 		role:       RoleProvider,
-		methodGrp:  1,
-		pathGrp:    2,
-		handlerGrp: 3,
+		methodGrp:  2,
+		pathGrp:    3,
+		handlerGrp: 4,
 		framework:  "vapor",
 		confidence: 0.85,
 		languages:  []string{"swift"},

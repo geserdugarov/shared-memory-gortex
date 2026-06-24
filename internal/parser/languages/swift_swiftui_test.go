@@ -63,6 +63,28 @@ struct Plain {
 	}
 }
 
+func TestSwiftUI_FluentModelClassification(t *testing.T) {
+	src := []byte(`import Fluent
+
+final class User: Model {
+    static let schema = "users"
+}
+`)
+	res, err := NewSwiftExtractor().Extract("Sources/App/Models/User.swift", []byte(src))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, n := range res.Nodes {
+		if n.Kind == graph.KindType && n.Name == "User" {
+			if b, _ := n.Meta["fluent_model"].(bool); !b {
+				t.Errorf("`final class User: Model` should carry Meta[fluent_model]=true")
+			}
+			return
+		}
+	}
+	t.Fatalf("User type node not found")
+}
+
 func TestSwiftUI_AppWithoutMainNotEntry(t *testing.T) {
 	// Conformance to App without @main is not classified as the app entry.
 	src := []byte(`struct Helper: App {

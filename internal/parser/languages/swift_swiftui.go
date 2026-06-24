@@ -34,7 +34,8 @@ func captureAppleUIRoles(result *parser.ExtractionResult, root *sitter.Node, fil
 			swiftRole = "component"
 		}
 		uikitRole := uikitRoleFor(conf)
-		if swiftRole == "" && uikitRole == "" {
+		fluentModel := conf["Model"]
+		if swiftRole == "" && uikitRole == "" && !fluentModel {
 			return
 		}
 		nd := findSwiftUITypeNode(result.Nodes, name, int(n.StartPoint().Row)+1)
@@ -52,6 +53,9 @@ func captureAppleUIRoles(result *parser.ExtractionResult, root *sitter.Node, fil
 		}
 		if uikitRole != "" {
 			nd.Meta["uikit_role"] = uikitRole
+		}
+		if fluentModel {
+			nd.Meta["fluent_model"] = true
 		}
 	})
 }

@@ -111,6 +111,7 @@ const (
 	SynthRailsResolve      = "rails-resolve"
 	SynthSwiftUIResolve    = "swiftui-resolve"
 	SynthUIKitResolve      = "uikit-resolve"
+	SynthVaporResolve      = "vapor-resolve"
 	SynthGinMiddleware     = "gin-middleware"
 	SynthSvelteKitLoad     = "sveltekit-load"
 	SynthSpeculative       = "speculative-dispatch"
@@ -262,6 +263,10 @@ func defaultFrameworkSynthesizers() []FrameworkSynthesizer {
 		// `*Cell` / `*Delegate` / `*DataSource` reference binds to its
 		// /ViewControllers/ /Cells/ /Delegates/ definition.
 		synthFunc{name: SynthUIKitResolve, fn: ResolveUIKitRefs},
+		// Vapor directory-convention fallback: a residual `*Controller` /
+		// `*Middleware` reference binds to its /Controllers/ /Middleware/
+		// definition. After UIKit so `*ViewController` binds there first.
+		synthFunc{name: SynthVaporResolve, fn: ResolveVaporRefs},
 		// GoFrame reflective route → controller method, joined by the
 		// method's request-struct type rather than its name.
 		synthFunc{name: SynthGoFrameRoute, fn: ResolveGoFrameRoutes},

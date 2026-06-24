@@ -5,7 +5,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 )
 
 // cppTU is one C/C++ translation unit's reconstructed include search path,
@@ -23,10 +22,9 @@ type compileCommand struct {
 	Arguments []string `json:"arguments"`
 }
 
-var (
-	cppIncludeDirMu    sync.Mutex
-	cppIncludeDirCache = map[string]map[string]cppTU{} // repoRoot → file → TU
-)
+// cppIncludeDirCache is the long-lived, memory-bounded LRU of per-repo-root
+// compile-DB include-dir sets (bounded by GORTEX_RESOLVER_CACHE_MAX_MB).
+var cppIncludeDirCache = newCppIncludeDirCache()
 
 // loadCompileCommands parses compile_commands.json at the repo root (and any
 // build*/compile_commands.json), reconstructing each TU's ordered include search
@@ -38,12 +36,9 @@ func loadCompileCommands(repoRoot string) map[string]cppTU {
 	if repoRoot == "" {
 		return nil
 	}
-	cppIncludeDirMu.Lock()
-	if c, ok := cppIncludeDirCache[repoRoot]; ok {
-		cppIncludeDirMu.Unlock()
+	if c, ok := cppIncludeDirCache.get(repoRoot); ok {
 		return c
 	}
-	cppIncludeDirMu.Unlock()
 
 	out := map[string]cppTU{}
 	for _, dbPath := range compileDBLocations(repoRoot) {
@@ -64,18 +59,14 @@ func loadCompileCommands(repoRoot string) map[string]cppTU {
 		}
 	}
 
-	cppIncludeDirMu.Lock()
-	cppIncludeDirCache[repoRoot] = out
-	cppIncludeDirMu.Unlock()
+	cppIncludeDirCache.put(repoRoot, out)
 	return out
 }
 
 // clearCppIncludeDirCache drops the cached include-dir set for a repo root so
 // the next index re-reads compile_commands.json.
 func clearCppIncludeDirCache(repoRoot string) {
-	cppIncludeDirMu.Lock()
-	delete(cppIncludeDirCache, repoRoot)
-	cppIncludeDirMu.Unlock()
+	cppIncludeDirCache.clear(repoRoot)
 }
 
 // compileDBLocations returns the absolute paths of the compile_commands.json

@@ -336,9 +336,7 @@ func (e *KotlinExtractor) Extract(filePath string, src []byte) (*parser.Extracti
 				// Static dispatch: `Foo.create()` / `Foo.Factory.thing()`.
 				edge.Meta = map[string]any{"receiver_type": c.receiver}
 			case strings.Contains(c.receiver, ".") || strings.Contains(c.receiver, "("):
-				if chainType := resolveChainType(c.receiver, tenv, result); chainType != "" {
-					edge.Meta = map[string]any{"receiver_type": chainType}
-				}
+				stampFactoryChainReceiver(edge, c.receiver, resolveChainType(c.receiver, tenv, result))
 			}
 		}
 		result.Edges = append(result.Edges, edge)

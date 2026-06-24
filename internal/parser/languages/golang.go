@@ -1029,12 +1029,7 @@ func (e *GoExtractor) Extract(filePath string, src []byte) (*parser.ExtractionRe
 					composed[k] = v
 				}
 			}
-			if chainType := resolveChainType(c.receiver, composed, result); chainType != "" {
-				if edge.Meta == nil {
-					edge.Meta = map[string]any{}
-				}
-				edge.Meta["receiver_type"] = chainType
-			}
+			stampFactoryChainReceiver(edge, c.receiver, resolveChainType(c.receiver, composed, result))
 		}
 		applyGoGRPCRegisterMeta(edge, c, src, tenv)
 		applyGoTemporalRegisterMeta(edge, c)

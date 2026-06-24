@@ -91,6 +91,7 @@ const (
 	SynthFabric            = "fabric-codegen"
 	SynthMyBatis           = "mybatis"
 	SynthRustScope         = "rust-scope"
+	SynthFactoryChain      = "factory-chain"
 	SynthSQLCallsite       = "sql-callsite"
 	SynthStoreFactory      = "store-factory"
 	SynthReduxThunk        = "redux-thunk"
@@ -278,6 +279,9 @@ func defaultFrameworkSynthesizers() []FrameworkSynthesizer {
 		// unresolved Rust calls land before external-call synthesis
 		// classifies the rest as external.
 		synthFunc{name: SynthRustScope, fn: ResolveRustScopeCalls},
+		// After rust-scope and the implements/extends-producing passes so the
+		// cross-file factory-chain walk + conformance hop see settled edges.
+		synthFunc{name: SynthFactoryChain, fn: ResolveFactoryChains},
 		// Function-as-value callback registration — binds each captured
 		// value-position function identifier to its same-file definition and
 		// drops unbound candidates. The per-language capture feeds it via

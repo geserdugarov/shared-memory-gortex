@@ -301,9 +301,7 @@ func (e *RustExtractor) Extract(filePath string, src []byte) (*parser.Extraction
 			if recvType, ok := tenv[c.receiver]; ok {
 				edge.Meta = map[string]any{"receiver_type": recvType}
 			} else if strings.Contains(c.receiver, ".") || strings.Contains(c.receiver, "(") {
-				if chainType := resolveChainType(c.receiver, tenv, result); chainType != "" {
-					edge.Meta = map[string]any{"receiver_type": chainType}
-				}
+				stampFactoryChainReceiver(edge, c.receiver, resolveChainType(c.receiver, tenv, result))
 			}
 			// Record a self/Self receiver so the Rust scope resolver can
 			// bind a `self.method()` selector to the enclosing impl type

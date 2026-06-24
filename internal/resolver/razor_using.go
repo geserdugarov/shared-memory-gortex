@@ -69,9 +69,10 @@ func (r *Resolver) resolveRazorUsings() {
 		return set
 	}
 
-	// Type index: simple name → candidate (id, namespace). Razor components and
-	// C# classes/structs/records/enums are KindType; interfaces KindInterface.
-	type typeCand struct{ id, ns string }
+	// Type index: simple name → candidate (id, namespace, language). Razor
+	// components and C# classes/structs/records/enums are KindType; interfaces
+	// KindInterface.
+	type typeCand struct{ id, ns, lang string }
 	typesByName := map[string][]typeCand{}
 	for _, kind := range []graph.NodeKind{graph.KindType, graph.KindInterface} {
 		for n := range r.graph.NodesByKind(kind) {
@@ -79,7 +80,7 @@ func (r *Resolver) resolveRazorUsings() {
 				continue
 			}
 			ns, _ := n.Meta["scope_ns"].(string)
-			typesByName[n.Name] = append(typesByName[n.Name], typeCand{id: n.ID, ns: ns})
+			typesByName[n.Name] = append(typesByName[n.Name], typeCand{id: n.ID, ns: ns, lang: n.Language})
 		}
 	}
 
@@ -97,7 +98,8 @@ func (r *Resolver) resolveRazorUsings() {
 		if i := strings.Index(fileID, "::"); i >= 0 {
 			fileID = fileID[:i]
 		}
-		if fileLang[fileID] != "razor" {
+		refLang := fileLang[fileID]
+		if refLang != "razor" {
 			continue
 		}
 		cands := typesByName[name]
@@ -111,6 +113,12 @@ func (r *Resolver) resolveRazorUsings() {
 		match, ambiguous := "", false
 		for _, c := range cands {
 			if c.ns == "" {
+				continue
+			}
+			// Only bind within the same language family — a Razor reference may
+			// bind a C# type (both dotnet) but never a coincidentally-named
+			// TypeScript component.
+			if !sameLanguageFamily(refLang, c.lang) {
 				continue
 			}
 			if _, ok := eff[c.ns]; !ok {

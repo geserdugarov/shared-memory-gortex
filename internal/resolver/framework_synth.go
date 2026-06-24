@@ -302,6 +302,10 @@ type SynthCount struct {
 type FrameworkSynthReport struct {
 	Total int          `json:"total"`
 	Per   []SynthCount `json:"per_synthesizer"`
+	// Gated counts synthesized reference/import edges dropped by the
+	// cross-language-family gate (coincidental PascalCase collisions across
+	// two known, different families; bridge synthesizers are exempt).
+	Gated int `json:"gated_cross_family,omitempty"`
 }
 
 // RunFrameworkSynthesizers runs every registered framework synthesizer
@@ -317,6 +321,10 @@ func RunFrameworkSynthesizers(g graph.Store) FrameworkSynthReport {
 		rep.Per = append(rep.Per, SynthCount{Name: s.Name(), Edges: n})
 		rep.Total += n
 	}
+	// Drop coincidental cross-language-family reference/import results before
+	// the claiming resolvers run, so a gated edge cannot be mistaken for a
+	// resolved placeholder downstream. Bridge synthesizers are exempt.
+	rep.Gated = applyFrameworkFamilyGate(g)
 	// Claiming resolvers run last — after every framework synthesizer has
 	// had its chance to consume a pre-stamped placeholder, but before
 	// external-call synthesis classifies the residual unresolved refs as

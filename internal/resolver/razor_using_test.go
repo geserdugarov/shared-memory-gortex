@@ -107,3 +107,26 @@ func TestResolveRazorUsings_NamespaceNotImported(t *testing.T) {
 
 	assert.Equal(t, "unresolved::Counter", ref.To, "type in a non-imported namespace stays unresolved")
 }
+
+// TestResolveRazorUsings_CrossFamilyNotBound pins that a Razor reference never
+// binds a coincidentally-named TypeScript component, even when its namespace is
+// imported — they are in different language families.
+func TestResolveRazorUsings_CrossFamilyNotBound(t *testing.T) {
+	g := graph.New()
+	seedFile(g, "Components/Page.razor", "razor")
+	seedFile(g, "src/Counter.tsx", "typescript")
+
+	razorUsing(g, "Components/Page.razor", "App.Widgets")
+	razorComponent(g, "Components/Page.razor::Page", "Page", "Components")
+	// A TypeScript component named Counter, coincidentally in namespace App.Widgets.
+	g.AddNode(&graph.Node{
+		ID: "src/Counter.tsx::Counter", Kind: graph.KindType, Name: "Counter",
+		Language: "typescript", Meta: map[string]any{"scope_ns": "App.Widgets"},
+	})
+	ref := razorTypeRef(g, "Components/Page.razor", "Counter")
+
+	r := New(g)
+	r.resolveRazorUsings()
+
+	assert.Equal(t, "unresolved::Counter", ref.To, "razor reference must not bind a TypeScript component")
+}

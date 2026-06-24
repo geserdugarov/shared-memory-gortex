@@ -223,6 +223,17 @@ func init() {
 			return h.extractDrupalRoutes(c.FilePath, c.Text, c.Lines, c.FileNodes, c.Lang, c.Tree)
 		},
 	})
+	// Play Framework conf/routes (langs nil: gated by filename, not language —
+	// the file is extensionless).
+	RegisterFrameworkRoutePass(&routePass{
+		name: "play", langs: nil,
+		detect: func(filePath string, _ []byte) bool {
+			return strings.HasSuffix(filePath, "conf/routes") || strings.HasSuffix(filePath, ".routes")
+		},
+		run: func(h *HTTPExtractor, c *RouteExtractCtx) []Contract {
+			return h.extractPlayRoutes(c.FilePath, c.Text, c.Lines, c.FileNodes, c.Lang, c.Tree)
+		},
+	})
 	RegisterFrameworkRoutePass(&routePass{
 		name: "express-objects", langs: []string{"typescript", "javascript"},
 		detect: func(_ string, src []byte) bool { return bytes.Contains(src, []byte(".route(")) },

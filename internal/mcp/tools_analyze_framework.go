@@ -8,6 +8,7 @@ import (
 
 	"github.com/mark3labs/mcp-go/mcp"
 
+	"github.com/zzet/gortex/internal/contracts"
 	"github.com/zzet/gortex/internal/graph"
 )
 
@@ -98,6 +99,181 @@ func (s *Server) handleAnalyzeRoutes(ctx context.Context, req mcp.CallToolReques
 		"routes": rows,
 		"total":  len(rows),
 	})
+}
+
+// handleAnalyzeRouteFrameworks lists the registered structural route passes
+// (the FrameworkRoutePass registry) — each pass's name and language filter —
+// alongside the count of route contract nodes per framework in the active
+// graph. It is the queryable face of the route-extraction front door, the
+// sibling of analyze kind=synthesizers for the post-resolution dispatch
+// registry.
+func (s *Server) handleAnalyzeRouteFrameworks(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	frameworkCounts := map[string]int{}
+	for _, n := range s.graph.AllNodes() {
+		if n == nil || n.Kind != graph.KindContract || n.Meta == nil {
+			continue
+		}
+		if fw := routeFramework(n); fw != "" {
+			frameworkCounts[fw]++
+		}
+	}
+	type passRow struct {
+		Name      string   `json:"name"`
+		Languages []string `json:"languages,omitempty"`
+		Routes    int      `json:"routes"`
+	}
+	var passes []passRow
+	for _, p := range contracts.RegisteredFrameworkRoutePasses() {
+		passes = append(passes, passRow{Name: p.Name(), Languages: p.Languages(), Routes: frameworkCounts[p.Name()]})
+	}
+	if isCompact(req) {
+		var b strings.Builder
+		for _, p := range passes {
+			fmt.Fprintf(&b, "%-20s %v  (%d routes)\n", p.Name, p.Languages, p.Routes)
+		}
+		if len(passes) == 0 {
+			b.WriteString("no registered route frameworks\n")
+		}
+		return mcp.NewToolResultText(b.String()), nil
+	}
+	return s.respondJSONOrTOON(ctx, req, map[string]any{
+		"passes":                    passes,
+		"route_counts_by_framework": frameworkCounts,
+		"total_passes":              len(passes),
+	})
+}
+
+// routeFramework reads the framework label off a contract node's Meta
+// (top-level or the nested contract_meta map).
+func routeFramework(n *graph.Node) string {
+	if n == nil {
+		return ""
+	}
+	if meta, ok := n.Meta["contract_meta"].(map[string]any); ok {
+		if fw, _ := meta["framework"].(string); fw != "" {
+			return fw
+		}
+	}
+	fw, _ := n.Meta["framework"].(string)
+	return fw
+}
+
+// handleAnalyzeDrupalHooks rolls up every detected Drupal hook
+// implementation, grouped by the hook it implements — the queryable face of
+// the hook layer ("which modules implement hook_node_insert?").
+// handleAnalyzeSwiftUIViews groups SwiftUI types by their classified role
+// (component / app_entry), stamped on Meta["swiftui_role"] by the extractor.
+func (s *Server) handleAnalyzeSwiftUIViews(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	roleFilter := strings.TrimSpace(stringArg(req.GetArguments(), "role"))
+	byRole := map[string][]string{}
+	for _, n := range s.graph.AllNodes() {
+		if n == nil || n.Meta == nil {
+			continue
+		}
+		role, _ := n.Meta["swiftui_role"].(string)
+		if role == "" || (roleFilter != "" && role != roleFilter) {
+			continue
+		}
+		byRole[role] = append(byRole[role], n.ID)
+	}
+	type roleRow struct {
+		Role  string   `json:"role"`
+		Types []string `json:"types"`
+		Count int      `json:"count"`
+	}
+	rows := make([]roleRow, 0, len(byRole))
+	for r, ids := range byRole {
+		sort.Strings(ids)
+		rows = append(rows, roleRow{Role: r, Types: ids, Count: len(ids)})
+	}
+	sort.Slice(rows, func(i, j int) bool { return rows[i].Role < rows[j].Role })
+	if isCompact(req) {
+		var b strings.Builder
+		for _, r := range rows {
+			fmt.Fprintf(&b, "%s: %d\n", r.Role, r.Count)
+		}
+		if len(rows) == 0 {
+			b.WriteString("no swiftui views\n")
+		}
+		return mcp.NewToolResultText(b.String()), nil
+	}
+	return s.respondJSONOrTOON(ctx, req, map[string]any{"roles": rows, "total": len(rows)})
+}
+
+// handleAnalyzeUIKitClasses groups UIKit types by their classified role
+// (view_controller / view / cell), stamped on Meta["uikit_role"].
+func (s *Server) handleAnalyzeUIKitClasses(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	roleFilter := strings.TrimSpace(stringArg(req.GetArguments(), "role"))
+	byRole := map[string][]string{}
+	for _, n := range s.graph.AllNodes() {
+		if n == nil || n.Meta == nil {
+			continue
+		}
+		role, _ := n.Meta["uikit_role"].(string)
+		if role == "" || (roleFilter != "" && role != roleFilter) {
+			continue
+		}
+		byRole[role] = append(byRole[role], n.ID)
+	}
+	type roleRow struct {
+		Role    string   `json:"role"`
+		Classes []string `json:"classes"`
+		Count   int      `json:"count"`
+	}
+	rows := make([]roleRow, 0, len(byRole))
+	for r, ids := range byRole {
+		sort.Strings(ids)
+		rows = append(rows, roleRow{Role: r, Classes: ids, Count: len(ids)})
+	}
+	sort.Slice(rows, func(i, j int) bool { return rows[i].Role < rows[j].Role })
+	if isCompact(req) {
+		var b strings.Builder
+		for _, r := range rows {
+			fmt.Fprintf(&b, "%s: %d\n", r.Role, r.Count)
+		}
+		if len(rows) == 0 {
+			b.WriteString("no uikit classes\n")
+		}
+		return mcp.NewToolResultText(b.String()), nil
+	}
+	return s.respondJSONOrTOON(ctx, req, map[string]any{"roles": rows, "total": len(rows)})
+}
+
+func (s *Server) handleAnalyzeDrupalHooks(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	nameFilter := strings.TrimSpace(stringArg(req.GetArguments(), "name"))
+	hooks := map[string][]string{}
+	for _, n := range s.graph.AllNodes() {
+		if n == nil || n.Meta == nil {
+			continue
+		}
+		hook, _ := n.Meta["drupal_hook"].(string)
+		if hook == "" || (nameFilter != "" && hook != nameFilter) {
+			continue
+		}
+		hooks[hook] = append(hooks[hook], n.ID)
+	}
+	type hookRow struct {
+		Hook            string   `json:"hook"`
+		Implementations []string `json:"implementations"`
+		Count           int      `json:"count"`
+	}
+	rows := make([]hookRow, 0, len(hooks))
+	for h, impls := range hooks {
+		sort.Strings(impls)
+		rows = append(rows, hookRow{Hook: h, Implementations: impls, Count: len(impls)})
+	}
+	sort.Slice(rows, func(i, j int) bool { return rows[i].Hook < rows[j].Hook })
+	if isCompact(req) {
+		var b strings.Builder
+		for _, r := range rows {
+			fmt.Fprintf(&b, "%s: %d implementation(s)\n", r.Hook, r.Count)
+		}
+		if len(rows) == 0 {
+			b.WriteString("no drupal hooks\n")
+		}
+		return mcp.NewToolResultText(b.String()), nil
+	}
+	return s.respondJSONOrTOON(ctx, req, map[string]any{"hooks": rows, "total": len(rows)})
 }
 
 // routeMethodAndPath pulls the most useful pair of fields out of a

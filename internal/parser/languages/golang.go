@@ -1029,12 +1029,7 @@ func (e *GoExtractor) Extract(filePath string, src []byte) (*parser.ExtractionRe
 					composed[k] = v
 				}
 			}
-			if chainType := resolveChainType(c.receiver, composed, result); chainType != "" {
-				if edge.Meta == nil {
-					edge.Meta = map[string]any{}
-				}
-				edge.Meta["receiver_type"] = chainType
-			}
+			stampFactoryChainReceiver(edge, c.receiver, resolveChainType(c.receiver, composed, result))
 		}
 		applyGoGRPCRegisterMeta(edge, c, src, tenv)
 		applyGoTemporalRegisterMeta(edge, c)
@@ -1238,6 +1233,9 @@ func (e *GoExtractor) Extract(filePath string, src []byte) (*parser.ExtractionRe
 	// bare-name type passes, so without this find_usages of a type misses
 	// every place it appears only as an argument/element type.
 	emitGoTypeArgReferences(root, src, filePath, fileID, funcRanges, result)
+
+	// GoFrame reflective routes: g.Meta-tagged request structs → controllers.
+	captureGoFrameRoutes(result, root, filePath, src)
 
 	return result, nil
 }

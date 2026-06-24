@@ -44,9 +44,32 @@ const (
 	// MetaProvenance records that an edge is a heuristic materialisation
 	// rather than a compiler-verified fact.
 	MetaProvenance = "provenance"
-	// ProvenanceHeuristic is the MetaProvenance value every framework
-	// synthesizer stamps — these edges are framework-dispatch inferences.
+	// ProvenanceHeuristic is the MetaProvenance value the string- and
+	// name-keyed framework synthesizers stamp — these edges are
+	// framework-dispatch inferences correlated by a literal (an event
+	// name, a dispatch string, a registry key) with no type evidence.
 	ProvenanceHeuristic = "heuristic"
+	// ProvenanceFramework is the MetaProvenance value the typed,
+	// decorator-, base-list- or type-keyed synthesizers stamp — the
+	// framework's own contract (a decorator, a generic base, a typed
+	// listener parameter) names the target, so the edge carries more
+	// confidence than a string-correlated guess. analyze kind=synthesizers
+	// reports the two tiers separately from the same MetaProvenance read.
+	ProvenanceFramework = "framework"
+)
+
+// Confidence tiers the framework synthesizers stamp on a landed edge.
+// Typed/decorator/base-list/type-keyed passes (RTK Query, Celery, Spring,
+// MediatR, Sidekiq, Laravel, GoFrame) use ConfidenceTyped; the string-
+// and name-keyed passes (Vuex, Redux-thunk, object-registry, fn-pointer,
+// Django) use ConfidenceHeuristic.
+const (
+	// ConfidenceTyped is the confidence for a type-/decorator-/base-list-
+	// keyed dispatch edge — the framework contract names the target.
+	ConfidenceTyped = 0.85
+	// ConfidenceHeuristic is the confidence for a string-/name-keyed
+	// dispatch edge — correlated by a literal, not by a type.
+	ConfidenceHeuristic = 0.6
 )
 
 // Stable per-synthesizer provenance names. Used both as the registry
@@ -68,8 +91,28 @@ const (
 	SynthFabric            = "fabric-codegen"
 	SynthMyBatis           = "mybatis"
 	SynthRustScope         = "rust-scope"
+	SynthFactoryChain      = "factory-chain"
 	SynthSQLCallsite       = "sql-callsite"
 	SynthStoreFactory      = "store-factory"
+	SynthReduxThunk        = "redux-thunk"
+	SynthObjectRegistry    = "object-registry"
+	SynthRTKQuery          = "rtk-query"
+	SynthVuexDispatch      = "vuex-dispatch"
+	SynthCelery            = "celery-dispatch"
+	SynthSpringEvent       = "spring-event"
+	SynthMediatR           = "mediatr-dispatch"
+	SynthSidekiq           = "sidekiq-dispatch"
+	SynthLaravelEvent      = "laravel-event"
+	SynthFnPointerDispatch = "fn-pointer-dispatch"
+	SynthGoFrameRoute      = "goframe-route"
+	SynthDjangoDescriptor  = "django-descriptor"
+	SynthExpressResolve    = "express-resolve"
+	SynthReactResolve      = "react-resolve"
+	SynthFastAPIResolve    = "fastapi-resolve"
+	SynthRailsResolve      = "rails-resolve"
+	SynthSwiftUIResolve    = "swiftui-resolve"
+	SynthUIKitResolve      = "uikit-resolve"
+	SynthVaporResolve      = "vapor-resolve"
 	SynthGinMiddleware     = "gin-middleware"
 	SynthSvelteKitLoad     = "sveltekit-load"
 	SynthSpeculative       = "speculative-dispatch"
@@ -92,6 +135,23 @@ func StampSynthesized(e *graph.Edge, name string) {
 	if _, ok := e.Meta[MetaProvenance]; !ok {
 		e.Meta[MetaProvenance] = ProvenanceHeuristic
 	}
+}
+
+// StampSynthesizedTyped marks an edge as the product of a typed-tier
+// framework synthesizer: like StampSynthesized, but records
+// ProvenanceFramework instead of ProvenanceHeuristic so the
+// type-/decorator-/base-list-keyed passes (RTK Query, Celery, Spring,
+// MediatR, Sidekiq, Laravel, GoFrame) separate from the string-keyed
+// ones in analyze kind=synthesizers. Safe on an edge with a nil Meta map.
+func StampSynthesizedTyped(e *graph.Edge, name string) {
+	if e == nil {
+		return
+	}
+	if e.Meta == nil {
+		e.Meta = map[string]any{}
+	}
+	e.Meta[MetaProvenance] = ProvenanceFramework
+	StampSynthesized(e, name)
 }
 
 // UnstampSynthesized clears the provenance markers an edge picked up from
@@ -142,10 +202,75 @@ func defaultFrameworkSynthesizers() []FrameworkSynthesizer {
 		// Store-factory (Zustand/Redux/Pinia/MobX) indirect action calls —
 		// binds getState()-chain and destructured calls to the action node.
 		synthFunc{name: SynthStoreFactory, fn: ResolveStoreFactoryCalls},
+		// Redux Toolkit createAsyncThunk dispatch chains: a thunk →
+		// each action/thunk it dispatches from its payload-creator body.
+		// After store-factory so its action nodes are indexed for the
+		// thunk → reducer cross-link.
+		synthFunc{name: SynthReduxThunk, fn: ResolveReduxThunkCalls},
+		// Object-literal command/handler registry dispatch →
+		// `new registry[key]().execute()`. Runs before the speculative
+		// pass so a claimed dispatch site suppresses the hidden best-guess.
+		synthFunc{name: SynthObjectRegistry, fn: ResolveObjectRegistryCalls},
+		// RTK Query generated-hook → createApi endpoint, and component →
+		// generated hook. Typed tier: the hook naming is RTK-contractual.
+		synthFunc{name: SynthRTKQuery, fn: ResolveRTKQueryCalls},
+		// Vuex string-keyed dispatch/commit → action/mutation, with
+		// module-namespace disambiguation.
+		synthFunc{name: SynthVuexDispatch, fn: ResolveVuexDispatchCalls},
+		// Celery task dispatch: `task.delay()` / `send_task("name")` →
+		// the decorator-gated task function. Typed tier.
+		synthFunc{name: SynthCelery, fn: ResolveCeleryCalls},
+		// Spring application events: publishEvent(new X()) → every
+		// @EventListener / ApplicationListener<X>, type-keyed fan-out.
+		synthFunc{name: SynthSpringEvent, fn: ResolveSpringEventCalls},
+		// MediatR CQRS dispatch: Send(new X()) → the IRequestHandler<X>
+		// Handle, Publish(new X()) → every INotificationHandler<X>.
+		synthFunc{name: SynthMediatR, fn: ResolveMediatRCalls},
+		// Sidekiq job dispatch: Worker.perform_async(...) → the worker's
+		// perform, namespace-aware. Include-gated, typed tier.
+		synthFunc{name: SynthSidekiq, fn: ResolveSidekiqCalls},
+		// Laravel events: event(new X()) / X::dispatch() → every listener
+		// handle(X), from the Listeners convention and the $listen map.
+		synthFunc{name: SynthLaravelEvent, fn: ResolveLaravelEventCalls},
+		// C/C++ function-pointer dispatch: a fn registered into a struct's
+		// fn-pointer field → the indirect recv->field() call, keyed by
+		// (struct type, field) with a field-copy fixpoint.
+		synthFunc{name: SynthFnPointerDispatch, fn: ResolveFnPointerDispatch},
 		// Gin middleware-chain dispatcher → registered handlers. Bridges the
 		// `c.handlers[idx](c)` indirection so ServeHTTP→handler reachability
 		// flows; repo-scoped, gated on a dispatcher existing.
 		synthFunc{name: SynthGinMiddleware, fn: ResolveGinMiddlewareCalls},
+		// Express named-handler resolution: middleware idents and
+		// XController.method args bound by directory convention.
+		synthFunc{name: SynthExpressResolve, fn: ResolveExpressHandlers},
+		// React custom-hook / context resolution: a `useAuth()` call binds to
+		// its /hooks/ definition; a `*Context`/`*Provider` reference binds to
+		// /context/ or /providers/, with the suffix-strip fallback.
+		synthFunc{name: SynthReactResolve, fn: ResolveReactHooksContext},
+		// FastAPI dependency / router fallback: a residual `Depends(get_db)`
+		// binds to a /dependencies/ provider, an `include_router(api_router)`
+		// to a /routers/ definition — only when reference resolution left the
+		// target unresolved.
+		synthFunc{name: SynthFastAPIResolve, fn: ResolveFastAPIDeps},
+		// Rails receiver-constant resolution: a `UserService.perform` /
+		// `User.find` / `ApplicationHelper.fmt` call binds to the directory-
+		// located service / model / helper definition named by its receiver.
+		synthFunc{name: SynthRailsResolve, fn: ResolveRailsRefs},
+		// SwiftUI directory-convention fallback: a residual `*View` /
+		// `*ViewModel` / `*Store` / `*Manager` / PascalCase-model reference
+		// binds to its /Views/ /ViewModels/ /Stores/ /Models/ definition.
+		synthFunc{name: SynthSwiftUIResolve, fn: ResolveSwiftUIRefs},
+		// UIKit directory-convention fallback: a residual `*ViewController` /
+		// `*Cell` / `*Delegate` / `*DataSource` reference binds to its
+		// /ViewControllers/ /Cells/ /Delegates/ definition.
+		synthFunc{name: SynthUIKitResolve, fn: ResolveUIKitRefs},
+		// Vapor directory-convention fallback: a residual `*Controller` /
+		// `*Middleware` reference binds to its /Controllers/ /Middleware/
+		// definition. After UIKit so `*ViewController` binds there first.
+		synthFunc{name: SynthVaporResolve, fn: ResolveVaporRefs},
+		// GoFrame reflective route → controller method, joined by the
+		// method's request-struct type rather than its name.
+		synthFunc{name: SynthGoFrameRoute, fn: ResolveGoFrameRoutes},
 		// SvelteKit +page ↔ +page.server load pairing: a route's page component
 		// reaches its server data loader so a trace flows page→load. Repo-scoped.
 		synthFunc{name: SynthSvelteKitLoad, fn: ResolveSvelteKitLoad},
@@ -154,6 +279,9 @@ func defaultFrameworkSynthesizers() []FrameworkSynthesizer {
 		// unresolved Rust calls land before external-call synthesis
 		// classifies the rest as external.
 		synthFunc{name: SynthRustScope, fn: ResolveRustScopeCalls},
+		// After rust-scope and the implements/extends-producing passes so the
+		// cross-file factory-chain walk + conformance hop see settled edges.
+		synthFunc{name: SynthFactoryChain, fn: ResolveFactoryChains},
 		// Function-as-value callback registration — binds each captured
 		// value-position function identifier to its same-file definition and
 		// drops unbound candidates. The per-language capture feeds it via
@@ -178,6 +306,10 @@ type SynthCount struct {
 type FrameworkSynthReport struct {
 	Total int          `json:"total"`
 	Per   []SynthCount `json:"per_synthesizer"`
+	// Gated counts synthesized reference/import edges dropped by the
+	// cross-language-family gate (coincidental PascalCase collisions across
+	// two known, different families; bridge synthesizers are exempt).
+	Gated int `json:"gated_cross_family,omitempty"`
 }
 
 // RunFrameworkSynthesizers runs every registered framework synthesizer
@@ -193,5 +325,76 @@ func RunFrameworkSynthesizers(g graph.Store) FrameworkSynthReport {
 		rep.Per = append(rep.Per, SynthCount{Name: s.Name(), Edges: n})
 		rep.Total += n
 	}
+	// Drop coincidental cross-language-family reference/import results before
+	// the claiming resolvers run, so a gated edge cannot be mistaken for a
+	// resolved placeholder downstream. Bridge synthesizers are exempt.
+	rep.Gated = applyFrameworkFamilyGate(g)
+	// Claiming resolvers run last — after every framework synthesizer has
+	// had its chance to consume a pre-stamped placeholder, but before
+	// external-call synthesis classifies the residual unresolved refs as
+	// external. Reported in registration order for determinism.
+	claimed := RunClaimingResolvers(g)
+	for _, r := range defaultClaimingResolvers() {
+		n := claimed[r.Name()]
+		rep.Per = append(rep.Per, SynthCount{Name: r.Name(), Edges: n})
+		rep.Total += n
+	}
 	return rep
+}
+
+// ClaimingResolver retroactively claims a residual unresolved reference —
+// one naming no declared symbol — that the extractor could not pre-tag, and
+// rewrites it to a framework-known target. This is the generic
+// claimsReference hook: a resolver offers a cheap name-vocabulary pre-filter
+// (Claims) and, when it wins, rebinds the edge (Resolve). It runs before
+// external-call synthesis would otherwise discard the reference as external.
+type ClaimingResolver interface {
+	// Name is the stable provenance label stamped on the rebound edge.
+	Name() string
+	// Claims reports whether this resolver wants the unresolved edge — a
+	// cheap pre-filter on the reference's vocabulary, no graph work.
+	Claims(e *graph.Edge) bool
+	// Resolve rebinds e.To to a concrete target, returning true on a hit.
+	Resolve(g graph.Store, e *graph.Edge) bool
+}
+
+// defaultClaimingResolvers returns the registered claiming resolvers, in
+// offer order.
+func defaultClaimingResolvers() []ClaimingResolver {
+	return []ClaimingResolver{
+		DjangoDescriptorResolver{},
+	}
+}
+
+// RunClaimingResolvers offers every residual unresolved EdgeCalls /
+// EdgeReferences to the claiming resolvers; the first whose Claims pre-filter
+// passes and whose Resolve lands a target wins. Returns the per-resolver
+// count of claimed edges. Unresolved edges are collected before resolving so
+// a resolver's ReindexEdges does not mutate a live iteration.
+func RunClaimingResolvers(g graph.Store) map[string]int {
+	out := map[string]int{}
+	if g == nil {
+		return out
+	}
+	resolvers := defaultClaimingResolvers()
+	if len(resolvers) == 0 {
+		return out
+	}
+	var pending []*graph.Edge
+	for _, kind := range []graph.EdgeKind{graph.EdgeCalls, graph.EdgeReferences} {
+		for e := range g.EdgesByKind(kind) {
+			if e != nil && e.To != "" && graph.IsUnresolvedTarget(e.To) {
+				pending = append(pending, e)
+			}
+		}
+	}
+	for _, e := range pending {
+		for _, r := range resolvers {
+			if r.Claims(e) && r.Resolve(g, e) {
+				out[r.Name()]++
+				break
+			}
+		}
+	}
+	return out
 }

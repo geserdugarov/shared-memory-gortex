@@ -420,6 +420,11 @@ func isLanguageStdlib(lang, importPath string) bool {
 		// framework-shipped namespaces) plus the legacy mscorlib. Third
 		// party NuGet packages live under their own vendor namespaces.
 		return hasDottedPrefix(importPath, "System", "Microsoft", "mscorlib", "netstandard")
+	case "c", "cpp", "objc":
+		// C / C++ / Objective-C: the curated standard, C++, and common
+		// POSIX header set. importPath is the include path with the angle
+		// brackets already stripped (`vector`, `stdio.h`, `sys/types.h`).
+		return IsCppStdlibHeader(importPath)
 	}
 	return false
 }

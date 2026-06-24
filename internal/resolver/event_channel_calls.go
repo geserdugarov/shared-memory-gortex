@@ -19,6 +19,21 @@ const eventChannelVia = "event.channel"
 // of publishers with a handful of handlers.
 const maxEventChannelFanout = 32
 
+// emitterLiteralTransport labels the fallback emitter-literal channel:
+// a bare `recv.on('event', handler)` / `recv.emit('event')` pair the
+// import-gated pub/sub extractor does not recognise (no `events` /
+// `eventemitter` import), keyed only by the receiver scope + event-name
+// string literal. Its topic node ID is event::emitter::<recv>::<literal>.
+const emitterLiteralTransport = "emitter"
+
+// emitterLiteralFanoutCap is the tighter fan-out cap applied to the
+// emitter-literal channel. A topic-node-backed pub/sub pair carries
+// transport + import evidence and may fan out to maxEventChannelFanout;
+// an emitter-literal pair is correlated by nothing but a bare string, so
+// it gets a much tighter cap to keep a common literal ("data", "error")
+// from fanning a publisher out to every unrelated same-named listener.
+const emitterLiteralFanoutCap = 6
+
 // ResolveEventChannelCalls is the framework-dispatch synthesizer for
 // in-process and cross-language event channels. The pub/sub extractor
 // already materialises a shared KindEvent topic node per (transport,
@@ -59,7 +74,7 @@ func ResolveEventChannelCalls(g graph.Store) int {
 		if e == nil || e.To == "" || e.From == "" {
 			continue
 		}
-		if !isPubsubEventNode(e.To) {
+		if !isPubsubEventNode(e.To) && !isEmitterEventNode(e.To) {
 			continue
 		}
 		emittersByEvent[e.To] = append(emittersByEvent[e.To], emitSite{
@@ -115,7 +130,11 @@ func ResolveEventChannelCalls(g graph.Store) int {
 		if !eventChannelInProcess(transport) {
 			continue
 		}
-		if len(emitters) > maxEventChannelFanout || len(listeners) > maxEventChannelFanout {
+		fanoutCap := maxEventChannelFanout
+		if transport == emitterLiteralTransport {
+			fanoutCap = emitterLiteralFanoutCap
+		}
+		if len(emitters) > fanoutCap || len(listeners) > fanoutCap {
 			continue
 		}
 		topic := topicFromEventID(eventID, transport)
@@ -173,6 +192,14 @@ func isPubsubEventNode(id string) bool {
 	return strings.HasPrefix(id, "event::pubsub::")
 }
 
+// isEmitterEventNode reports whether an ID is an emitter-literal KindEvent
+// topic node (event::emitter::<receiver-scope>::<literal>) — the fallback
+// channel for the in-process `.on` / `.emit` pairs the import-gated
+// pub/sub extractor does not recognise.
+func isEmitterEventNode(id string) bool {
+	return strings.HasPrefix(id, "event::emitter::")
+}
+
 // edgeTransport reads the transport label an emit/listen edge carries.
 func edgeTransport(e *graph.Edge) string {
 	if e == nil || e.Meta == nil {
@@ -182,9 +209,13 @@ func edgeTransport(e *graph.Edge) string {
 	return t
 }
 
-// transportFromEventID recovers the transport segment of a pub/sub event
-// node ID when the edge Meta did not carry it.
+// transportFromEventID recovers the transport segment of an event node
+// ID when the edge Meta did not carry it. Emitter-literal nodes carry no
+// transport segment in their ID — the transport is implicitly "emitter".
 func transportFromEventID(id string) string {
+	if isEmitterEventNode(id) {
+		return emitterLiteralTransport
+	}
 	rest := strings.TrimPrefix(id, "event::pubsub::")
 	if t, _, ok := strings.Cut(rest, "::"); ok {
 		return t
@@ -192,8 +223,14 @@ func transportFromEventID(id string) string {
 	return ""
 }
 
-// topicFromEventID recovers the topic segment of a pub/sub event node ID.
+// topicFromEventID recovers the topic segment of an event node ID. For an
+// emitter-literal node (event::emitter::<recv>::<literal>) the topic is
+// the receiver-scoped literal; for a pub/sub node it is the segment after
+// the transport.
 func topicFromEventID(id, transport string) string {
+	if isEmitterEventNode(id) {
+		return strings.TrimPrefix(id, "event::emitter::")
+	}
 	return strings.TrimPrefix(id, "event::pubsub::"+transport+"::")
 }
 
@@ -202,7 +239,7 @@ func topicFromEventID(id, transport string) string {
 // broker-pairing layer (Kafka / NATS / RabbitMQ / Redis) does not handle.
 func eventChannelInProcess(transport string) bool {
 	switch transport {
-	case "eventemitter", "socketio":
+	case "eventemitter", "socketio", emitterLiteralTransport:
 		return true
 	}
 	// Native cross-language bridges register their event channel under an

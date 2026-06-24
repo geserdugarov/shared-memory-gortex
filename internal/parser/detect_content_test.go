@@ -25,6 +25,11 @@ func ambiguityRegistry() *Registry {
 	r.Register(&mockExtractor{lang: "mybatis"})
 	r.Register(&mockExtractor{lang: "spring"})
 	r.Register(&mockExtractor{lang: "xml", exts: []string{".xml"}})
+	// .json defaults to the generic json extractor; a Shopify OS 2.0 theme
+	// template is content+path-routed to "liquid_json" (which claims no
+	// extension here, so it never overrides the .json default).
+	r.Register(&mockExtractor{lang: "liquid_json"})
+	r.Register(&mockExtractor{lang: "json", exts: []string{".json"}})
 	return r
 }
 
@@ -166,6 +171,35 @@ func TestDetectLanguageContent_MyBatisMapper(t *testing.T) {
 	lang, ok = r.DetectLanguageContent("config.xml", []byte(`<?xml version="1.0"?><config><name>x</name></config>`))
 	assert.True(t, ok)
 	assert.Equal(t, "xml", lang)
+}
+
+func TestDetectLanguageContent_ShopifyJSON(t *testing.T) {
+	r := ambiguityRegistry()
+	tmpl := []byte(`{"sections":{"main":{"type":"main-product"}},"order":["main"]}`)
+
+	// A theme JSON template / section group routes to the liquid_json linker.
+	lang, ok := r.DetectLanguageContent("templates/product.json", tmpl)
+	assert.True(t, ok)
+	assert.Equal(t, "liquid_json", lang)
+	lang, ok = r.DetectLanguageContent("sections/header-group.json", tmpl)
+	assert.True(t, ok)
+	assert.Equal(t, "liquid_json", lang)
+
+	// A plain package.json keeps the generic JSON default (precise sniff).
+	lang, ok = r.DetectLanguageContent("package.json", []byte(`{"name":"x","dependencies":{}}`))
+	assert.True(t, ok)
+	assert.Equal(t, "json", lang)
+
+	// A theme-path JSON without section markers stays JSON.
+	lang, ok = r.DetectLanguageContent("templates/settings.json", []byte(`{"foo":"bar"}`))
+	assert.True(t, ok)
+	assert.Equal(t, "json", lang)
+
+	// Section-shaped content outside templates/ or sections/ stays JSON (the
+	// path gate keeps the sniff precise).
+	lang, ok = r.DetectLanguageContent("config/app.json", tmpl)
+	assert.True(t, ok)
+	assert.Equal(t, "json", lang)
 }
 
 func TestDetectLanguageContent_NilContentMatchesNameOnly(t *testing.T) {

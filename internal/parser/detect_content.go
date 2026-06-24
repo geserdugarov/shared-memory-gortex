@@ -109,7 +109,7 @@ func trimInterpVersion(interp string) string {
 // clearly indicates a specific language, and ("", false) when the
 // extension is not ambiguous or the probe is inconclusive — the
 // caller then keeps the extension's default mapping.
-func sniffAmbiguous(ext string, content []byte) (string, bool) {
+func sniffAmbiguous(filePath, ext string, content []byte) (string, bool) {
 	if len(content) == 0 {
 		return "", false
 	}
@@ -118,6 +118,13 @@ func sniffAmbiguous(ext string, content []byte) (string, bool) {
 		probe = probe[:sniffPrefixCap]
 	}
 	switch strings.ToLower(ext) {
+	case ".json":
+		// A Shopify OS 2.0 JSON template / section group (templates/*.json,
+		// sections/*.json) wires sections by `type`; every other .json keeps
+		// the generic JSON default (package.json, tsconfig.json, …).
+		if isShopifyThemeJSONPath(filePath) && hasShopifyTemplateMarkers(probe) {
+			return "liquid_json", true
+		}
 	case ".h":
 		// C / C++ / Objective-C header.
 		if hasObjCMarkers(probe) {
@@ -148,6 +155,20 @@ func sniffAmbiguous(ext string, content []byte) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+// isShopifyThemeJSONPath reports whether a path lives under a Shopify theme's
+// `templates/` or `sections/` directory — the OS 2.0 JSON-template locations.
+func isShopifyThemeJSONPath(filePath string) bool {
+	p := "/" + strings.TrimPrefix(strings.ReplaceAll(filePath, "\\", "/"), "/")
+	return strings.Contains(p, "/templates/") || strings.Contains(p, "/sections/")
+}
+
+// hasShopifyTemplateMarkers reports whether the JSON content carries the OS 2.0
+// section-group shape — a `"sections"` object plus a `"type"` key naming a
+// section file. A cheap byte pre-filter; the extractor parses and validates.
+func hasShopifyTemplateMarkers(b []byte) bool {
+	return bytes.Contains(b, []byte(`"sections"`)) && bytes.Contains(b, []byte(`"type"`))
 }
 
 // hasMyBatisMapperMarkers reports whether the content is a MyBatis mapper

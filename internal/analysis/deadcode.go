@@ -307,6 +307,12 @@ func FindDeadCode(g graph.Store, processes *ProcessResult, excludePatterns []str
 		if ext, _ := n.Meta["external"].(bool); ext {
 			continue
 		}
+		// Code-generated symbols (RTK Query hooks, protobuf accessors, …) have
+		// no hand-written call site by design, so they always look dead — never
+		// report them.
+		if gen, _ := n.Meta["generated"].(bool); gen {
+			continue
+		}
 
 		// Framework entry points, and everything in an entry-point
 		// file, are invoked by a runtime — never dead.

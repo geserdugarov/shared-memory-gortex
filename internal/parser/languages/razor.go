@@ -15,6 +15,10 @@ var (
 	razorModelRe  = regexp.MustCompile(`(?m)^\s*@(?:model|inherits)\s+([A-Za-z_][\w.]*(?:<[^>]*>)?)`)
 	razorInjectRe = regexp.MustCompile(`(?m)^\s*@inject\s+([A-Za-z_][\w.]*(?:<[^>]*>)?)\s+\w+`)
 	razorTypeofRe = regexp.MustCompile(`@typeof\(\s*([A-Za-z_][\w.]*)`)
+	// razorUsingRe matches an `@using Some.Namespace` directive (optionally
+	// `@using static`, whose member-import we skip). The captured namespace
+	// feeds the resolver's import cascade.
+	razorUsingRe = regexp.MustCompile(`(?m)^\s*@using\s+(?:static\s+)?([A-Za-z_][\w.]*)`)
 )
 
 // RazorExtractor extracts Razor / Blazor files (.razor, .cshtml). It carves
@@ -49,10 +53,17 @@ func (e *RazorExtractor) Extract(filePath string, src []byte) (*parser.Extractio
 	componentID := ""
 	if name := razorComponentName(filePath); name != "" {
 		componentID = filePath + "::" + name
+		compMeta := map[string]any{"component": true}
+		// The component's Blazor namespace is its directory path dotted
+		// (`App/Widgets/Counter.razor` → `App.Widgets`), so an `@using`
+		// import of that namespace can bind a `<Counter/>` reference.
+		if ns := razorComponentNamespace(filePath); ns != "" {
+			compMeta["scope_ns"] = ns
+		}
 		result.Nodes = append(result.Nodes, &graph.Node{
 			ID: componentID, Kind: graph.KindType, Name: name,
 			FilePath: filePath, StartLine: 1, EndLine: lineCount, Language: "razor",
-			Meta: map[string]any{"component": true},
+			Meta: compMeta,
 		})
 		result.Edges = append(result.Edges, &graph.Edge{
 			From: fileNode.ID, To: componentID, Kind: graph.EdgeDefines, FilePath: filePath, Line: 1,
@@ -83,6 +94,32 @@ func (e *RazorExtractor) Extract(filePath string, src []byte) (*parser.Extractio
 	for _, m := range razorTypeofRe.FindAllSubmatch(src, -1) {
 		emitRazorTypeRef(result, fileNode.ID, filePath, string(m[1]))
 	}
+
+	// `@using Some.Namespace` directives (and the cascading _Imports.razor)
+	// feed the resolver's namespace-scoped simple-type binding. Emitted as a
+	// per-file marker the resolver consumes and removes; no new node kind.
+	for _, m := range razorUsingRe.FindAllSubmatch(src, -1) {
+		ns := strings.TrimSpace(string(m[1]))
+		if ns == "" {
+			continue
+		}
+		result.Edges = append(result.Edges, &graph.Edge{
+			From: fileNode.ID, To: "unresolved::razor_using::" + ns,
+			Kind: graph.EdgeImports, FilePath: filePath, Line: 1,
+		})
+	}
+
+	// Markup component tags (`<Child />`) and Blazor generic type-arg
+	// references (`<Grid TItem="CatalogItem" />`), scanned with @code /
+	// @functions / @{} bodies blanked so the C# inside them is never parsed
+	// for tags.
+	if componentID != "" {
+		blanked := razorBlankCode(src)
+		mineTemplateComponentUsages(blanked, filePath, componentID, "razor", result)
+		for _, m := range razorGenericArgRE.FindAllSubmatch(blanked, -1) {
+			emitRazorTypeRef(result, fileNode.ID, filePath, string(m[1]))
+		}
+	}
 	return result, nil
 }
 
@@ -102,6 +139,23 @@ func razorComponentName(filePath string) string {
 		return ""
 	}
 	return base
+}
+
+// razorComponentNamespace derives a Blazor component's namespace from its
+// repo-relative directory path, dotted (`App/Widgets/Counter.razor` →
+// `App.Widgets`). Returns "" for a root-level component. Path-derived (not
+// RootNamespace-prefixed) so it matches the `@using` namespaces the resolver
+// compares against, which are likewise path-relative in practice.
+func razorComponentNamespace(filePath string) string {
+	filePath = strings.ReplaceAll(filePath, "\\", "/")
+	dir := ""
+	if i := strings.LastIndex(filePath, "/"); i >= 0 {
+		dir = filePath[:i]
+	}
+	if dir == "" {
+		return ""
+	}
+	return strings.ReplaceAll(dir, "/", ".")
 }
 
 // razorCodeWrapPrefix is a single line so the wrap shifts content by exactly one
@@ -179,6 +233,26 @@ type razorSpan struct {
 // is string-, char-, and comment-aware (matchRazorBrace), so a `}` inside a C#
 // string literal or comment cannot end the block early — which would otherwise
 // truncate the delegated C# and silently drop every member after it.
+// razorGenericArgRE matches a Blazor generic type-parameter attribute on a
+// component tag — `TItem="CatalogItem"`, `TValue="int"` — whose value is a type
+// reference. The `T[A-Z]` shape is the Blazor type-param convention, so it does
+// not match ordinary attributes like `Title=` / `Text=`.
+var razorGenericArgRE = regexp.MustCompile(`\bT[A-Z]\w*\s*=\s*"([A-Za-z_][\w.]*)"`)
+
+// razorBlankCode returns a copy of src with every @code / @functions / @{}
+// body blanked (newlines preserved), so the markup tag/type scan never reads
+// the C# inside those blocks.
+func razorBlankCode(src []byte) []byte {
+	out := make([]byte, len(src))
+	copy(out, src)
+	for _, span := range razorCodeSpans(src) {
+		if span.start <= span.end && span.end <= len(out) {
+			copy(out[span.start:span.end], blankPreservingNewlines(out[span.start:span.end]))
+		}
+	}
+	return out
+}
+
 func razorCodeSpans(src []byte) []razorSpan {
 	var spans []razorSpan
 	for _, loc := range razorBlockRe.FindAllSubmatchIndex(src, -1) {

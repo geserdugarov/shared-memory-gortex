@@ -19,8 +19,12 @@ func NewPHPExtractor() *PHPExtractor {
 	return &PHPExtractor{lang: php.GetLanguage()}
 }
 
-func (e *PHPExtractor) Language() string     { return "php" }
-func (e *PHPExtractor) Extensions() []string { return []string{".php"} }
+func (e *PHPExtractor) Language() string { return "php" }
+func (e *PHPExtractor) Extensions() []string {
+	// Drupal module files (.module/.install/.inc/.theme/.profile/.engine) are
+	// PHP source whose function names follow the hook convention.
+	return []string{".php", ".module", ".install", ".inc", ".theme", ".profile", ".engine"}
+}
 
 func (e *PHPExtractor) Extract(filePath string, src []byte) (*parser.ExtractionResult, error) {
 	tree, err := parser.ParseFile(src, e.lang)
@@ -46,6 +50,7 @@ func (e *PHPExtractor) Extract(filePath string, src []byte) (*parser.ExtractionR
 
 	captureValueRefCandidates(result, root, filePath, src)
 	captureFnValueCandidates(result, root, filePath, src)
+	e.capturePHPStringCallables(result, root, filePath, src)
 
 	// Expression-site and inheritance-clause reference forms #143's
 	// type-use pass (typed property / param / return EdgeTypedAs) misses:
@@ -53,6 +58,10 @@ func (e *PHPExtractor) Extract(filePath string, src []byte) (*parser.ExtractionR
 	// and PHP 8 attributes. Runs after the symbol walk so buildFuncRanges /
 	// buildPHPTypeRanges see every function / method / class node.
 	emitPHPReferenceForms(root, src, filePath, fileNode.ID, result)
+
+	captureLaravelEvents(result, root, filePath, src)
+	captureDrupalHooks(result, filePath)
+
 	return result, nil
 }
 
@@ -847,17 +856,29 @@ func (e *PHPExtractor) extractCallSites(
 					case "self", "static":
 						edge.Meta = map[string]any{"scope_kind": "self"}
 					default:
+						scopeName := scope.Content(src)
 						// Laravel facade (`Cache::get()`): the static call
 						// proxies to the backing service the facade returns.
 						// Stamp that class as the receiver type so the resolver
 						// binds the call to its method rather than a name-only
 						// match against an unrelated `get`.
-						if backing, ok := phpFacadeBackingClass(scope.Content(src)); ok {
+						if backing, ok := phpFacadeBackingClass(scopeName); ok {
 							if edge.Meta == nil {
 								edge.Meta = map[string]any{}
 							}
 							edge.Meta["receiver_type"] = backing
-							edge.Meta["facade"] = strings.TrimPrefix(scope.Content(src), "\\")
+							edge.Meta["facade"] = strings.TrimPrefix(scopeName, "\\")
+						} else if model, ok := phpEloquentModelCall(scopeName, name); ok {
+							// Eloquent finder (`User::find(1)`): the method lives on
+							// the inherited query builder, not the model, so bind
+							// the call to the model class node instead of an
+							// unresolvable `find`.
+							edge.To = "unresolved::" + model
+							if edge.Meta == nil {
+								edge.Meta = map[string]any{}
+							}
+							edge.Meta["eloquent_model"] = model
+							edge.Meta["eloquent_method"] = name
 						}
 					}
 				}

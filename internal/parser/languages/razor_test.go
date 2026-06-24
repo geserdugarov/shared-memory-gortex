@@ -63,6 +63,46 @@ func TestRazorExtractor(t *testing.T) {
 	}
 }
 
+// TestRazorUsingExtraction pins `@using` directive extraction (with the
+// `@using static` member-import form skipped to its namespace) and the
+// path-derived component namespace.
+func TestRazorUsingExtraction(t *testing.T) {
+	const razor = `@using App.Widgets
+@using static System.Math
+
+<Counter />
+`
+	res, err := NewRazorExtractor().Extract("Components/Page.razor", []byte(razor))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	usings := map[string]bool{}
+	for _, e := range res.Edges {
+		if e.Kind == graph.EdgeImports && strings.HasPrefix(e.To, "unresolved::razor_using::") {
+			usings[strings.TrimPrefix(e.To, "unresolved::razor_using::")] = true
+		}
+	}
+	for _, want := range []string{"App.Widgets", "System.Math"} {
+		if !usings[want] {
+			t.Errorf("missing @using namespace %q (got: %v)", want, usings)
+		}
+	}
+
+	var comp *graph.Node
+	for _, n := range res.Nodes {
+		if n.Name == "Page" && n.Meta["component"] == true {
+			comp = n
+		}
+	}
+	if comp == nil {
+		t.Fatal("Page component node not emitted")
+	}
+	if comp.Meta["scope_ns"] != "Components" {
+		t.Errorf("component scope_ns = %v, want Components", comp.Meta["scope_ns"])
+	}
+}
+
 // TestRazorBraceMatcherSkipsStringsAndCarvesBareBlock is the B4 named test: a
 // `}` inside a C# string or comment in a @code block must not truncate the
 // block (which dropped every member after it), and a bare @{ } block is also
@@ -134,5 +174,92 @@ func TestRazorMatchBraceUnit(t *testing.T) {
 	end := matchRazorBrace(src, 0)
 	if end != len(src)-1 {
 		t.Fatalf("matchRazorBrace = %d, want %d (final brace)", end, len(src)-1)
+	}
+}
+
+func razorTagRef(edges []*graph.Edge, from, name string) *graph.Edge {
+	for _, e := range edges {
+		if e.Kind == graph.EdgeReferences && e.From == from && e.To == "unresolved::"+name {
+			return e
+		}
+	}
+	return nil
+}
+
+func razorAnyRefTo(edges []*graph.Edge, name string) bool {
+	for _, e := range edges {
+		if e.Kind == graph.EdgeReferences && e.To == "unresolved::"+name {
+			return true
+		}
+	}
+	return false
+}
+
+func TestRazorComponentTagAndGenericArg(t *testing.T) {
+	src := []byte(`<h1>Parent</h1>
+<Child />
+<Grid TItem="CatalogItem" />
+@code {
+    private List<DecoyType> items = new();
+}
+`)
+	res, err := NewRazorExtractor().Extract("Pages/Parent.razor", src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const comp = "Pages/Parent.razor::Parent"
+
+	if razorTagRef(res.Edges, comp, "Child") == nil {
+		t.Errorf("expected a component-tag reference to Child")
+	}
+	if razorTagRef(res.Edges, comp, "Grid") == nil {
+		t.Errorf("expected a component-tag reference to Grid")
+	}
+	// The TItem generic type-arg references the DTO.
+	if !razorAnyRefTo(res.Edges, "CatalogItem") {
+		t.Errorf("expected a type reference to the TItem value CatalogItem")
+	}
+	// The C# generic `List<DecoyType>` inside @code must not be misread as a
+	// markup tag — its body is blanked before the tag scan.
+	if razorTagRef(res.Edges, comp, "DecoyType") != nil {
+		t.Errorf("a generic type-arg inside @code must not become a component-tag reference")
+	}
+	if razorTagRef(res.Edges, comp, "List") != nil {
+		t.Errorf("a generic container inside @code must not become a component-tag reference")
+	}
+}
+
+func TestRazorBlazorBuiltinsSkipped(t *testing.T) {
+	src := []byte(`<EditForm Model="m">
+  <InputText @bind-Value="name" />
+  <ValidationSummary />
+  <Router />
+  <MyWidget />
+</EditForm>
+`)
+	res, err := NewRazorExtractor().Extract("Pages/Form.razor", src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const comp = "Pages/Form.razor::Form"
+	for _, b := range []string{"EditForm", "InputText", "ValidationSummary", "Router"} {
+		if razorTagRef(res.Edges, comp, b) != nil {
+			t.Errorf("Blazor framework component %s must not emit a reference", b)
+		}
+	}
+	if razorTagRef(res.Edges, comp, "MyWidget") == nil {
+		t.Errorf("user component MyWidget should still be referenced")
+	}
+}
+
+func TestBlazorBuiltinNotSuppressedInSvelte(t *testing.T) {
+	// `EditForm` is a Blazor builtin but a plausible user component elsewhere —
+	// the suppression must be scoped to Razor, not leak into other languages.
+	res, err := NewSvelteExtractor().Extract("Form.svelte", []byte("<EditForm />\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if razorTagRef(res.Edges, "Form.svelte::Form", "EditForm") == nil {
+		t.Errorf("a user EditForm component in Svelte must NOT be suppressed (language-scoping)")
 	}
 }

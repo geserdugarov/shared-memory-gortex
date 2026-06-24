@@ -80,3 +80,36 @@ func TestAnalyzeResolutionOutcomes_ReasonFilter(t *testing.T) {
 		t.Errorf("row reason = %v", rows[0])
 	}
 }
+
+func TestAnalyzeResolutionOutcomes_StdlibHeader(t *testing.T) {
+	srv, _ := setupTestServer(t)
+	g := srv.graph
+	g.AddNode(&graph.Node{ID: "main.c", Kind: graph.KindFile, Name: "main.c", FilePath: "main.c", Language: "c"})
+	// A standard-library angle include left external by the resolver.
+	g.AddEdge(&graph.Edge{
+		From: "main.c", To: "unresolved::import::stdio.h", Kind: graph.EdgeImports,
+		FilePath: "main.c", Meta: map[string]any{"include_kind": "system"},
+	})
+	// A non-stdlib system include must NOT be classified as stdlib.
+	g.AddEdge(&graph.Edge{
+		From: "main.c", To: "unresolved::import::myproj/api.h", Kind: graph.EdgeImports,
+		FilePath: "main.c", Meta: map[string]any{"include_kind": "system"},
+	})
+
+	out := callAnalyzeResolutionOutcomes(t, srv, map[string]any{})
+	byReason, _ := out["by_reason"].(map[string]any)
+	if got, _ := byReason[outcomeStdlibHeader].(float64); int(got) != 1 {
+		t.Errorf("by_reason[%q] = %v, want 1", outcomeStdlibHeader, byReason[outcomeStdlibHeader])
+	}
+
+	// The reason filter narrows the rows to the stdlib header.
+	out = callAnalyzeResolutionOutcomes(t, srv, map[string]any{"reason": outcomeStdlibHeader})
+	rows, _ := out["rows"].([]any)
+	if len(rows) != 1 {
+		t.Fatalf("stdlib_header filter: want 1 row, got %d", len(rows))
+	}
+	row := rows[0].(map[string]any)
+	if row["reason"] != outcomeStdlibHeader || row["name"] != "stdio.h" {
+		t.Errorf("row = %v", row)
+	}
+}

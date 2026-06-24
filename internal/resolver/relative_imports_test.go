@@ -246,3 +246,237 @@ func TestResolveRelativeImports_CIncludeBareHeaderNotProbed(t *testing.T) {
 
 	assert.Equal(t, "unresolved::import::bar.h", e.To, "bare header is not probed across roots")
 }
+
+// TestResolveRelativeImports_CIncludeViaCompileDB pins the compile_commands.json
+// path: a generated header reachable only via a declared `-I` dir binds to that
+// file and records the include dir it was found under.
+func TestResolveRelativeImports_CIncludeViaCompileDB(t *testing.T) {
+	g := graph.New()
+	seedFile(g, "src/main.c", "c")
+	seedFile(g, "gen/include/proj/api.h", "c") // generated, reachable via -Igen/include
+	e := cInclude(g, "src/main.c", "proj/api.h")
+
+	r := New(g)
+	r.SetCppIncludeDirs(map[string][]string{"src/main.c": {"gen/include"}})
+	r.resolveRelativeImports()
+
+	assert.Equal(t, "gen/include/proj/api.h", e.To, "include binds via the declared -I dir")
+	assert.Equal(t, "gen/include", e.Meta["include_dir"])
+	assert.Equal(t, "compile_db", e.Meta["resolved_via"])
+}
+
+// TestResolveRelativeImports_CIncludeCollisionFirstIncludeWins pins that a
+// basename collision the suffix search would refuse is broken deterministically
+// by the translation unit's `-I` order (authoritative): the first declared dir
+// containing the header wins.
+func TestResolveRelativeImports_CIncludeCollisionFirstIncludeWins(t *testing.T) {
+	g := graph.New()
+	seedFile(g, "src/app.c", "c")
+	seedFile(g, "inc1/config.h", "c")
+	seedFile(g, "inc2/config.h", "c")
+	e := cInclude(g, "src/app.c", "config.h")
+
+	r := New(g)
+	r.SetCppIncludeDirs(map[string][]string{"src/app.c": {"inc1", "inc2"}})
+	r.resolveRelativeImports()
+
+	assert.Equal(t, "inc1/config.h", e.To, "first -I dir wins the basename collision")
+	assert.Equal(t, "compile_db", e.Meta["resolved_via"])
+}
+
+// TestResolveRelativeImports_CIncludeFallbackToSuffix pins that when the
+// importing TU is absent from compile_commands.json the resolver falls back to
+// the suffix-unique behavior — resolving without stamping a compile-DB origin.
+func TestResolveRelativeImports_CIncludeFallbackToSuffix(t *testing.T) {
+	g := graph.New()
+	seedFile(g, "src/main.c", "c")
+	seedFile(g, "gen/include/proj/api.h", "c")
+	e := cInclude(g, "src/main.c", "proj/api.h")
+
+	r := New(g)
+	// compile_commands.json present, but this source has no TU entry of its own;
+	// the union dir does not contain the header → suffix-unique fallback resolves.
+	r.SetCppIncludeDirs(map[string][]string{"other/x.c": {"third/inc"}})
+	r.resolveRelativeImports()
+
+	assert.Equal(t, "gen/include/proj/api.h", e.To, "falls back to suffix-unique match")
+	assert.Nil(t, e.Meta["resolved_via"], "suffix fallback is not stamped compile_db")
+}
+
+// TestResolveRelativeImports_CIncludeStdlibAngleGuard pins the basename-collision
+// guard: a standard-library angle include never binds to an in-tree file that
+// shares its basename, even when a declared -I dir would otherwise resolve it.
+func TestResolveRelativeImports_CIncludeStdlibAngleGuard(t *testing.T) {
+	g := graph.New()
+	seedFile(g, "src/main.cpp", "cpp")
+	seedFile(g, "lib/vector", "cpp") // in-tree file whose basename collides with <vector>
+	e := &graph.Edge{
+		From: "src/main.cpp", To: "unresolved::import::vector", Kind: graph.EdgeImports,
+		Meta: map[string]any{"include_kind": "system"},
+	}
+	g.AddEdge(e)
+
+	r := New(g)
+	// -Ilib would bind lib/vector were it not for the stdlib guard.
+	r.SetCppIncludeDirs(map[string][]string{"src/main.cpp": {"lib"}})
+	r.resolveRelativeImports()
+
+	assert.Equal(t, "unresolved::import::vector", e.To, "stdlib <vector> must not bind to in-tree lib/vector")
+}
+
+// TestResolveRelativeImports_CIncludeSystemNonStdlibResolves pins that a
+// non-stdlib angle include now resolves through the -I search path.
+func TestResolveRelativeImports_CIncludeSystemNonStdlibResolves(t *testing.T) {
+	g := graph.New()
+	seedFile(g, "src/main.c", "c")
+	seedFile(g, "include/proj/api.h", "c")
+	e := &graph.Edge{
+		From: "src/main.c", To: "unresolved::import::proj/api.h", Kind: graph.EdgeImports,
+		Meta: map[string]any{"include_kind": "system"},
+	}
+	g.AddEdge(e)
+
+	r := New(g)
+	r.SetCppIncludeDirs(map[string][]string{"src/main.c": {"include"}})
+	r.resolveRelativeImports()
+
+	assert.Equal(t, "include/proj/api.h", e.To, "non-stdlib angle include resolves via -I dir")
+	assert.Equal(t, "include", e.Meta["include_dir"])
+}
+
+// TestResolveRelativeImports_CIncludeViaHeuristicDir pins the no-compile-DB
+// fallback: an angle include resolves through the heuristic include root and is
+// stamped with its provenance.
+func TestResolveRelativeImports_CIncludeViaHeuristicDir(t *testing.T) {
+	g := graph.New()
+	seedFile(g, "src/main.c", "c")
+	seedFile(g, "include/proj/api.h", "c")
+	e := &graph.Edge{
+		From: "src/main.c", To: "unresolved::import::proj/api.h", Kind: graph.EdgeImports,
+		Meta: map[string]any{"include_kind": "system"},
+	}
+	g.AddEdge(e)
+
+	r := New(g)
+	// No compile DB; the heuristic include/ root drives the ordered probe.
+	r.SetCppFallbackIncludeDirs([]string{"include"})
+	r.resolveRelativeImports()
+
+	assert.Equal(t, "include/proj/api.h", e.To, "angle include resolves via the heuristic include root")
+	assert.Equal(t, "include", e.Meta["include_dir"])
+	assert.Equal(t, "heuristic", e.Meta["resolved_via"])
+}
+
+// TestResolveRelativeImports_CIncludeAngleSuffixFallback pins that with no
+// compile DB and no heuristic dirs, a single-match multi-segment angle include
+// still resolves through the suffix-unique net, unstamped.
+func TestResolveRelativeImports_CIncludeAngleSuffixFallback(t *testing.T) {
+	g := graph.New()
+	seedFile(g, "src/main.c", "c")
+	seedFile(g, "weird/place/widget.h", "c") // non-conventional dir, single match
+	e := &graph.Edge{
+		From: "src/main.c", To: "unresolved::import::place/widget.h", Kind: graph.EdgeImports,
+		Meta: map[string]any{"include_kind": "system"},
+	}
+	g.AddEdge(e)
+
+	r := New(g)
+	r.resolveRelativeImports()
+
+	assert.Equal(t, "weird/place/widget.h", e.To, "single-match header resolves via suffix-unique net")
+	assert.Nil(t, e.Meta["resolved_via"], "suffix fallback is not stamped")
+}
+
+// phpImport builds a PHP require/include or use import edge for the tests.
+func phpImport(g graph.Store, from, target string) *graph.Edge {
+	e := &graph.Edge{From: from, To: "unresolved::import::" + target, Kind: graph.EdgeImports}
+	g.AddEdge(e)
+	return e
+}
+
+// TestResolveRelativeImports_PhpLiteralInclude pins a literal require path
+// binding to the repo-relative file.
+func TestResolveRelativeImports_PhpLiteralInclude(t *testing.T) {
+	g := graph.New()
+	seedFile(g, "app.php", "php")
+	seedFile(g, "lib/helpers.php", "php")
+	e := phpImport(g, "app.php", "lib/helpers.php")
+
+	r := New(g)
+	r.resolveRelativeImports()
+
+	assert.Equal(t, "lib/helpers.php", e.To)
+	assert.Equal(t, graph.OriginASTResolved, e.Origin)
+}
+
+// TestResolveRelativeImports_PhpDirInclude pins the `__DIR__ . '/lib/x.php'`
+// form (lowered to a leading-slash target) resolving relative to the file dir.
+func TestResolveRelativeImports_PhpDirInclude(t *testing.T) {
+	g := graph.New()
+	seedFile(g, "app.php", "php")
+	seedFile(g, "lib/helpers.php", "php")
+	e := phpImport(g, "app.php", "/lib/helpers.php")
+
+	r := New(g)
+	r.resolveRelativeImports()
+
+	assert.Equal(t, "lib/helpers.php", e.To, "__DIR__-relative include resolves relative to the file dir")
+}
+
+// TestResolveRelativeImports_PhpSubdirRelativeInclude pins a `./`-relative
+// include from a file in a subdirectory.
+func TestResolveRelativeImports_PhpSubdirRelativeInclude(t *testing.T) {
+	g := graph.New()
+	seedFile(g, "src/app.php", "php")
+	seedFile(g, "src/helpers.php", "php")
+	e := phpImport(g, "src/app.php", "./helpers.php")
+
+	r := New(g)
+	r.resolveRelativeImports()
+
+	assert.Equal(t, "src/helpers.php", e.To)
+}
+
+// TestResolveRelativeImports_PhpExtensionlessInclude pins that `.php` is
+// appended when the include omits the extension.
+func TestResolveRelativeImports_PhpExtensionlessInclude(t *testing.T) {
+	g := graph.New()
+	seedFile(g, "src/app.php", "php")
+	seedFile(g, "src/config.php", "php")
+	e := phpImport(g, "src/app.php", "./config")
+
+	r := New(g)
+	r.resolveRelativeImports()
+
+	assert.Equal(t, "src/config.php", e.To, ".php is appended when the include omits it")
+}
+
+// TestResolveRelativeImports_PhpSuffixNet pins a project-root-relative include
+// reaching a uniquely-matching deeper file.
+func TestResolveRelativeImports_PhpSuffixNet(t *testing.T) {
+	g := graph.New()
+	seedFile(g, "public/index.php", "php")
+	seedFile(g, "app/lib/helpers.php", "php")
+	e := phpImport(g, "public/index.php", "lib/helpers.php")
+
+	r := New(g)
+	r.resolveRelativeImports()
+
+	assert.Equal(t, "app/lib/helpers.php", e.To, "project-root include resolves via the unique suffix net")
+}
+
+// TestResolveRelativeImports_PhpNamespaceUseUntouched pins that a `use`
+// namespace import (lowered to `App/Foo` with no `.php`) is not treated as a
+// path include — even when a same-named file exists — and stays for the main
+// import sweep to resolve.
+func TestResolveRelativeImports_PhpNamespaceUseUntouched(t *testing.T) {
+	g := graph.New()
+	seedFile(g, "app.php", "php")
+	seedFile(g, "src/Foo.php", "php")
+	e := phpImport(g, "app.php", "App/Foo")
+
+	r := New(g)
+	r.resolveRelativeImports()
+
+	assert.Equal(t, "unresolved::import::App/Foo", e.To, "namespace use is not treated as a path include")
+}

@@ -60,6 +60,33 @@ var routePrefixFrameworks = map[string]bool{
 	"laravel":       true, // Laravel Route::prefix(...)->group
 	"axum":          true, // axum Router .nest mounts
 	"fiber":         true, // gin/echo uppercase verbs label as fiber; same .Group model
+	"vapor":         true, // Vapor .grouped(...) route groups
+}
+
+// vaporGroupedRE matches a Vapor route-group binding
+// `let api = app.grouped("api")` (and chained `let v1 = api.grouped("v1")`).
+// Group 1 is the new group var, group 2 the parent receiver, group 3 the
+// (one or more) path-segment string literals.
+var vaporGroupedRE = regexp.MustCompile(`\b(?:let|var)\s+(\w+)\s*=\s*([\w.]+)\.grouped\(\s*("[^"]*"(?:\s*,\s*"[^"]*")*)`)
+
+// vaporRouteReceiverRE recovers the receiver variable a Vapor route is declared
+// on — `api` in `api.get("users", use: list)`.
+var vaporRouteReceiverRE = regexp.MustCompile(`\b(\w+)\.(?:get|post|put|delete|patch)\(`)
+
+// vaporStringSegRE matches a single quoted path segment inside a grouped(...)
+// argument list.
+var vaporStringSegRE = regexp.MustCompile(`"([^"]*)"`)
+
+// vaporGroupSegments joins the string-literal path segments of a
+// `.grouped("a", "b")` call into a single prefix.
+func vaporGroupSegments(args string) string {
+	var segs []string
+	for _, m := range vaporStringSegRE.FindAllStringSubmatch(args, -1) {
+		if m[1] != "" {
+			segs = append(segs, m[1])
+		}
+	}
+	return cleanPrefix(strings.Join(segs, "/"))
 }
 
 // --- FastAPI / Python -------------------------------------------------------
@@ -286,6 +313,15 @@ func JoinRouterPrefixes(reg *Registry, scanFiles []string, srcFor func(filePath 
 			if _, ok := f.mountPrefix[child]; !ok {
 				f.mountPrefix[child] = prefix
 			}
+			if parent != "" && parent != child {
+				f.mountParent[child] = parent
+			}
+		}
+
+		// Vapor: let api = app.grouped("api"); let v1 = api.grouped("v1")
+		for _, m := range vaporGroupedRE.FindAllStringSubmatch(text, -1) {
+			child, parent, prefix := m[1], lastAttr(m[2]), vaporGroupSegments(m[3])
+			f.selfPrefix[child] = prefix
 			if parent != "" && parent != child {
 				f.mountParent[child] = parent
 			}
@@ -520,9 +556,10 @@ func prefixForRoute(
 			}
 		}
 		return joinPaths(mount, self)
-	case "gin/echo/chi", "fiber":
-		// gin RouterGroup chain: the route's group var carries its own
-		// .Group prefix, parents contribute theirs via the mount chain.
+	case "gin/echo/chi", "fiber", "vapor":
+		// gin RouterGroup / Vapor route-group chain: the route's group var
+		// carries its own .Group / .grouped prefix, parents contribute theirs
+		// via the mount chain.
 		varName := routeReceiver(c, framework, srcFor)
 		if varName == "" {
 			return ""
@@ -589,6 +626,10 @@ func routeReceiver(c Contract, framework string, srcFor func(filePath string) []
 		}
 	case "axum":
 		if m := axumLetBindingRE.FindStringSubmatch(line); m != nil {
+			return m[1]
+		}
+	case "vapor":
+		if m := vaporRouteReceiverRE.FindStringSubmatch(line); m != nil {
 			return m[1]
 		}
 	}

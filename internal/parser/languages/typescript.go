@@ -529,9 +529,7 @@ func (e *TypeScriptExtractor) Extract(filePath string, src []byte) (*parser.Extr
 		if recvType, ok := tenv[c.receiver]; ok {
 			edge.Meta = map[string]any{"receiver_type": recvType}
 		} else if strings.Contains(c.receiver, ".") || strings.Contains(c.receiver, "(") {
-			if chainType := resolveChainType(c.receiver, tenv, result); chainType != "" {
-				edge.Meta = map[string]any{"receiver_type": chainType}
-			}
+			stampFactoryChainReceiver(edge, c.receiver, resolveChainType(c.receiver, tenv, result))
 		}
 		stampReturnUsage(edge, c.returnUsage)
 		result.Edges = append(result.Edges, edge)
@@ -549,11 +547,25 @@ func (e *TypeScriptExtractor) Extract(filePath string, src []byte) (*parser.Extr
 			continue
 		}
 		id := filePath + "::" + v.name
-		result.Nodes = append(result.Nodes, &graph.Node{
+		node := &graph.Node{
 			ID: id, Kind: graph.KindVariable, Name: v.name,
 			FilePath: filePath, StartLine: v.startLn + 1, EndLine: v.endLn + 1,
 			Language: "typescript",
-		})
+		}
+		// React HOC / styled component: a PascalCase const wrapping
+		// memo/forwardRef/styled is a component; flag it and attribute the
+		// inline render function's JSX to the outer const (not the anon arrow).
+		if v.name != "" && v.name[0] >= 'A' && v.name[0] <= 'Z' {
+			if kind, renderFn := reactHOCComponentKind(v.defNode, src); kind != "" {
+				node.Meta = map[string]any{"component": true, "component_kind": kind}
+				if renderFn != nil {
+					if body := renderFn.ChildByFieldName("body"); body != nil {
+						emitJSXRenderEdges(id, body, src, filePath, result)
+					}
+				}
+			}
+		}
+		result.Nodes = append(result.Nodes, node)
 		result.Edges = append(result.Edges, &graph.Edge{
 			From: fileID, To: id, Kind: graph.EdgeDefines,
 			FilePath: filePath, Line: v.startLn + 1,
@@ -562,17 +574,26 @@ func (e *TypeScriptExtractor) Extract(filePath string, src []byte) (*parser.Extr
 
 	// --- Event pub/sub edges ---
 	var pubsubEvents []pubsubEvent
+	var emitterEvents []jsEmitterEvent
 	for _, c := range calls {
 		if !c.isMember || c.expr == nil {
 			continue
 		}
 		if ev, ok := detectJSPubsubCall(c.expr, c.method, src, importPaths, c.line); ok {
 			pubsubEvents = append(pubsubEvents, ev)
+			continue
+		}
+		// Fallback: a bare emitter literal the import gate declined.
+		if em, ok := detectJSEmitterLiteralCall(c.expr, c.method, c.receiver, src, c.line); ok {
+			emitterEvents = append(emitterEvents, em)
 		}
 	}
 	// WebSocket / EventSource real-time client channels.
 	pubsubEvents = append(pubsubEvents, detectJSRealtimeEvents(src)...)
 	emitPubsubEvents(pubsubEvents,
+		func(line int) string { return findEnclosingFunc(funcRanges, line) },
+		filePath, "typescript", result)
+	emitJSEmitterLiteralEvents(emitterEvents,
 		func(line int) string { return findEnclosingFunc(funcRanges, line) },
 		filePath, "typescript", result)
 
@@ -620,6 +641,13 @@ func (e *TypeScriptExtractor) Extract(filePath string, src []byte) (*parser.Extr
 
 	captureValueRefCandidates(result, root, filePath, src)
 	captureFnValueCandidates(result, root, filePath, src)
+	captureReduxThunkDispatches(result, root, filePath, src)
+	captureObjectRegistryDispatches(result, root, filePath, src)
+	captureRTKQueryEndpoints(result, root, filePath, "typescript", src)
+	capturePiniaStoreCalls(result, root, filePath, src)
+	captureVuexDispatch(result, root, filePath, src)
+	captureExpressInlineHandlers(result, root, filePath, src)
+	captureReactContextRefs(result, root, filePath, src)
 	return result, nil
 }
 

@@ -44,6 +44,18 @@ type Resolver struct {
 	logger       *zap.Logger
 	dirIndex     map[string][]*graph.Node
 	lastDirIndex map[string][]*graph.Node
+	// cppIncludeDirs maps a repo-relative C/C++ source file to its ordered
+	// include search path (the `-I` / `-isystem` dirs from compile_commands.json),
+	// so a quoted/angle include resolves against the real compiler dir set
+	// (deterministic, collision-breaking) before the suffix-unique fallback.
+	// Populated by the indexer via SetCppIncludeDirs before ResolveAll.
+	cppIncludeDirs map[string][]string
+	// cppFallbackDirs is the heuristic include-root search path used when a
+	// repo has no compile_commands.json: conventional dirs (include/src/inc/
+	// api/lib) plus top-level header dirs, in priority order. The ordered
+	// probe runs against it so collisions break deterministically even with
+	// no compile DB. Populated by the indexer via SetCppFallbackIncludeDirs.
+	cppFallbackDirs []string
 	// providesForIdx maps `provides_for: AbstractName` (from @Module
 	// useClass entries) → the set of concrete class names bound to it.
 	// Populated once at the start of ResolveAll; consulted in O(1) by
@@ -462,6 +474,15 @@ func (r *Resolver) ResolveAll() *ResolveStats {
 	// before module attribution so internal-target stems never get
 	// mis-mapped to a phantom pypi/pub package.
 	r.resolveRelativeImports()
+
+	// Lua / Luau `require(...)` binding. Same settle window as the relative
+	// imports above; resolveRelativeImports never touches Lua, so this lands
+	// the Lua module/instance requires onto their indexed file nodes.
+	r.resolveLuaRequires()
+
+	// Razor / Blazor `@using` namespace-cascade binding. Same settle window;
+	// binds simple-type references reachable only via an imported namespace.
+	r.resolveRazorUsings()
 
 	// Module attribution for ecosystems without a CGO type-checker
 	// path (Python, Dart, …). Runs serially on the post-resolution
@@ -2013,6 +2034,24 @@ func (r *Resolver) buildProvidesForIndex() {
 }
 
 func (r *Resolver) clearProvidesForIndex() { r.providesForIdx = nil }
+
+// SetCppIncludeDirs installs the per-source-file C/C++ include search path
+// (repo-relative `-I` dirs from compile_commands.json) the relative-import
+// resolver uses to bind quoted/angle includes against the real compiler dir
+// set. The indexer calls this before ResolveAll; a nil/empty map leaves the
+// resolver on its suffix-unique heuristic.
+func (r *Resolver) SetCppIncludeDirs(perFile map[string][]string) {
+	r.cppIncludeDirs = perFile
+}
+
+// SetCppFallbackIncludeDirs installs the heuristic include-root search path
+// used for repos with no compile_commands.json (conventional dirs plus
+// top-level header dirs, in priority order). Consulted by the ordered probe
+// only when no per-file / compile-DB dirs exist. The indexer calls this before
+// ResolveAll; a nil/empty slice leaves the resolver on its suffix-unique net.
+func (r *Resolver) SetCppFallbackIncludeDirs(dirs []string) {
+	r.cppFallbackDirs = dirs
+}
 
 // buildReachabilityIndex walks all EdgeImports edges once and records,
 // for each caller file, the set of directories of imported (indexed)

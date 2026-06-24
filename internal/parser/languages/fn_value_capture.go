@@ -43,6 +43,19 @@ type FnValueCandidate struct {
 	Name     string
 	FilePath string
 	Line     int
+	// Form is the wrapper form the value sat in: "" (plain), "address_of"
+	// (`&fn` / `@fn`), or "eta" (Scala `f _`).
+	Form string
+	// Lang is the capturing grammar; Ungated marks a qualified-path candidate
+	// the gate may resolve cross-module.
+	Lang    string
+	Ungated bool
+	// RecvHint scopes the gate's resolution for a special form: "<self>" (the
+	// enclosing type), a concrete type name, or "" (repo-wide).
+	RecvHint string
+	// SkipGate marks a curated-HOF string callable that bypasses the same-file
+	// gate and resolves by a repo-wide unique-or-drop rule.
+	SkipGate bool
 }
 
 // captureFnValueCandidates records a function-as-value candidate for every
@@ -64,31 +77,82 @@ func captureFnValueCandidates(result *parser.ExtractionResult, root *sitter.Node
 	if root == nil || result == nil {
 		return
 	}
+	lang := ""
 	funcs := map[string]bool{}
 	for _, n := range result.Nodes {
 		if n == nil || n.FilePath != filePath {
 			continue
 		}
+		if n.Kind == graph.KindFile && lang == "" {
+			lang = n.Language
+		}
 		if n.Kind == graph.KindFunction || n.Kind == graph.KindMethod {
 			funcs[n.Name] = true
 		}
-	}
-	if len(funcs) == 0 {
-		return
 	}
 	funcRanges := buildFuncRanges(result)
 	if len(funcRanges) == 0 {
 		return
 	}
+	spec := fnRefSpecFor(lang)
 	var cands []FnValueCandidate
 	seen := map[string]bool{}
 	walkNodes(root, func(n *sitter.Node) {
-		if n.Type() != "identifier" {
+		// Special whole-node forms (method references, this.m / self.m,
+		// Ruby symbol callables, selectors) are normalised to a (member,
+		// receiver-hint) pair before the plain-identifier path.
+		if refName, recvHint, ok := normalizeFnRefSpecial(n, src); ok {
+			typeQualified := recvHint != "" && recvHint != "<self>"
+			// Flood guard: a `<self>` / selector member must name a same-file
+			// function/method; a type-qualified ref (`Foo::bar`) may bind
+			// cross-file via the gate.
+			if !typeQualified && !funcs[refName] {
+				return
+			}
+			if byteAfterIdentStartsCall(src, int(n.EndByte())) {
+				return
+			}
+			line := int(n.StartPoint().Row) + 1
+			fromID := findEnclosingFunc(funcRanges, line)
+			if fromID == "" {
+				return
+			}
+			key := fromID + "\x00special\x00" + refName + "\x00" + recvHint
+			if seen[key] {
+				return
+			}
+			seen[key] = true
+			cands = append(cands, FnValueCandidate{
+				FromID: fromID, Name: refName, FilePath: filePath, Line: line,
+				Form: "special", RecvHint: recvHint, Lang: lang, Ungated: typeQualified,
+			})
 			return
 		}
-		name := n.Content(src)
-		if !funcs[name] {
+		if !spec.matchesIDNode(n.Type()) {
 			return
+		}
+		// Skip an identifier that is a component of a special form already
+		// captured as a whole (the `valueOf` in `Demo::valueOf`, the `handle`
+		// in `self.handle`), so it is not double-counted as a bare name.
+		if p := n.Parent(); p != nil {
+			if _, _, ok := normalizeFnRefSpecial(p, src); ok {
+				return
+			}
+		}
+		name := fnRefNodeName(n, src)
+		if name == "" {
+			return
+		}
+		ungated := false
+		if !funcs[name] {
+			// A name the file does not declare can only bind cross-module, and
+			// only when it is an explicit qualified path (e.g. Rust `m::f`) —
+			// a bare identifier that is not a same-file function is a local /
+			// param / builtin and is dropped to avoid flooding the gate.
+			if !spec.ungated || n.Type() != "scoped_identifier" {
+				return
+			}
+			ungated = true
 		}
 		if byteAfterIdentStartsCall(src, int(n.EndByte())) {
 			return // callee of a call (incl. tagged template), not a value use
@@ -103,14 +167,17 @@ func captureFnValueCandidates(result *parser.ExtractionResult, root *sitter.Node
 			return
 		}
 		seen[key] = true
-		cands = append(cands, FnValueCandidate{FromID: fromID, Name: name, FilePath: filePath, Line: line})
+		cands = append(cands, FnValueCandidate{
+			FromID: fromID, Name: name, FilePath: filePath, Line: line,
+			Form: spec.fnRefForm(n), Lang: lang, Ungated: ungated,
+		})
 	})
 	EmitFnValueCandidates(result, cands)
 }
 
 // byteAfterIdentStartsCall reports whether the first non-whitespace byte at or
 // after i begins a call of the preceding identifier — '(' for an ordinary call
-// or '`' for a tagged-template call (`tag`...``). Either means the identifier is
+// or '`' for a tagged-template call (`tag`...“). Either means the identifier is
 // a callee, not a function-as-value reference.
 func byteAfterIdentStartsCall(src []byte, i int) bool {
 	for i < len(src) {
@@ -136,6 +203,25 @@ func EmitFnValueCandidates(result *parser.ExtractionResult, cands []FnValueCandi
 		if c.FromID == "" || c.Name == "" {
 			continue
 		}
+		meta := map[string]any{
+			"via":           fnValueCandidateVia,
+			"fn_value_name": c.Name,
+		}
+		if c.Form != "" {
+			meta["fn_ref_form"] = c.Form
+		}
+		if c.Lang != "" {
+			meta["fn_ref_lang"] = c.Lang
+		}
+		if c.Ungated {
+			meta["fn_value_ungated"] = true
+		}
+		if c.RecvHint != "" {
+			meta["fn_ref_recv_hint"] = c.RecvHint
+		}
+		if c.SkipGate {
+			meta["skip_gate"] = true
+		}
 		result.Edges = append(result.Edges, &graph.Edge{
 			From:     c.FromID,
 			To:       fnValueUnresolvedPrefix + c.Name,
@@ -143,10 +229,7 @@ func EmitFnValueCandidates(result *parser.ExtractionResult, cands []FnValueCandi
 			FilePath: c.FilePath,
 			Line:     c.Line,
 			Origin:   graph.OriginSpeculative,
-			Meta: map[string]any{
-				"via":           fnValueCandidateVia,
-				"fn_value_name": c.Name,
-			},
+			Meta:     meta,
 		})
 	}
 }

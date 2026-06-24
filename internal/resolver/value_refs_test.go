@@ -82,7 +82,7 @@ func TestValueRefShadowAndSelfPruned(t *testing.T) {
 	g.AddNode(&graph.Node{
 		ID: "f.go::Run.TIMEOUT", Kind: graph.KindParam, Name: "TIMEOUT", FilePath: "f.go", StartLine: 5, Language: "go",
 	})
-	valueRefCandidate(g, "f.go::Run", "TIMEOUT", "f.go", 6)   // shadowed by the param
+	valueRefCandidate(g, "f.go::Run", "TIMEOUT", "f.go", 6)     // shadowed by the param
 	valueRefCandidate(g, "f.go::TIMEOUT", "TIMEOUT", "f.go", 2) // self-read
 
 	assert.Equal(t, 0, ResolveValueRefs(g), "shadowed and self reads must be pruned")
@@ -123,4 +123,38 @@ func TestValueRefInnerLocalShadowPruned(t *testing.T) {
 	assert.Equal(t, 1, ResolveValueRefs(g), "only the un-shadowed read should bind")
 	require.NotNil(t, readsEdge(g, "b.go::Go", "b.go::RETRY_LIMIT"), "un-shadowed read must bind to the constant")
 	assert.Nil(t, readsEdge(g, "a.go::Run", "a.go::RETRY_LIMIT"), "inner-local-shadowed read must stay unbound")
+}
+
+// TestValueRefReaderScopeSpecific pins the recall recovery: a constant read by
+// function A binds even when an unrelated function B in the same file declares a
+// same-named local, while a read inside B (which itself rebinds the name) is
+// dropped — reader-scope specificity the old file-wide census lacked.
+func TestValueRefReaderScopeSpecific(t *testing.T) {
+	g := graph.New()
+	g.AddNode(&graph.Node{ID: "c.go::LIMIT_X", Kind: graph.KindConstant, Name: "LIMIT_X", FilePath: "c.go", StartLine: 2, Language: "go"})
+	g.AddNode(&graph.Node{ID: "c.go::A", Kind: graph.KindFunction, Name: "A", FilePath: "c.go", StartLine: 5, Language: "go"})
+	g.AddNode(&graph.Node{ID: "c.go::B", Kind: graph.KindFunction, Name: "B", FilePath: "c.go", StartLine: 10, Language: "go"})
+	g.AddNode(&graph.Node{ID: "c.go::B#LIMIT_X", Kind: graph.KindLocal, Name: "LIMIT_X", FilePath: "c.go", StartLine: 11, Language: "go"})
+	valueRefCandidate(g, "c.go::A", "LIMIT_X", "c.go", 6)  // A has no local → binds
+	valueRefCandidate(g, "c.go::B", "LIMIT_X", "c.go", 12) // B rebinds locally → dropped
+
+	assert.Equal(t, 1, ResolveValueRefs(g))
+	require.NotNil(t, readsEdge(g, "c.go::A", "c.go::LIMIT_X"), "A's read binds despite B's unrelated local")
+	assert.Nil(t, readsEdge(g, "c.go::B", "c.go::LIMIT_X"), "B's read is shadowed by its own local")
+}
+
+// TestValueRefConditionalDef pins that a name with two file-scope declarators (a
+// try/except / #[cfg] conditional def) binds the read to the nearest preceding
+// declarator and stamps conditional_def.
+func TestValueRefConditionalDef(t *testing.T) {
+	g := graph.New()
+	g.AddNode(&graph.Node{ID: "cfg.py::API_URL@3", Kind: graph.KindVariable, Name: "API_URL", FilePath: "cfg.py", StartLine: 3, Language: "python"})
+	g.AddNode(&graph.Node{ID: "cfg.py::API_URL@6", Kind: graph.KindVariable, Name: "API_URL", FilePath: "cfg.py", StartLine: 6, Language: "python"})
+	g.AddNode(&graph.Node{ID: "cfg.py::use", Kind: graph.KindFunction, Name: "use", FilePath: "cfg.py", StartLine: 10, Language: "python"})
+	valueRefCandidate(g, "cfg.py::use", "API_URL", "cfg.py", 12)
+
+	assert.Equal(t, 1, ResolveValueRefs(g))
+	e := readsEdge(g, "cfg.py::use", "cfg.py::API_URL@6")
+	require.NotNil(t, e, "binds to the nearest preceding conditional declarator")
+	assert.Equal(t, true, e.Meta["conditional_def"])
 }

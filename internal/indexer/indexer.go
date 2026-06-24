@@ -874,6 +874,7 @@ func (idx *Indexer) RunDeferredPasses(ctx context.Context) {
 	// the flag false and pay the standard single-repo cost.
 	if !idx.skipResolveInDeferred {
 		reporter.Report("resolving references", 0, 0)
+		idx.populateCppIncludeDirs(false)
 		idx.resolver.ResolveAll()
 	}
 	dResolve = time.Since(tphase)
@@ -954,6 +955,49 @@ func (idx *Indexer) runDeferredContracts() {
 
 // RootPath returns the root path used for relative path computation.
 func (idx *Indexer) RootPath() string { return idx.rootPath }
+
+// populateCppIncludeDirs reconstructs each C/C++ source file's include search
+// path from compile_commands.json and hands it to the resolver, so a quoted
+// include binds against the real `-I` dir set (deterministic collision-breaking)
+// before the suffix-unique fallback. forceReload drops the cache first, so an
+// incremental reindex picks up an edited compile_commands.json without a
+// daemon restart. Keys/dirs are prefixed in multi-repo mode to match file IDs.
+func (idx *Indexer) populateCppIncludeDirs(forceReload bool) {
+	if idx.resolver == nil || idx.rootPath == "" {
+		return
+	}
+	if forceReload {
+		clearCppIncludeDirCache(idx.rootPath)
+	}
+	prefix := ""
+	if idx.repoPrefix != "" {
+		prefix = idx.repoPrefix + "/"
+	}
+	prefixDirs := func(dirs []string) []string {
+		if prefix == "" || len(dirs) == 0 {
+			return dirs
+		}
+		pd := make([]string, len(dirs))
+		for i, d := range dirs {
+			pd[i] = prefix + d
+		}
+		return pd
+	}
+	tus := loadCompileCommands(idx.rootPath)
+	if len(tus) == 0 {
+		// No compile DB: fall back to the conventional include-root heuristic
+		// so the ordered probe still runs for repos without a compile DB.
+		idx.resolver.SetCppIncludeDirs(nil)
+		idx.resolver.SetCppFallbackIncludeDirs(prefixDirs(heuristicIncludeDirs(idx.rootPath)))
+		return
+	}
+	perFile := make(map[string][]string, len(tus))
+	for f, tu := range tus {
+		perFile[prefix+f] = prefixDirs(tu.includeDirs)
+	}
+	idx.resolver.SetCppIncludeDirs(perFile)
+	idx.resolver.SetCppFallbackIncludeDirs(nil)
+}
 
 // ResolveFilePath maps a graph file path (repo-relative in single-repo mode)
 // to an absolute filesystem path. Returns "" when no root is set so callers
@@ -1273,6 +1317,12 @@ func (idx *Indexer) applyCoverageDomains(relPath, lang string, src []byte, resul
 		// source. Flag the annotated symbols so they stay visible.
 		if extra, st := codegen.MarkAnnotatedGenerated(result.Nodes, result.Edges); st.NodesMarked > 0 {
 			result.Edges = append(result.Edges, extra...)
+			// Materialize the actual Lombok accessor members (getX/setX/
+			// builder/log) so `obj.getName()` resolves to a real graph node.
+			if lnodes, ledges := codegen.MaterializeLombokAccessors(result.Nodes); len(lnodes) > 0 {
+				result.Nodes = append(result.Nodes, lnodes...)
+				result.Edges = append(result.Edges, ledges...)
+			}
 		}
 	}
 	// Framework entry points (Alembic migrations / Next.js pages /
@@ -2649,6 +2699,7 @@ func (idx *Indexer) IndexCtx(ctx context.Context, root string) (result *IndexRes
 
 		reporter.Report("resolving references", 0, 0)
 		// Resolve cross-file references.
+		idx.populateCppIncludeDirs(true)
 		idx.resolver.ResolveAll()
 
 		// Infer structural interface satisfaction + method-level
@@ -3241,6 +3292,7 @@ func isStructuralKind(k graph.NodeKind) bool {
 // interface-implementation inference. Exposed for batch paths that
 // defer per-file resolver work until the end of a batch.
 func (idx *Indexer) ResolveAll() {
+	idx.populateCppIncludeDirs(true)
 	idx.resolver.ResolveAll()
 	idx.resolver.InferImplements()
 	idx.resolver.InferOverrides()

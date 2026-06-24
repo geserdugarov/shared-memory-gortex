@@ -108,6 +108,10 @@ func (e *MyBatisExtractor) Extract(filePath string, src []byte) (*parser.Extract
 		return result, nil
 	}
 
+	// One up-front line-start scan; every element offset resolves to a line via
+	// binary search instead of a per-element full-prefix newline count.
+	lineStarts := lineStartOffsets(src)
+
 	dec := xml.NewDecoder(bytes.NewReader(src))
 	dec.Strict = false
 	namespace := ""
@@ -133,7 +137,7 @@ func (e *MyBatisExtractor) Extract(filePath string, src []byte) (*parser.Extract
 			continue
 		}
 
-		elemLine := 1 + bytes.Count(src[:clampOffset(dec.InputOffset(), len(src))], []byte{'\n'})
+		elemLine := lineForOffset(lineStarts, int(clampOffset(dec.InputOffset(), len(src))))
 
 		// `<sql id="…">` is a reusable SQL fragment — a first-class node other
 		// statements `<include refid>` into. It becomes the current element so a
@@ -153,6 +157,7 @@ func (e *MyBatisExtractor) Extract(filePath string, src []byte) (*parser.Extract
 					Meta: map[string]any{
 						"mybatis_namespace": namespace,
 						"mybatis_fragment":  true,
+						"signature":         "<sql>",
 					},
 				})
 				result.Edges = append(result.Edges, &graph.Edge{
@@ -198,8 +203,11 @@ func (e *MyBatisExtractor) Extract(filePath string, src []byte) (*parser.Extract
 		// <foreach>, …) are flattened to their text content. The decoder
 		// loop then walks those nested elements; none are statement elems,
 		// so they are skipped by the filter above.
-		startLine := 1 + bytes.Count(src[:clampOffset(dec.InputOffset(), len(src))], []byte{'\n'})
-		sql := myBatisStatementSQL(src, startLine)
+		startLine := lineForOffset(lineStarts, int(clampOffset(dec.InputOffset(), len(src))))
+		// Scan the statement body from the start of the start-tag's line (which
+		// the decoder offset has already moved past), matching the original
+		// line-derived behaviour without re-scanning the source from zero.
+		sql := myBatisStatementSQL(src, lineStarts[startLine-1])
 
 		stmtNodeID := namespace + "::" + stmtID
 		stmt := &graph.Node{
@@ -218,15 +226,31 @@ func (e *MyBatisExtractor) Extract(filePath string, src []byte) (*parser.Extract
 				"mybatis_sql":       sql,
 			},
 		}
-		if rt := myBatisAttr(se, "resultType"); rt != "" {
+		rt := myBatisAttr(se, "resultType")
+		rm := myBatisAttr(se, "resultMap")
+		pt := myBatisAttr(se, "parameterType")
+		if rt != "" {
 			stmt.Meta["mybatis_result_type"] = rt
 		}
-		if rm := myBatisAttr(se, "resultMap"); rm != "" {
+		if rm != "" {
 			stmt.Meta["mybatis_result_map"] = rm
 		}
-		if pt := myBatisAttr(se, "parameterType"); pt != "" {
+		if pt != "" {
 			stmt.Meta["mybatis_parameter_type"] = pt
 		}
+		// Human-readable signature surfaced as meta.signature by get_symbol /
+		// search_symbols previews: `KIND [param=…] [result=…]`. Additive on top
+		// of the structured mybatis_* keys.
+		sig := strings.ToUpper(local)
+		if pt != "" {
+			sig += " param=" + pt
+		}
+		if rt != "" {
+			sig += " result=" + rt
+		} else if rm != "" {
+			sig += " result=" + rm
+		}
+		stmt.Meta["signature"] = sig
 		result.Nodes = append(result.Nodes, stmt)
 		currentStmt = stmtNodeID
 
@@ -270,19 +294,14 @@ func myBatisAttr(se xml.StartElement, local string) string {
 	return ""
 }
 
-// myBatisStatementSQL returns the raw text body of the statement element
-// whose start tag opens on line startLine1 (1-based). It scans the source
-// for the element's `>` then captures up to the matching close tag,
-// stripping nested dynamic-SQL tags so the result reads as plain SQL.
-func myBatisStatementSQL(src []byte, startLine1 int) string {
-	// Locate the byte offset of the start of startLine1.
-	off := 0
-	line := 1
-	for off < len(src) && line < startLine1 {
-		if src[off] == '\n' {
-			line++
-		}
-		off++
+// myBatisStatementSQL returns the raw text body of the statement element whose
+// start tag opens at byte offset off. It scans from off for the element's `>`
+// then captures up to the matching close tag, stripping nested dynamic-SQL tags
+// so the result reads as plain SQL. Taking the offset directly (captured from
+// the decoder) avoids re-scanning the source from the start to re-derive it.
+func myBatisStatementSQL(src []byte, off int) string {
+	if off < 0 || off > len(src) {
+		return ""
 	}
 	// Find the end of the opening start tag ('>') from here.
 	gt := bytes.IndexByte(src[off:], '>')

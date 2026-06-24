@@ -55,17 +55,31 @@ function chat(socket) {
 	}
 }
 
-func TestJSPubsub_GenericMethodNoImportSkipped(t *testing.T) {
-	// Without a recognised pub/sub import, generic emit/on calls are
-	// just domain methods and must not enter the graph.
+func TestJSPubsub_GenericMethodEmitterLiteralFallback(t *testing.T) {
+	// Without a recognised pub/sub import the import-gated path declines,
+	// but the emitter-literal fallback still materialises a receiver-scoped
+	// topic node so a custom emitter pairs.
 	src := `function wire(thing) {
   thing.on('change', cb);
   thing.emit('change', v);
 }
 `
 	fix := runJSExtractFixture(t, "x.js", src)
-	if got := len(fix.nodesByKind[graph.KindEvent]); got != 0 {
-		t.Errorf("generic on/emit with no pub/sub import should produce no topic node, got %d", got)
+	events := fix.nodesByKind[graph.KindEvent]
+	if len(events) != 1 {
+		t.Fatalf("expected 1 emitter-literal topic node, got %d: %+v", len(events), events)
+	}
+	if events[0].ID != "event::emitter::thing::change" {
+		t.Errorf("topic id = %q (want event::emitter::thing::change)", events[0].ID)
+	}
+	if tr, _ := events[0].Meta["transport"].(string); tr != "emitter" {
+		t.Errorf("transport = %q (want emitter)", tr)
+	}
+	if got := len(fix.edgesByKind[graph.EdgeEmits]); got != 1 {
+		t.Errorf("expected 1 EdgeEmits (emit), got %d", got)
+	}
+	if got := len(fix.edgesByKind[graph.EdgeListensOn]); got != 1 {
+		t.Errorf("expected 1 EdgeListensOn (on), got %d", got)
 	}
 }
 

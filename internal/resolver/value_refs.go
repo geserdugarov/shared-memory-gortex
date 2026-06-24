@@ -1,6 +1,7 @@
 package resolver
 
 import (
+	"sort"
 	"strings"
 
 	"github.com/zzet/gortex/internal/graph"
@@ -38,8 +39,12 @@ func ResolveValueRefs(g graph.Store) int {
 	if g == nil {
 		return 0
 	}
-	constByFile := map[string]map[string]string{}
-	shadowByFile := map[string]map[string]bool{}
+	// constsByFile records every file-scope constant/variable declarator of a
+	// distinctive name (a name may have several — a try/except import, a
+	// `#[cfg]` const, an `#ifdef #define`); localsByFile records the
+	// param/field/local declarators that may shadow a read in their own scope.
+	constsByFile := map[string]map[string][]*graph.Node{}
+	localsByFile := map[string]map[string][]*graph.Node{}
 	for _, n := range nodesByKindsOrAll(g, graph.KindConstant, graph.KindVariable, graph.KindParam, graph.KindField, graph.KindLocal) {
 		if n == nil || n.FilePath == "" {
 			continue
@@ -49,32 +54,28 @@ func ResolveValueRefs(g graph.Store) int {
 			if !isDistinctiveValueName(n.Name) {
 				continue
 			}
-			m := constByFile[n.FilePath]
+			m := constsByFile[n.FilePath]
 			if m == nil {
-				m = map[string]string{}
-				constByFile[n.FilePath] = m
+				m = map[string][]*graph.Node{}
+				constsByFile[n.FilePath] = m
 			}
-			if _, ok := m[n.Name]; !ok {
-				m[n.Name] = n.ID
-			}
+			m[n.Name] = append(m[n.Name], n)
 		case graph.KindParam, graph.KindField, graph.KindLocal:
-			// Declarator census: any same-file parameter, field, or
-			// inner-scope local (`let X` / `:= X`) materialised by the
-			// per-grammar local-binding pass declares this name in a scope
-			// that shadows the file-scope constant. A candidate read of the
-			// name might resolve to that declarator, not the constant, so the
-			// file-level binding is dropped rather than mis-bound — the same
-			// coarse, conservative gate the param/field pruning already used.
-			s := shadowByFile[n.FilePath]
-			if s == nil {
-				s = map[string]bool{}
-				shadowByFile[n.FilePath] = s
+			m := localsByFile[n.FilePath]
+			if m == nil {
+				m = map[string][]*graph.Node{}
+				localsByFile[n.FilePath] = m
 			}
-			s[n.Name] = true
+			m[n.Name] = append(m[n.Name], n)
 		}
 	}
-	if len(constByFile) == 0 {
+	if len(constsByFile) == 0 {
 		return 0
+	}
+	for _, m := range constsByFile {
+		for _, ns := range m {
+			sort.SliceStable(ns, func(i, j int) bool { return ns[i].StartLine < ns[j].StartLine })
+		}
 	}
 
 	resolved := 0
@@ -87,30 +88,46 @@ func ResolveValueRefs(g graph.Store) int {
 			continue
 		}
 		name, _ := e.Meta["name"].(string)
-		consts := constByFile[e.FilePath]
-		if name == "" || consts == nil {
+		consts := constsByFile[e.FilePath][name]
+		if name == "" || len(consts) == 0 {
 			continue
 		}
-		constID, ok := consts[name]
-		if !ok || constID == e.From {
-			continue
-		}
-		if sh := shadowByFile[e.FilePath]; sh != nil && sh[name] {
+		// Reader-scope shadow: a same-named param/field/local declared *inside
+		// the reading function* (its node ID nests under the reader's via a
+		// `.`/`#`/`:` scope separator) means the bare read more likely binds
+		// that local, not the constant — drop. A same-named local in an
+		// unrelated function does NOT shadow this read (the recall the old
+		// file-wide boolean census over-dropped).
+		if valueRefReaderShadowed(e.From, localsByFile[e.FilePath][name]) {
 			continue
 		}
 		if reader := g.GetNode(e.From); reader != nil && isGeneratedReader(reader) {
 			continue
 		}
-		if e.To == constID {
+		// Conditional def: more than one file-scope declarator of the name
+		// (try/except / #[cfg] / #ifdef) is legitimate — bind the read to the
+		// nearest preceding declarator rather than dropping.
+		conditional := len(consts) > 1
+		target := consts[0]
+		if conditional {
+			target = nearestPrecedingDecl(consts, e.Line)
+		}
+		if target == nil || target.ID == e.From {
+			continue
+		}
+		if e.To == target.ID {
 			resolved++
 			continue
 		}
 		oldTo := e.To
-		e.To = constID
+		e.To = target.ID
 		e.Origin = graph.OriginASTResolved
 		e.Confidence = 0.7
 		e.ConfidenceLabel = graph.ConfidenceLabelFor(graph.EdgeReads, 0.7)
 		e.Meta["via"] = valueRefVia
+		if conditional {
+			e.Meta["conditional_def"] = true
+		}
 		StampSynthesized(e, SynthValueRef)
 		reindex = append(reindex, graph.EdgeReindex{Edge: e, OldTo: oldTo})
 		resolved++
@@ -119,6 +136,42 @@ func ResolveValueRefs(g graph.Store) int {
 		g.ReindexEdges(reindex)
 	}
 	return resolved
+}
+
+// valueRefReaderShadowed reports whether any same-named declarator is scoped
+// inside the reading function — its node ID nests under the reader's ID via a
+// `.` / `#` / `:` scope separator (`f.go::Run.x`, `f.go::Run#x`). Such a
+// declarator shadows a bare read in the reader's own scope; a same-named
+// declarator in an unrelated function does not.
+func valueRefReaderShadowed(readerID string, locals []*graph.Node) bool {
+	if readerID == "" {
+		return false
+	}
+	for _, l := range locals {
+		if l == nil || !strings.HasPrefix(l.ID, readerID) || len(l.ID) <= len(readerID) {
+			continue
+		}
+		switch l.ID[len(readerID)] {
+		case '.', '#', ':':
+			return true
+		}
+	}
+	return false
+}
+
+// nearestPrecedingDecl returns the conditional-def declarator with the greatest
+// line at or before readLine, falling back to the first when the read precedes
+// them all. decls is sorted ascending by line.
+func nearestPrecedingDecl(decls []*graph.Node, readLine int) *graph.Node {
+	best := decls[0]
+	for _, d := range decls {
+		if d.StartLine <= readLine {
+			best = d
+		} else {
+			break
+		}
+	}
+	return best
 }
 
 // isDistinctiveValueName reports whether name has the config-constant shape:

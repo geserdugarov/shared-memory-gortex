@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/zzet/gortex/internal/parser"
@@ -35,6 +36,9 @@ func (h *HTTPExtractor) SupportedLanguages() []string {
 		// in their path, so the extractor must see them even though they are
 		// not otherwise HTTP-bearing languages.
 		"astro", "svelte", "vue",
+		// YAML: Drupal *.routing.yml route declarations (a FrameworkRoutePass
+		// filters to the routing files by name).
+		"yaml",
 	}
 }
 
@@ -318,16 +322,10 @@ var httpPatterns = []httpPattern{
 	// `Router::new().route("/users/:id", post(create).delete(remove))`.
 	// The method comes from the `get|post|...` function call; the
 	// path is the first string literal in `.route(`.
-	{
-		re:         regexp.MustCompile(`\.route\(\s*"([^"]+)"\s*,\s*(get|post|put|delete|patch|head|options)\(\s*(\w+)?`),
-		role:       RoleProvider,
-		methodGrp:  2,
-		pathGrp:    1,
-		handlerGrp: 3,
-		framework:  "axum",
-		confidence: 0.9,
-		languages:  []string{"rust"},
-	},
+	// Axum `.route("/path", <chain>)` provider routes — including the
+	// chained-method form `get(h1).post(h2)` — are handled by the Rust route
+	// pass (http_rust.go), which emits one Contract per method in the chain.
+
 	// Actix-web macro form: `#[get("/path")]` / `#[post("/path")]`.
 	{
 		re:         regexp.MustCompile(`#\[(get|post|put|delete|patch|head|options)\(\s*"([^"]+)"`),
@@ -483,11 +481,14 @@ var httpPatterns = []httpPattern{
 	// receiver is anchored to the conventional names (app / routes /
 	// router) — same trade-off express makes for route-group vars.
 	{
-		re:         regexp.MustCompile(`\b(?:app|routes|router)\.(get|post|put|delete|patch)\(\s*"([^"]+)"(?:[^{)]*?\buse:\s*(\w+))?`),
+		// Receiver is captured (group 1) — not just app/routes/router — so a
+		// route declared on a `.grouped(...)` group var carries its receiver
+		// for the prefix-join pass. The `use:` label binds the handler.
+		re:         regexp.MustCompile(`\b(\w+)\.(get|post|put|delete|patch)\(\s*"([^"]+)"(?:[^{)]*?\buse:\s*(\w+))?`),
 		role:       RoleProvider,
-		methodGrp:  1,
-		pathGrp:    2,
-		handlerGrp: 3,
+		methodGrp:  2,
+		pathGrp:    3,
+		handlerGrp: 4,
 		framework:  "vapor",
 		confidence: 0.85,
 		languages:  []string{"swift"},
@@ -658,12 +659,10 @@ func (h *HTTPExtractor) extract(
 
 	var out []Contract
 
-	// File-based routing (Next.js / Nuxt / SvelteKit / Astro): the route is
-	// derived from the file PATH, so it runs regardless of the content
-	// prefilter above. React Router routes are JSX/object-config derived.
-	if isFileBasedRouteFile(filePath) {
-		out = append(out, h.extractFileBasedRoutes(filePath, text, lines, fileNodes, lang, tree)...)
-	}
+	// File-based routing, Django/DRF/Flask, Rails resources, Express/Fastify
+	// object routes — every structural framework route pass — run through the
+	// FrameworkRoutePass registry (framework_registry.go) below. React Router
+	// routes are JSX/object-config derived.
 	if (lang == "typescript" || lang == "javascript") && hasReactRouterMarkers(src) {
 		out = append(out, h.extractReactRouterRoutes(filePath, text, lines, fileNodes, lang, tree)...)
 	}
@@ -770,6 +769,18 @@ func (h *HTTPExtractor) extract(
 				}
 			}
 
+			// Inline arrow/function route handlers (Express/Fastify/Koa) have
+			// no named symbol to bind. The JS/TS extractor materialises a
+			// synthetic handler node anchored to the route call line and
+			// attributes the handler body's application calls to it; anchor the
+			// route Contract's SymbolID to that node so the route connects
+			// through the anonymous handler to the services it invokes.
+			if symbolID == "" && pat.role == RoleProvider &&
+				(lang == "typescript" || lang == "javascript") &&
+				strings.Contains(lines[lineNum-1], "=>") {
+				symbolID = filePath + "::express-handler@" + strconv.Itoa(lineNum)
+			}
+
 			// Backend frameworks (Laravel / Rails / Spring / JAX-RS / ASP.NET)
 			// bind the controller action the route dispatches to: same-file for
 			// annotation-preceded handlers, and a stamped identifier that the
@@ -844,56 +855,25 @@ func (h *HTTPExtractor) extract(
 		}
 	}
 
-	// Non-decorator Flask routing forms. flask-restful's
-	// api.add_resource(Class, '/path') and the imperative
-	// app.add_url_rule('/path', view_func=fn) reference a handler that is
-	// NOT on the call line (a resource class whose methods give the verbs,
-	// or a view_func defined elsewhere), so they need cross-symbol
-	// resolution the per-line httpPatterns table cannot do. They run as
-	// dedicated node-aware passes, gated by a cheap substring prefilter.
-	if lang == "python" {
-		if strings.Contains(text, "add_resource") {
-			out = append(out, h.extractFlaskRestfulRoutes(filePath, text, lines, fileNodes, lang, tree)...)
-		}
-		if strings.Contains(text, "add_url_rule") {
-			out = append(out, h.extractFlaskAddURLRule(filePath, text, lines, fileNodes, lang, tree)...)
-		}
-		// Django urlpatterns (path / re_path / url / include / .as_view) — the
-		// handler is a symbol declared elsewhere, so it needs a node-aware pass
-		// rather than the per-line provider table.
-		if djangoRouteCallRE.MatchString(text) {
-			out = append(out, h.extractDjangoRoutes(filePath, text, lines, fileNodes, lang, tree)...)
-		}
-		// DRF router.register(prefix, ViewSet) expands to per-action routes.
-		if strings.Contains(text, ".register(") {
-			out = append(out, h.extractDRFRoutes(filePath, text, lines, fileNodes, lang, tree)...)
-		}
-		// Flask @route decorators expand methods=[...] per HTTP verb; the
-		// per-line table cannot, so it runs as a dedicated pass.
-		if strings.Contains(text, ".route(") {
-			out = append(out, h.extractFlaskDecoratorRoutes(filePath, text, lines, fileNodes, lang, tree)...)
-		}
-	}
-
-	// Rails `resources :x` / `resource :x` expand to the canonical RESTful
-	// route set — implicit routes the per-line provider table cannot see.
-	if lang == "ruby" && strings.Contains(text, "resource") {
-		out = append(out, h.extractRailsResourceRoutes(filePath, text, lines, fileNodes, lang, tree)...)
-	}
+	// Structural framework route passes — Django/DRF/Flask, Rails resources,
+	// file-based routes, Express/Fastify object forms — run through the
+	// FrameworkRoutePass registry. Each pass is language-filtered, has a cheap
+	// Detect pre-filter, and is crash-isolated, so one panicking pass does not
+	// abort the rest. A new framework registers via RegisterFrameworkRoutePass
+	// with no edits here.
+	out = append(out, runFrameworkRoutePasses(&RouteExtractCtx{
+		FilePath: filePath, Src: src, Text: text, Lines: lines,
+		FileNodes: fileNodes, Lang: lang, Tree: tree, H: h,
+	})...)
 
 	// Configurable HTTP-client wrapper aliases. Calls to a
 	// project-named wrapper (e.g. apiGet('/users')) become consumer
 	// contracts even though no built-in fetch/axios pattern matched.
 	// Scoped to the TS/JS family — the alias mechanism mirrors the
-	// fetch/axios consumer heuristics, which are TS/JS only.
+	// fetch/axios consumer heuristics, which are TS/JS only. Stays
+	// hard-wired: its gate reads h.ClientAliases (instance state), not src.
 	if len(h.ClientAliases) > 0 && (lang == "typescript" || lang == "javascript") {
 		out = append(out, h.detectClientAliasConsumers(filePath, text, lines, fileNodes, lang, tree)...)
-	}
-
-	// Object-config (Fastify/Hapi route({...})) and chained
-	// (Express route('/p').get()) route shapes the per-line table cannot read.
-	if (lang == "typescript" || lang == "javascript") && strings.Contains(text, ".route(") {
-		out = append(out, h.extractObjectRouteProviders(filePath, text, lines, fileNodes, lang, tree)...)
 	}
 
 	// Preserve the developer-written path and stamp the per-reference route

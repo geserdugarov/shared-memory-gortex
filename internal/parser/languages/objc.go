@@ -13,6 +13,8 @@ import (
 // keyword-argument selector syntax: `- (ret)fooWith:(T)a andBar:(T)b`.
 var (
 	objcInterfaceRe = regexp.MustCompile(`(?m)^\s*@interface\s+(\w+)`)
+	// objcSuperRe captures the superclass of `@interface X : Super` (group 1).
+	objcSuperRe = regexp.MustCompile(`@interface\s+\w+\s*:\s*(\w+)`)
 	objcProtocolRe  = regexp.MustCompile(`(?m)^\s*@protocol\s+(\w+)`)
 	objcImplRe      = regexp.MustCompile(`(?m)^\s*@implementation\s+(\w+)`)
 	objcMethodRe    = regexp.MustCompile(`(?m)^\s*([-+])\s*\(\s*[^)]*\)\s*([A-Za-z_]\w*(?:\s*:\s*\([^)]*\)\s*\w+(?:\s+[A-Za-z_]\w*\s*:\s*\([^)]*\)\s*\w+)*)?)`)
@@ -26,6 +28,40 @@ var (
 type ObjCExtractor struct{}
 
 func NewObjCExtractor() *ObjCExtractor { return &ObjCExtractor{} }
+
+// objcSuperclass returns the superclass named on the `@interface` line that
+// contains the byte at pos (the class name), or "" for a class with no
+// superclass (a category declaration). pos is the name offset rather than the
+// match start because the interface regex's leading `\s*` can span a preceding
+// blank line.
+func objcSuperclass(src []byte, pos int) string {
+	start := pos
+	for start > 0 && src[start-1] != '\n' {
+		start--
+	}
+	end := pos
+	for end < len(src) && src[end] != '\n' {
+		end++
+	}
+	if m := objcSuperRe.FindSubmatch(src[start:end]); m != nil {
+		return string(m[1])
+	}
+	return ""
+}
+
+// stampObjCNodeMeta sets a Meta key on the already-emitted node with the given
+// ID.
+func stampObjCNodeMeta(result *parser.ExtractionResult, id, key string, value any) {
+	for _, n := range result.Nodes {
+		if n.ID == id {
+			if n.Meta == nil {
+				n.Meta = map[string]any{}
+			}
+			n.Meta[key] = value
+			return
+		}
+	}
+}
 
 func (e *ObjCExtractor) Language() string     { return "objc" }
 func (e *ObjCExtractor) Extensions() []string { return []string{".m", ".mm"} }
@@ -66,6 +102,13 @@ func (e *ObjCExtractor) Extract(filePath string, src []byte) (*parser.Extraction
 		name := string(src[m[2]:m[3]])
 		line := lineAt(src, m[0])
 		add(name, graph.KindType, line, findKeywordBlockEnd(lines, line, "@end"))
+		// UIKit classification: `@interface X : UIViewController` → stamp the
+		// uikit_role its superclass implies (shared with the Swift extractor).
+		if super := objcSuperclass(src, m[2]); super != "" {
+			if role := uikitRoleFor(map[string]bool{super: true}); role != "" {
+				stampObjCNodeMeta(result, filePath+"::"+name, "uikit_role", role)
+			}
+		}
 	}
 	for _, m := range objcProtocolRe.FindAllSubmatchIndex(src, -1) {
 		name := string(src[m[2]:m[3]])

@@ -309,9 +309,7 @@ func (e *PythonExtractor) Extract(filePath string, src []byte) (*parser.Extracti
 			if recvType, ok := tenv[c.receiver]; ok {
 				edge.Meta = map[string]any{"receiver_type": recvType}
 			} else if strings.Contains(c.receiver, ".") || strings.Contains(c.receiver, "(") {
-				if chainType := resolveChainType(c.receiver, tenv, result); chainType != "" {
-					edge.Meta = map[string]any{"receiver_type": chainType}
-				}
+				stampFactoryChainReceiver(edge, c.receiver, resolveChainType(c.receiver, tenv, result))
 			}
 			stampReturnUsage(edge, c.returnUsage)
 			result.Edges = append(result.Edges, edge)
@@ -380,6 +378,9 @@ func (e *PythonExtractor) Extract(filePath string, src []byte) (*parser.Extracti
 
 	captureValueRefCandidates(result, root, filePath, src)
 	captureFnValueCandidates(result, root, filePath, src)
+	captureCeleryDispatch(result, root, filePath, src)
+	captureDjangoDescriptors(result, root, filePath, src)
+	captureFastAPIRouterRefs(result, root, filePath, src)
 	return result, nil
 }
 

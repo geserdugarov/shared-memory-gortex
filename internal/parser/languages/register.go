@@ -163,6 +163,10 @@ func RegisterAll(reg *parser.Registry) {
 	// .json extension, so package.json / tsconfig.json still route to the
 	// JSON extractor.
 	reg.Register(NewMCPConfigExtractor())
+	// Shopify OS 2.0 JSON templates / section groups share .json with the
+	// generic JSON extractor; sniff-routed only (never claims the bare
+	// extension), so non-Shopify .json still routes to the JSON extractor.
+	reg.Register(NewLiquidJSONExtractor())
 	reg.Register(NewJSONExtractor())
 
 	// Notebooks

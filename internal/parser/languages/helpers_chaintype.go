@@ -24,6 +24,32 @@ import (
 // Each subsequent segment advances through the prior segment's method
 // return_type. Resolution stops (returns "") at the first hop it cannot type.
 
+// stampFactoryChainReceiver records a chained call's resolved receiver type
+// when the in-extractor walk fully typed it, or — when it could not (a
+// cross-file factory chain) — preserves the receiver expression under
+// Meta["receiver_expr"] so the graph-aware resolver pass can complete it. Only
+// a factory chain (its base segment was itself a call, e.g. `New().Build()`) is
+// preserved, so an ordinary unresolved `obj.method()` never floods the pass.
+func stampFactoryChainReceiver(edge *graph.Edge, expr, chainType string) {
+	if edge == nil {
+		return
+	}
+	if chainType != "" {
+		if edge.Meta == nil {
+			edge.Meta = map[string]any{}
+		}
+		edge.Meta["receiver_type"] = chainType
+		return
+	}
+	parts := strings.Split(stripCallArgs(strings.ReplaceAll(expr, "::", ".")), ".")
+	if len(parts) > 1 && parts[0] != "" && baseIsCall(expr, parts[0]) {
+		if edge.Meta == nil {
+			edge.Meta = map[string]any{}
+		}
+		edge.Meta["receiver_expr"] = strings.TrimSpace(expr)
+	}
+}
+
 // resolveChainType walks a dotted/chained receiver expression text like
 // `svc.GetUser().Save()` or a factory chain `New().Router()` and returns the
 // inferred type of the final segment when each hop is typed — the first

@@ -44,6 +44,29 @@ func (b *eventChannelTestGraph) listen(fromID, transport, topic, filePath string
 	b.g.AddEdge(&graph.Edge{From: fromID, To: to, Kind: graph.EdgeListensOn, FilePath: filePath, Line: line, Meta: map[string]any{"transport": transport}})
 }
 
+// emitterNode / emitEmitter / listenEmitter build the emitter-literal
+// fallback shape: an event::emitter::<recv>::<topic> KindEvent node with
+// EdgeEmits / EdgeListensOn edges tagged transport "emitter".
+func (b *eventChannelTestGraph) emitterNode(recv, topic string) string {
+	id := "event::emitter::" + recv + "::" + topic
+	if b.g.GetNode(id) == nil {
+		b.g.AddNode(&graph.Node{ID: id, Kind: graph.KindEvent, Name: topic, Meta: map[string]any{"transport": "emitter", "event_kind": "emitter", "receiver": recv}})
+	}
+	return id
+}
+
+func (b *eventChannelTestGraph) emitEmitter(fromID, recv, topic, filePath string, line int) {
+	b.fn(fromID, filePath)
+	to := b.emitterNode(recv, topic)
+	b.g.AddEdge(&graph.Edge{From: fromID, To: to, Kind: graph.EdgeEmits, FilePath: filePath, Line: line, Meta: map[string]any{"transport": "emitter"}})
+}
+
+func (b *eventChannelTestGraph) listenEmitter(fromID, recv, topic, filePath string, line int) {
+	b.fn(fromID, filePath)
+	to := b.emitterNode(recv, topic)
+	b.g.AddEdge(&graph.Edge{From: fromID, To: to, Kind: graph.EdgeListensOn, FilePath: filePath, Line: line, Meta: map[string]any{"transport": "emitter"}})
+}
+
 // synthEventEdge returns the synthesized event-channel calls edge between
 // from and to, or nil.
 func synthEventEdge(g graph.Store, from, to string) *graph.Edge {
@@ -148,4 +171,55 @@ func TestResolveEventChannelCalls_FanOutCap(t *testing.T) {
 		b.listen("l.go::l"+strconv.Itoa(i), "eventemitter", "busy", "l.go", i+1)
 	}
 	assert.Equal(t, 0, ResolveEventChannelCalls(b.g), "a pathological fan-out channel is skipped, not exploded")
+}
+
+func TestResolveEventChannelCalls_EmitterLiteralCrossFile(t *testing.T) {
+	// emitter.emit('ready') in one file pairs with emitter.on('ready',
+	// onReady) in another: the synthesized call lands on the named handler
+	// (the listen edge's From), not the .on call's enclosing function.
+	b := newEventChannelTestGraph()
+	b.emitEmitter("pub/app.js::boot", "emitter", "ready", "pub/app.js", 10)
+	b.listenEmitter("sub/h.js::onReady", "emitter", "ready", "sub/h.js", 3)
+
+	n := ResolveEventChannelCalls(b.g)
+	require.Equal(t, 1, n)
+	e := synthEventEdge(b.g, "pub/app.js::boot", "sub/h.js::onReady")
+	require.NotNil(t, e, "emit's enclosing fn should call the handler")
+	assert.Equal(t, "emitter", e.Meta["event_transport"])
+	assert.Equal(t, SynthEventChannel, e.Meta[MetaSynthesizedBy])
+	assert.Equal(t, ProvenanceHeuristic, e.Meta[MetaProvenance])
+}
+
+func TestResolveEventChannelCalls_EmitterLiteralPerLiteralCap(t *testing.T) {
+	// The emitter-literal channel caps fan-out at 6, tighter than the
+	// pub/sub maxEventChannelFanout of 32, because a bare string is the
+	// only correlation.
+	over := newEventChannelTestGraph()
+	over.emitEmitter("p.js::p", "bus", "data", "p.js", 1)
+	for i := 0; i < 7; i++ {
+		over.listenEmitter("l.js::l"+strconv.Itoa(i), "bus", "data", "l.js", i+1)
+	}
+	assert.Equal(t, 0, ResolveEventChannelCalls(over.g), "7 listeners exceed the per-literal cap of 6")
+
+	atCap := newEventChannelTestGraph()
+	atCap.emitEmitter("p.js::p", "bus", "data", "p.js", 1)
+	for i := 0; i < 6; i++ {
+		atCap.listenEmitter("l.js::l"+strconv.Itoa(i), "bus", "data", "l.js", i+1)
+	}
+	assert.Equal(t, 6, ResolveEventChannelCalls(atCap.g), "6 listeners are within the cap")
+}
+
+func TestResolveEventChannelCalls_EmitterReceiverScopeKeepsTopicsDistinct(t *testing.T) {
+	// Two different receivers each fire 'ready'; receiver-scoping keeps
+	// them distinct so a publisher does not fan out to the other's handler.
+	b := newEventChannelTestGraph()
+	b.emitEmitter("a.js::a", "alpha", "ready", "a.js", 1)
+	b.listenEmitter("a.js::onA", "alpha", "ready", "a.js", 2)
+	b.emitEmitter("b.js::b", "beta", "ready", "b.js", 1)
+	b.listenEmitter("b.js::onB", "beta", "ready", "b.js", 2)
+
+	ResolveEventChannelCalls(b.g)
+	assert.NotNil(t, synthEventEdge(b.g, "a.js::a", "a.js::onA"))
+	assert.NotNil(t, synthEventEdge(b.g, "b.js::b", "b.js::onB"))
+	assert.Nil(t, synthEventEdge(b.g, "a.js::a", "b.js::onB"), "different receivers must not cross-pair")
 }

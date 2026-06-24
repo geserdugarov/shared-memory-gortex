@@ -377,9 +377,7 @@ func (e *CSharpExtractor) extractCSharp(filePath string, src []byte) (*parser.Ex
 			if recvType, ok := tenv[c.receiver]; ok {
 				edge.Meta = map[string]any{"receiver_type": recvType}
 			} else if strings.Contains(c.receiver, ".") || strings.Contains(c.receiver, "(") {
-				if chainType := resolveChainType(c.receiver, tenv, result); chainType != "" {
-					edge.Meta = map[string]any{"receiver_type": chainType}
-				}
+				stampFactoryChainReceiver(edge, c.receiver, resolveChainType(c.receiver, tenv, result))
 			}
 			stampReturnUsage(edge, c.returnUsage)
 			result.Edges = append(result.Edges, edge)
@@ -400,6 +398,8 @@ func (e *CSharpExtractor) extractCSharp(filePath string, src []byte) (*parser.Ex
 	// Same-file constant/variable value references → impact-radius reads.
 	captureValueRefCandidates(result, root, filePath, src)
 	captureFnValueCandidates(result, root, filePath, src)
+
+	captureMediatRDispatch(result, root, filePath, src)
 
 	return result, hadError, nil
 }

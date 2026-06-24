@@ -57,6 +57,11 @@ func ResolveSpeculativeDispatch(g graph.Store, enabled bool) int {
 		if shape == "" {
 			continue
 		}
+		// A precision-first synthesizer (object-registry) already bound this
+		// computed-member dispatch site; do not also mint a hidden guess.
+		if claimed, _ := e.Meta["registry_claimed"].(bool); claimed {
+			continue
+		}
 		key, _ := e.Meta["dyn_key"].(string)
 		if key == "" {
 			continue // v1: literal-key shapes only (variable-key is unbounded)

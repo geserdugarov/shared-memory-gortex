@@ -91,7 +91,7 @@ func (r *Registry) DetectLanguageContent(filePath string, content []byte) (strin
 	if lang, ok := r.extMap[ext]; ok {
 		// Ambiguous extensions (.h, .m) get a content probe; the
 		// refined language is used only when it has an extractor.
-		if refined, refok := sniffAmbiguous(ext, content); refok {
+		if refined, refok := sniffAmbiguous(filePath, ext, content); refok {
 			if _, registered := r.extractors[refined]; registered {
 				return refined, true
 			}

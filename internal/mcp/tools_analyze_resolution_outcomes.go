@@ -8,6 +8,7 @@ import (
 
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/zzet/gortex/internal/graph"
+	"github.com/zzet/gortex/internal/resolver"
 )
 
 // Structured resolver-suppression taxonomy. When the resolver leaves a
@@ -36,6 +37,11 @@ const (
 	// outcomeNoDefinition: no definition of this name exists in the graph
 	// at all — a genuinely external or un-indexed target.
 	outcomeNoDefinition = "no_definition"
+	// outcomeStdlibHeader: a C / C++ / Objective-C angle-include of a
+	// standard-library header (<stdio.h>, <vector>, …) — external by
+	// construction, left unresolved deliberately so it can never bind to an
+	// in-tree file sharing its basename.
+	outcomeStdlibHeader = "stdlib_header"
 )
 
 // handleAnalyzeResolutionOutcomes classifies every unresolved call /
@@ -122,6 +128,34 @@ func (s *Server) handleAnalyzeResolutionOutcomes(ctx context.Context, req mcp.Ca
 			rows = append(rows, row{
 				From: p.edge.From, To: p.edge.To, Kind: string(p.edge.Kind),
 				Name: p.name, Reason: reason, Candidates: ncand,
+			})
+		}
+	}
+
+	// C/C++/ObjC standard-library angle-includes (<stdio.h>, <vector>, …) are
+	// external by construction: the resolver leaves them on an unresolved
+	// import placeholder rather than binding to an in-tree file that happens
+	// to share the basename. Surface them under their own reason so the
+	// outcome reads as "stdlib" instead of an opaque unresolved import.
+	for e := range s.graph.EdgesByKind(graph.EdgeImports) {
+		if e == nil || !graph.IsUnresolvedTarget(e.To) {
+			continue
+		}
+		if k, _ := e.Meta["include_kind"].(string); k != "system" {
+			continue
+		}
+		hdr := strings.TrimPrefix(e.To, "unresolved::import::")
+		if !resolver.IsCppStdlibHeader(hdr) {
+			continue
+		}
+		byReason[outcomeStdlibHeader]++
+		if reasonFilter != "" && reasonFilter != outcomeStdlibHeader {
+			continue
+		}
+		if len(rows) < limit {
+			rows = append(rows, row{
+				From: e.From, To: e.To, Kind: string(e.Kind),
+				Name: hdr, Reason: outcomeStdlibHeader, Candidates: 0,
 			})
 		}
 	}

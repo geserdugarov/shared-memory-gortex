@@ -32,6 +32,32 @@ func TestStampSynthesized(t *testing.T) {
 	UnstampSynthesized(nil)
 }
 
+func TestStampSynthesizedTyped(t *testing.T) {
+	// The typed-tier stamp records ProvenanceFramework, not Heuristic.
+	e := &graph.Edge{From: "a", To: "b", Kind: graph.EdgeCalls}
+	StampSynthesizedTyped(e, SynthEventChannel)
+	assert.Equal(t, SynthEventChannel, e.Meta[MetaSynthesizedBy])
+	assert.Equal(t, ProvenanceFramework, e.Meta[MetaProvenance])
+
+	// The two provenance tiers are distinct values so analyze
+	// kind=synthesizers can separate them from one MetaProvenance read.
+	assert.NotEqual(t, ProvenanceHeuristic, ProvenanceFramework)
+
+	// Confidence tiers carry the documented values.
+	assert.Equal(t, 0.85, ConfidenceTyped)
+	assert.Equal(t, 0.6, ConfidenceHeuristic)
+
+	// UnstampSynthesized clears the typed provenance too.
+	UnstampSynthesized(e)
+	_, hasBy := e.Meta[MetaSynthesizedBy]
+	_, hasProv := e.Meta[MetaProvenance]
+	assert.False(t, hasBy)
+	assert.False(t, hasProv)
+
+	// nil-safe.
+	StampSynthesizedTyped(nil, SynthGRPCStub)
+}
+
 func TestRunFrameworkSynthesizers_Report(t *testing.T) {
 	b := newEventChannelTestGraph()
 	b.emit("p.go::p", "eventemitter", "e", "p.go", 1)
@@ -48,6 +74,19 @@ func TestRunFrameworkSynthesizers_Report(t *testing.T) {
 	require.Contains(t, byName, SynthGRPCStub)
 	require.Contains(t, byName, SynthTemporalStub)
 	require.Contains(t, byName, SynthEventChannel)
+	require.Contains(t, byName, SynthStoreFactory)
+	require.Contains(t, byName, SynthReduxThunk)
+	require.Contains(t, byName, SynthObjectRegistry)
+	require.Contains(t, byName, SynthRTKQuery)
+	require.Contains(t, byName, SynthVuexDispatch)
+	require.Contains(t, byName, SynthCelery)
+	require.Contains(t, byName, SynthSpringEvent)
+	require.Contains(t, byName, SynthMediatR)
+	require.Contains(t, byName, SynthSidekiq)
+	require.Contains(t, byName, SynthLaravelEvent)
+	require.Contains(t, byName, SynthFnPointerDispatch)
+	require.Contains(t, byName, SynthGoFrameRoute)
+	require.Contains(t, byName, SynthExpressResolve)
 	assert.Equal(t, 0, byName[SynthGRPCStub])
 	assert.Equal(t, 0, byName[SynthTemporalStub])
 	assert.Equal(t, 1, byName[SynthEventChannel])

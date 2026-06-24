@@ -59,12 +59,63 @@ func ResolveFnValueCallbacks(g graph.Store) int {
 		if name == "" || isFnValueNonTarget(name) {
 			continue
 		}
-		target := resolveFnValueName(g, e.FilePath, name)
+		// Resolution scope depends on the captured form. A special form's
+		// receiver hint (`<self>` / a concrete type) binds the member against
+		// that type's methods (compiler-precise); a qualified-path candidate
+		// marked `fn_value_ungated` may bind cross-module at a lower tier; a
+		// plain candidate binds same-file.
+		recvHint, _ := e.Meta["fn_ref_recv_hint"].(string)
+		ungated, _ := e.Meta["fn_value_ungated"].(bool)
+		skipGate, _ := e.Meta["skip_gate"].(bool)
+		target := ""
+		conf := 0.6
+		origin := graph.OriginASTInferred
+		switch {
+		case skipGate:
+			// Curated-HOF string callable: bypass same-file scope and bind by a
+			// repo-wide unique-or-drop rule (a `Class::method` string scopes to
+			// the type).
+			if recvHint != "" {
+				target = resolveMemberByType(g, recvHint, name)
+			}
+			if target == "" {
+				target = resolveUniqueFnValue(g, name)
+			}
+			conf = 0.5
+		case recvHint == "<self>":
+			if target = resolveFnValueSelfMember(g, e.From, name); target != "" {
+				conf, origin = 0.85, graph.OriginASTResolved
+			} else {
+				target = resolveFnValueName(g, e.FilePath, name)
+			}
+		case recvHint != "":
+			if target = resolveMemberByType(g, recvHint, name); target != "" {
+				conf, origin = 0.85, graph.OriginASTResolved
+			} else if ungated {
+				target = resolveFnValueCrossModule(g, name)
+				conf = 0.45
+			}
+		default:
+			target = resolveFnValueName(g, e.FilePath, name)
+			if target == "" && ungated {
+				target = resolveFnValueCrossModule(g, name)
+				conf = 0.45
+			}
+		}
 		if target == "" || target == e.From {
 			// Unbound (a local / param / undefined name) or a self-reference
 			// (a function's own declaration token): reject rather than
 			// fabricate an edge.
 			continue
+		}
+		meta := map[string]any{
+			"via":             fnValueRegistrationVia,
+			metaFnValueName:   name,
+			MetaSynthesizedBy: SynthFnValueCallback,
+			MetaProvenance:    ProvenanceHeuristic,
+		}
+		if form, _ := e.Meta["fn_ref_form"].(string); form != "" {
+			meta["fn_ref_form"] = form
 		}
 		landed = append(landed, &graph.Edge{
 			From:            e.From,
@@ -72,15 +123,10 @@ func ResolveFnValueCallbacks(g graph.Store) int {
 			Kind:            graph.EdgeReferences,
 			FilePath:        e.FilePath,
 			Line:            e.Line,
-			Confidence:      0.6,
-			ConfidenceLabel: graph.ConfidenceLabelFor(graph.EdgeReferences, 0.6),
-			Origin:          graph.OriginASTInferred,
-			Meta: map[string]any{
-				"via":             fnValueRegistrationVia,
-				metaFnValueName:   name,
-				MetaSynthesizedBy: SynthFnValueCallback,
-				MetaProvenance:    ProvenanceHeuristic,
-			},
+			Confidence:      conf,
+			ConfidenceLabel: graph.ConfidenceLabelFor(graph.EdgeReferences, conf),
+			Origin:          origin,
+			Meta:            meta,
 		})
 	}
 	for _, e := range landed {
@@ -109,6 +155,73 @@ func resolveFnValueName(g graph.Store, filePath, name string) string {
 		}
 	}
 	return ""
+}
+
+// resolveUniqueFnValue returns the ID of the sole function/method named name in
+// the repo, or "" when none or more than one exists (unique-or-drop). The
+// shared repo-wide resolution rule for qualified-path and gate-skipping
+// (curated-HOF string) function values.
+func resolveUniqueFnValue(g graph.Store, name string) string {
+	match := ""
+	for _, n := range g.FindNodesByName(name) {
+		if n == nil {
+			continue
+		}
+		if n.Kind != graph.KindFunction && n.Kind != graph.KindMethod {
+			continue
+		}
+		if match != "" && match != n.ID {
+			return "" // ambiguous — drop
+		}
+		match = n.ID
+	}
+	return match
+}
+
+// resolveFnValueCrossModule binds a qualified-path function value to a
+// uniquely-named function/method anywhere in the repo. The same-file path is
+// preferred by the caller; this is the cross-module fallback for an explicit
+// path value.
+func resolveFnValueCrossModule(g graph.Store, name string) string {
+	return resolveUniqueFnValue(g, name)
+}
+
+// resolveMemberByType binds member to a uniquely-named method of typeName
+// (matched via Meta["receiver"]), or "" when none or more than one matches.
+// Shared scope rule for `Foo::bar`-style references and self-member resolution.
+func resolveMemberByType(g graph.Store, typeName, member string) string {
+	if typeName == "" || member == "" {
+		return ""
+	}
+	match := ""
+	for _, n := range g.FindNodesByName(member) {
+		if n == nil || n.Kind != graph.KindMethod {
+			continue
+		}
+		if recv, _ := n.Meta["receiver"].(string); recv != typeName {
+			continue
+		}
+		if match != "" && match != n.ID {
+			return "" // ambiguous within the type — drop
+		}
+		match = n.ID
+	}
+	return match
+}
+
+// resolveFnValueSelfMember binds a `this.m` / `self.m` member reference against
+// the methods of the registration site's enclosing type, so it can never bind
+// a coincidentally-named top-level function.
+func resolveFnValueSelfMember(g graph.Store, fromID, member string) string {
+	from := g.GetNode(fromID)
+	if from == nil || from.Meta == nil {
+		return ""
+	}
+	recv, _ := from.Meta["receiver"].(string)
+	if recv == "" {
+		return ""
+	}
+	return resolveMemberByType(g, recv, member)
 }
 
 // isFnValueNonTarget reports whether name is a literal/keyword/builtin that

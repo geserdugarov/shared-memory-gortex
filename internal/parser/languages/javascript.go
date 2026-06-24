@@ -260,11 +260,24 @@ func (e *JavaScriptExtractor) Extract(filePath string, src []byte) (*parser.Extr
 			continue
 		}
 		id := filePath + "::" + v.name
-		result.Nodes = append(result.Nodes, &graph.Node{
+		node := &graph.Node{
 			ID: id, Kind: graph.KindVariable, Name: v.name,
 			FilePath: filePath, StartLine: v.line, EndLine: v.endLine,
 			Language: "javascript",
-		})
+		}
+		// React HOC / styled component classification + inline-render JSX
+		// re-attribution (see the TS extractor for the shared helper).
+		if v.name != "" && v.name[0] >= 'A' && v.name[0] <= 'Z' {
+			if kind, renderFn := reactHOCComponentKind(v.defNode, src); kind != "" {
+				node.Meta = map[string]any{"component": true, "component_kind": kind}
+				if renderFn != nil {
+					if body := renderFn.ChildByFieldName("body"); body != nil {
+						emitJSXRenderEdges(id, body, src, filePath, result)
+					}
+				}
+			}
+		}
+		result.Nodes = append(result.Nodes, node)
 		result.Edges = append(result.Edges, &graph.Edge{
 			From: fileID, To: id, Kind: graph.EdgeDefines, FilePath: filePath, Line: v.line,
 		})
@@ -372,17 +385,26 @@ func (e *JavaScriptExtractor) Extract(filePath string, src []byte) (*parser.Extr
 
 	// --- Event pub/sub edges ---
 	var pubsubEvents []pubsubEvent
+	var emitterEvents []jsEmitterEvent
 	for _, c := range calls {
 		if !c.isMember || c.expr == nil {
 			continue
 		}
 		if ev, ok := detectJSPubsubCall(c.expr, c.name, src, importPaths, c.line); ok {
 			pubsubEvents = append(pubsubEvents, ev)
+			continue
+		}
+		// Fallback: a bare emitter literal the import gate declined.
+		if em, ok := detectJSEmitterLiteralCall(c.expr, c.name, c.receiver, src, c.line); ok {
+			emitterEvents = append(emitterEvents, em)
 		}
 	}
 	// WebSocket / EventSource real-time client channels.
 	pubsubEvents = append(pubsubEvents, detectJSRealtimeEvents(src)...)
 	emitPubsubEvents(pubsubEvents,
+		func(line int) string { return findEnclosingFunc(funcRanges, line) },
+		filePath, "javascript", result)
+	emitJSEmitterLiteralEvents(emitterEvents,
 		func(line int) string { return findEnclosingFunc(funcRanges, line) },
 		filePath, "javascript", result)
 
@@ -427,6 +449,13 @@ func (e *JavaScriptExtractor) Extract(filePath string, src []byte) (*parser.Extr
 
 	captureValueRefCandidates(result, root, filePath, src)
 	captureFnValueCandidates(result, root, filePath, src)
+	captureReduxThunkDispatches(result, root, filePath, src)
+	captureObjectRegistryDispatches(result, root, filePath, src)
+	captureRTKQueryEndpoints(result, root, filePath, "javascript", src)
+	capturePiniaStoreCalls(result, root, filePath, src)
+	captureVuexDispatch(result, root, filePath, src)
+	captureExpressInlineHandlers(result, root, filePath, src)
+	captureReactContextRefs(result, root, filePath, src)
 	return result, nil
 }
 

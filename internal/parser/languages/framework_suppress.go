@@ -199,7 +199,7 @@ func mineTemplateHandlers(src []byte, filePath, componentID, lang string, result
 	// `@click="c"`) bind to the composable member, not a top-level function.
 	bindings := composableHandlerBindings(src)
 
-	tmpl := templateBlockRe.ReplaceAllFunc(src, blankPreservingNewlines)
+	tmpl := blankTemplateRegions(src, lang)
 	seen := map[string]bool{}
 	for _, m := range re.FindAllSubmatchIndex(tmpl, -1) {
 		handler := string(tmpl[m[2]:m[3]])
@@ -232,6 +232,9 @@ func mineTemplateHandlers(src []byte, filePath, componentID, lang string, result
 // applyFrameworkTemplatePasses runs the suppression + handler-mining passes
 // shared by the Vue/Svelte/Astro extractors after their scripts are delegated.
 func applyFrameworkTemplatePasses(src []byte, filePath, componentID, lang string, result *parser.ExtractionResult) {
+	// Mine markup `{expr}` calls first, so the suppression pass can drop any
+	// rune/macro calls (`$state(...)`) it surfaced before they linger as edges.
+	mineTemplateExpressionCalls(src, filePath, componentID, lang, result)
 	suppressFrameworkIdents(result, lang)
 	mineTemplateHandlers(src, filePath, componentID, lang, result)
 }

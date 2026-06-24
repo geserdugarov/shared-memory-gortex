@@ -475,6 +475,11 @@ func (r *Resolver) ResolveAll() *ResolveStats {
 	// mis-mapped to a phantom pypi/pub package.
 	r.resolveRelativeImports()
 
+	// Lua / Luau `require(...)` binding. Same settle window as the relative
+	// imports above; resolveRelativeImports never touches Lua, so this lands
+	// the Lua module/instance requires onto their indexed file nodes.
+	r.resolveLuaRequires()
+
 	// Module attribution for ecosystems without a CGO type-checker
 	// path (Python, Dart, …). Runs serially on the post-resolution
 	// graph so it sees the final `external::*` set after the

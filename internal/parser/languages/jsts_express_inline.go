@@ -70,23 +70,37 @@ func captureExpressInlineHandlers(result *parser.ExtractionResult, root *sitter.
 		if args == nil || !expressFirstArgIsString(args) {
 			return
 		}
-		handler := expressHandlerArg(args)
-		if handler == nil {
+		// Handler-position args: every arg after the path string — inline
+		// arrows, named middleware idents, and XController.method handlers.
+		handlerArgs := expressHandlerPositionArgs(args)
+		if len(handlerArgs) == 0 {
 			return
 		}
 		line := int(call.StartPoint().Row) + 1
 		handlerID := ExpressInlineHandlerNodeID(filePath, line)
 		// Materialise the handler node so the route Contract can anchor to it
 		// (even when the body calls nothing the call graph tracks) and the
-		// body-call edges have a real From.
+		// body-call / named-handler edges have a real From.
 		result.Nodes = append(result.Nodes, &graph.Node{
 			ID: handlerID, Kind: graph.KindFunction, Name: "route handler",
 			FilePath: filePath, StartLine: line, EndLine: int(call.EndPoint().Row) + 1,
 			Language: "javascript",
 			Meta:     map[string]any{"express_handler": true, "signature": "(req, res) => {…}"},
 		})
-		params := expressHandlerParamNames(handler, src)
-		expressEmitHandlerCalls(result, handler, src, handlerID, filePath, params)
+		for _, a := range handlerArgs {
+			switch a.Type() {
+			case "arrow_function", "function_expression", "function":
+				params := expressHandlerParamNames(a, src)
+				expressEmitHandlerCalls(result, a, src, handlerID, filePath, params)
+			case "identifier":
+				expressEmitHandlerRef(result, handlerID, filePath, line, "", a.Content(src))
+			case "member_expression":
+				cls := expressRootIdent(a.ChildByFieldName("object"), src)
+				if m := a.ChildByFieldName("property"); m != nil && cls != "" {
+					expressEmitHandlerRef(result, handlerID, filePath, line, cls, m.Content(src))
+				}
+			}
+		}
 	})
 }
 
@@ -186,21 +200,45 @@ func expressFirstArgIsString(args *sitter.Node) bool {
 	return false
 }
 
-// expressHandlerArg returns the last function/arrow argument of a route call
-// (the handler).
-func expressHandlerArg(args *sitter.Node) *sitter.Node {
-	var handler *sitter.Node
+// expressHandlerPositionArgs returns every argument after the route path
+// string — the handler/middleware position.
+func expressHandlerPositionArgs(args *sitter.Node) []*sitter.Node {
+	var out []*sitter.Node
+	sawPath := false
 	for i := 0; i < int(args.NamedChildCount()); i++ {
 		c := args.NamedChild(i)
 		if c == nil {
 			continue
 		}
-		switch c.Type() {
-		case "arrow_function", "function_expression", "function":
-			handler = c
+		if !sawPath {
+			if c.Type() == "string" {
+				sawPath = true
+			}
+			continue
 		}
+		out = append(out, c)
 	}
-	return handler
+	return out
+}
+
+// expressEmitHandlerRef stamps a placeholder ref from the route handler
+// anchor to a named middleware/handler (cls == "") or a XController.method
+// handler (cls != ""), for the express resolver to bind by convention.
+func expressEmitHandlerRef(result *parser.ExtractionResult, handlerID, filePath string, line int, cls, member string) {
+	if member == "" {
+		return
+	}
+	meta := map[string]any{"express_handler_ref": true}
+	if cls != "" {
+		meta["express_ref_class"] = cls
+		meta["express_ref_method"] = member
+	} else {
+		meta["express_ref_name"] = member
+	}
+	result.Edges = append(result.Edges, &graph.Edge{
+		From: handlerID, To: "unresolved::" + member, Kind: graph.EdgeCalls,
+		FilePath: filePath, Line: line, Meta: meta,
+	})
 }
 
 // expressHandlerParamNames returns the parameter names of a handler function

@@ -105,6 +105,7 @@ const (
 	SynthFnPointerDispatch = "fn-pointer-dispatch"
 	SynthGoFrameRoute      = "goframe-route"
 	SynthDjangoDescriptor  = "django-descriptor"
+	SynthExpressResolve    = "express-resolve"
 	SynthGinMiddleware     = "gin-middleware"
 	SynthSvelteKitLoad     = "sveltekit-load"
 	SynthSpeculative       = "speculative-dispatch"
@@ -232,6 +233,9 @@ func defaultFrameworkSynthesizers() []FrameworkSynthesizer {
 		// `c.handlers[idx](c)` indirection so ServeHTTP→handler reachability
 		// flows; repo-scoped, gated on a dispatcher existing.
 		synthFunc{name: SynthGinMiddleware, fn: ResolveGinMiddlewareCalls},
+		// Express named-handler resolution: middleware idents and
+		// XController.method args bound by directory convention.
+		synthFunc{name: SynthExpressResolve, fn: ResolveExpressHandlers},
 		// GoFrame reflective route → controller method, joined by the
 		// method's request-struct type rather than its name.
 		synthFunc{name: SynthGoFrameRoute, fn: ResolveGoFrameRoutes},

@@ -110,3 +110,36 @@ func TestMyBatisExtractor_Malformed(t *testing.T) {
 func TestMyBatisExtractor_Extensions(t *testing.T) {
 	require.Equal(t, []string{".xml"}, NewMyBatisExtractor().Extensions())
 }
+
+func TestMyBatisExtractor_SignatureString(t *testing.T) {
+	src := []byte(`<?xml version="1.0"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "x">
+<mapper namespace="com.app.UserMapper">
+  <sql id="cols">id, name</sql>
+  <select id="findUser" parameterType="Long" resultType="User">SELECT * FROM users</select>
+  <select id="byMap" resultMap="userMap">SELECT *</select>
+</mapper>`)
+	res, err := NewMyBatisExtractor().Extract("UserMapper.xml", src)
+	require.NoError(t, err)
+
+	sigs := map[string]string{}
+	for _, n := range res.Nodes {
+		if n.Meta != nil {
+			if s, ok := n.Meta["signature"].(string); ok {
+				sigs[n.Name] = s
+			}
+		}
+	}
+	require.Equal(t, "SELECT param=Long result=User", sigs["findUser"])
+	require.Equal(t, "SELECT result=userMap", sigs["byMap"]) // resultMap fallback
+	require.Equal(t, "<sql>", sigs["cols"])
+
+	// The structured mybatis_* keys remain intact alongside the signature.
+	for _, n := range res.Nodes {
+		if n.Name == "findUser" {
+			require.Equal(t, "select", n.Meta["mybatis_sql_kind"])
+			require.Equal(t, "Long", n.Meta["mybatis_parameter_type"])
+			require.Equal(t, "User", n.Meta["mybatis_result_type"])
+		}
+	}
+}

@@ -153,6 +153,7 @@ func (e *MyBatisExtractor) Extract(filePath string, src []byte) (*parser.Extract
 					Meta: map[string]any{
 						"mybatis_namespace": namespace,
 						"mybatis_fragment":  true,
+						"signature":         "<sql>",
 					},
 				})
 				result.Edges = append(result.Edges, &graph.Edge{
@@ -218,15 +219,31 @@ func (e *MyBatisExtractor) Extract(filePath string, src []byte) (*parser.Extract
 				"mybatis_sql":       sql,
 			},
 		}
-		if rt := myBatisAttr(se, "resultType"); rt != "" {
+		rt := myBatisAttr(se, "resultType")
+		rm := myBatisAttr(se, "resultMap")
+		pt := myBatisAttr(se, "parameterType")
+		if rt != "" {
 			stmt.Meta["mybatis_result_type"] = rt
 		}
-		if rm := myBatisAttr(se, "resultMap"); rm != "" {
+		if rm != "" {
 			stmt.Meta["mybatis_result_map"] = rm
 		}
-		if pt := myBatisAttr(se, "parameterType"); pt != "" {
+		if pt != "" {
 			stmt.Meta["mybatis_parameter_type"] = pt
 		}
+		// Human-readable signature surfaced as meta.signature by get_symbol /
+		// search_symbols previews: `KIND [param=…] [result=…]`. Additive on top
+		// of the structured mybatis_* keys.
+		sig := strings.ToUpper(local)
+		if pt != "" {
+			sig += " param=" + pt
+		}
+		if rt != "" {
+			sig += " result=" + rt
+		} else if rm != "" {
+			sig += " result=" + rm
+		}
+		stmt.Meta["signature"] = sig
 		result.Nodes = append(result.Nodes, stmt)
 		currentStmt = stmtNodeID
 

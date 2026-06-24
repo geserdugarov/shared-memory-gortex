@@ -69,6 +69,12 @@ var routePrefixFrameworks = map[string]bool{
 // (one or more) path-segment string literals.
 var vaporGroupedRE = regexp.MustCompile(`\b(?:let|var)\s+(\w+)\s*=\s*([\w.]+)\.grouped\(\s*("[^"]*"(?:\s*,\s*"[^"]*")*)`)
 
+// vaporClosureGroupRE matches the closure-block route-group form
+// `app.group("api") {` / `routes.group("v1") { g in`. Routes registered
+// inside the brace block inherit the group prefix. Group 1 is the (one or
+// more) path-segment string literals.
+var vaporClosureGroupRE = regexp.MustCompile(`\.group\(\s*("[^"]*"(?:\s*,\s*"[^"]*")*)\s*\)\s*\{`)
+
 // vaporRouteReceiverRE recovers the receiver variable a Vapor route is declared
 // on — `api` in `api.get("users", use: list)`.
 var vaporRouteReceiverRE = regexp.MustCompile(`\b(\w+)\.(?:get|post|put|delete|patch)\(`)
@@ -561,13 +567,25 @@ func prefixForRoute(
 		// carries its own .Group / .grouped prefix, parents contribute theirs
 		// via the mount chain.
 		varName := routeReceiver(c, framework, srcFor)
-		if varName == "" {
-			return ""
+		mount, self := "", ""
+		if varName != "" {
+			mount = chainPrefix(varName, map[string]bool{})
+			if ps, ok := globalSelf[varName]; ok && !selfConflict[varName] {
+				self = ps
+			}
 		}
-		mount := chainPrefix(varName, map[string]bool{})
-		self := ""
-		if ps, ok := globalSelf[varName]; ok && !selfConflict[varName] {
-			self = ps
+		if framework == "vapor" {
+			// Vapor's closure-block group form `app.group("api") { ... }`
+			// binds no group var, so its prefix is recovered by balancing
+			// braces upward from the route line over the enclosing blocks.
+			closure := vaporClosureGroupPrefix(c, srcFor)
+			joined := joinPaths(closure, mount, self)
+			if joined != "" {
+				return joined
+			}
+			if varName == "" {
+				return ""
+			}
 		}
 		return joinPaths(mount, self)
 	case "axum":
@@ -733,6 +751,47 @@ func laravelGroupPrefix(c Contract, srcFor func(filePath string) []byte) string 
 				// Enclosing open brace: prepend its prefix clause, if any.
 				if m := laravelPrefixRE.FindStringSubmatch(line); m != nil {
 					parts = append([]string{cleanPrefix(m[1])}, parts...)
+				}
+			}
+		}
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return joinPaths(parts...)
+}
+
+// vaporClosureGroupPrefix walks upward from a Vapor route line, balancing
+// braces, and joins the prefixes of every enclosing
+// `app.group("api") { ... }` / `routes.group("v1") { g in ... }` closure
+// block. Returns "" when the route sits in no group closure.
+func vaporClosureGroupPrefix(c Contract, srcFor func(filePath string) []byte) string {
+	src := srcFor(c.FilePath)
+	if src == nil {
+		return ""
+	}
+	lines := strings.Split(string(src), "\n")
+	idx := c.Line - 1
+	if idx < 0 || idx >= len(lines) {
+		return ""
+	}
+	depth := 0
+	var parts []string
+	for i := idx - 1; i >= 0; i-- {
+		line := lines[i]
+		for j := len(line) - 1; j >= 0; j-- {
+			switch line[j] {
+			case '}':
+				depth++
+			case '{':
+				if depth > 0 {
+					depth--
+					continue
+				}
+				// Enclosing open brace at depth 0: prepend its group
+				// prefix when the brace opens a `.group(...)` closure.
+				if m := vaporClosureGroupRE.FindStringSubmatch(line); m != nil {
+					parts = append([]string{vaporGroupSegments(m[1])}, parts...)
 				}
 			}
 		}

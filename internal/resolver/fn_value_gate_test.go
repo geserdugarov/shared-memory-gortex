@@ -158,3 +158,57 @@ func TestCallbackGateNonUngatedStaysSameFile(t *testing.T) {
 
 	assert.Equal(t, 0, ResolveFnValueCallbacks(g), "non-ungated candidate never binds cross-module")
 }
+
+func specialFnValueEdge(from, name, file string, line int, recvHint string) *graph.Edge {
+	e := fnValueCandidateEdge(from, name, file, line)
+	e.Meta["fn_ref_form"] = "special"
+	if recvHint != "" {
+		e.Meta["fn_ref_recv_hint"] = recvHint
+	}
+	return e
+}
+
+// TestCallbackGateSpecialSelfMember pins that a `this.m` reference binds to the
+// enclosing type's method, never a coincidentally-named top-level function.
+func TestCallbackGateSpecialSelfMember(t *testing.T) {
+	g := graph.New()
+	g.AddNode(&graph.Node{ID: "c.ts::C.handle", Kind: graph.KindMethod, Name: "handle", FilePath: "c.ts", Meta: map[string]any{"receiver": "C"}})
+	g.AddNode(&graph.Node{ID: "c.ts::C.wire", Kind: graph.KindMethod, Name: "wire", FilePath: "c.ts", Meta: map[string]any{"receiver": "C"}})
+	g.AddNode(&graph.Node{ID: "other.ts::handle", Kind: graph.KindFunction, Name: "handle", FilePath: "other.ts"})
+	g.AddEdge(specialFnValueEdge("c.ts::C.wire", "handle", "c.ts", 5, "<self>"))
+
+	ResolveFnValueCallbacks(g)
+	bound := boundCallbackEdge(g, "c.ts::C.wire", "c.ts::C.handle")
+	require.NotNil(t, bound, "this.handle binds to the enclosing class's handle")
+	assert.Equal(t, "special", bound.Meta["fn_ref_form"])
+	assert.Equal(t, graph.OriginASTResolved, bound.Origin)
+	assert.Nil(t, boundCallbackEdge(g, "c.ts::C.wire", "other.ts::handle"), "must not bind the top-level handle")
+}
+
+// TestCallbackGateSpecialTypeQualified pins that `Foo::bar` binds to type Foo's
+// bar method, not a same-named free function.
+func TestCallbackGateSpecialTypeQualified(t *testing.T) {
+	g := graph.New()
+	g.AddNode(&graph.Node{ID: "f.java::Foo.bar", Kind: graph.KindMethod, Name: "bar", FilePath: "f.java", Meta: map[string]any{"receiver": "Foo"}})
+	g.AddNode(&graph.Node{ID: "g.java::bar", Kind: graph.KindFunction, Name: "bar", FilePath: "g.java"})
+	g.AddNode(&graph.Node{ID: "m.java::M.run", Kind: graph.KindMethod, Name: "run", FilePath: "m.java", Meta: map[string]any{"receiver": "M"}})
+	e := specialFnValueEdge("m.java::M.run", "bar", "m.java", 3, "Foo")
+	e.Meta["fn_value_ungated"] = true
+	g.AddEdge(e)
+
+	ResolveFnValueCallbacks(g)
+	bound := boundCallbackEdge(g, "m.java::M.run", "f.java::Foo.bar")
+	require.NotNil(t, bound, "Foo::bar binds to Foo's bar method")
+	assert.Equal(t, graph.OriginASTResolved, bound.Origin)
+	assert.Equal(t, "special", bound.Meta["fn_ref_form"])
+	assert.Nil(t, boundCallbackEdge(g, "m.java::M.run", "g.java::bar"), "must not bind the free function")
+}
+
+func TestResolveMemberByType(t *testing.T) {
+	g := graph.New()
+	g.AddNode(&graph.Node{ID: "a::Foo.m", Kind: graph.KindMethod, Name: "m", Meta: map[string]any{"receiver": "Foo"}})
+	g.AddNode(&graph.Node{ID: "a::Bar.m", Kind: graph.KindMethod, Name: "m", Meta: map[string]any{"receiver": "Bar"}})
+	assert.Equal(t, "a::Foo.m", resolveMemberByType(g, "Foo", "m"))
+	assert.Equal(t, "a::Bar.m", resolveMemberByType(g, "Bar", "m"))
+	assert.Equal(t, "", resolveMemberByType(g, "Baz", "m"), "unknown type does not bind")
+}

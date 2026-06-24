@@ -59,14 +59,33 @@ func ResolveFnValueCallbacks(g graph.Store) int {
 		if name == "" || isFnValueNonTarget(name) {
 			continue
 		}
-		// Same-file scope is the high-confidence default. A qualified-path
-		// candidate the capture marked `fn_value_ungated` (e.g. a Rust `m::f`
-		// path) may bind cross-module — to a uniquely-named function in the
-		// repo — at a lower confidence so min_tier filtering segregates it.
-		target := resolveFnValueName(g, e.FilePath, name)
+		// Resolution scope depends on the captured form. A special form's
+		// receiver hint (`<self>` / a concrete type) binds the member against
+		// that type's methods (compiler-precise); a qualified-path candidate
+		// marked `fn_value_ungated` may bind cross-module at a lower tier; a
+		// plain candidate binds same-file.
+		recvHint, _ := e.Meta["fn_ref_recv_hint"].(string)
+		ungated, _ := e.Meta["fn_value_ungated"].(bool)
+		target := ""
 		conf := 0.6
-		if target == "" {
-			if ungated, _ := e.Meta["fn_value_ungated"].(bool); ungated {
+		origin := graph.OriginASTInferred
+		switch {
+		case recvHint == "<self>":
+			if target = resolveFnValueSelfMember(g, e.From, name); target != "" {
+				conf, origin = 0.85, graph.OriginASTResolved
+			} else {
+				target = resolveFnValueName(g, e.FilePath, name)
+			}
+		case recvHint != "":
+			if target = resolveMemberByType(g, recvHint, name); target != "" {
+				conf, origin = 0.85, graph.OriginASTResolved
+			} else if ungated {
+				target = resolveFnValueCrossModule(g, name)
+				conf = 0.45
+			}
+		default:
+			target = resolveFnValueName(g, e.FilePath, name)
+			if target == "" && ungated {
 				target = resolveFnValueCrossModule(g, name)
 				conf = 0.45
 			}
@@ -77,6 +96,15 @@ func ResolveFnValueCallbacks(g graph.Store) int {
 			// fabricate an edge.
 			continue
 		}
+		meta := map[string]any{
+			"via":             fnValueRegistrationVia,
+			metaFnValueName:   name,
+			MetaSynthesizedBy: SynthFnValueCallback,
+			MetaProvenance:    ProvenanceHeuristic,
+		}
+		if form, _ := e.Meta["fn_ref_form"].(string); form != "" {
+			meta["fn_ref_form"] = form
+		}
 		landed = append(landed, &graph.Edge{
 			From:            e.From,
 			To:              target,
@@ -85,13 +113,8 @@ func ResolveFnValueCallbacks(g graph.Store) int {
 			Line:            e.Line,
 			Confidence:      conf,
 			ConfidenceLabel: graph.ConfidenceLabelFor(graph.EdgeReferences, conf),
-			Origin:          graph.OriginASTInferred,
-			Meta: map[string]any{
-				"via":             fnValueRegistrationVia,
-				metaFnValueName:   name,
-				MetaSynthesizedBy: SynthFnValueCallback,
-				MetaProvenance:    ProvenanceHeuristic,
-			},
+			Origin:          origin,
+			Meta:            meta,
 		})
 	}
 	for _, e := range landed {
@@ -141,6 +164,44 @@ func resolveFnValueCrossModule(g graph.Store, name string) string {
 		match = n.ID
 	}
 	return match
+}
+
+// resolveMemberByType binds member to a uniquely-named method of typeName
+// (matched via Meta["receiver"]), or "" when none or more than one matches.
+// Shared scope rule for `Foo::bar`-style references and self-member resolution.
+func resolveMemberByType(g graph.Store, typeName, member string) string {
+	if typeName == "" || member == "" {
+		return ""
+	}
+	match := ""
+	for _, n := range g.FindNodesByName(member) {
+		if n == nil || n.Kind != graph.KindMethod {
+			continue
+		}
+		if recv, _ := n.Meta["receiver"].(string); recv != typeName {
+			continue
+		}
+		if match != "" && match != n.ID {
+			return "" // ambiguous within the type — drop
+		}
+		match = n.ID
+	}
+	return match
+}
+
+// resolveFnValueSelfMember binds a `this.m` / `self.m` member reference against
+// the methods of the registration site's enclosing type, so it can never bind
+// a coincidentally-named top-level function.
+func resolveFnValueSelfMember(g graph.Store, fromID, member string) string {
+	from := g.GetNode(fromID)
+	if from == nil || from.Meta == nil {
+		return ""
+	}
+	recv, _ := from.Meta["receiver"].(string)
+	if recv == "" {
+		return ""
+	}
+	return resolveMemberByType(g, recv, member)
 }
 
 // isFnValueNonTarget reports whether name is a literal/keyword/builtin that

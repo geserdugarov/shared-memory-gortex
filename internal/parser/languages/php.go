@@ -20,7 +20,11 @@ func NewPHPExtractor() *PHPExtractor {
 }
 
 func (e *PHPExtractor) Language() string     { return "php" }
-func (e *PHPExtractor) Extensions() []string { return []string{".php"} }
+func (e *PHPExtractor) Extensions() []string {
+	// Drupal module files (.module/.install/.inc/.theme/.profile/.engine) are
+	// PHP source whose function names follow the hook convention.
+	return []string{".php", ".module", ".install", ".inc", ".theme", ".profile", ".engine"}
+}
 
 func (e *PHPExtractor) Extract(filePath string, src []byte) (*parser.ExtractionResult, error) {
 	tree, err := parser.ParseFile(src, e.lang)
@@ -55,6 +59,7 @@ func (e *PHPExtractor) Extract(filePath string, src []byte) (*parser.ExtractionR
 	emitPHPReferenceForms(root, src, filePath, fileNode.ID, result)
 
 	captureLaravelEvents(result, root, filePath, src)
+	captureDrupalHooks(result, filePath)
 
 	return result, nil
 }

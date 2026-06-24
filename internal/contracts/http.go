@@ -36,6 +36,9 @@ func (h *HTTPExtractor) SupportedLanguages() []string {
 		// in their path, so the extractor must see them even though they are
 		// not otherwise HTTP-bearing languages.
 		"astro", "svelte", "vue",
+		// YAML: Drupal *.routing.yml route declarations (a FrameworkRoutePass
+		// filters to the routing files by name).
+		"yaml",
 	}
 }
 

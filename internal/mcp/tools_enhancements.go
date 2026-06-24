@@ -842,6 +842,8 @@ func (s *Server) handleAnalyze(ctx context.Context, req mcp.CallToolRequest) (*m
 		return s.handleAnalyzeRoutes(ctx, req)
 	case "route_frameworks":
 		return s.handleAnalyzeRouteFrameworks(ctx, req)
+	case "drupal_hooks":
+		return s.handleAnalyzeDrupalHooks(ctx, req)
 	case "models":
 		return s.handleAnalyzeModels(ctx, req)
 	case "components":

@@ -3,6 +3,7 @@ package contracts
 import (
 	"bytes"
 	"slices"
+	"strings"
 
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/parser"
@@ -210,6 +211,16 @@ func init() {
 		},
 		run: func(h *HTTPExtractor, c *RouteExtractCtx) []Contract {
 			return h.extractLaravelResourceRoutes(c.FilePath, c.Text, c.Lines, c.FileNodes, c.Lang, c.Tree)
+		},
+	})
+	// Drupal *.routing.yml routes (langs nil: gated by filename, not language).
+	RegisterFrameworkRoutePass(&routePass{
+		name: "drupal", langs: nil,
+		detect: func(filePath string, _ []byte) bool {
+			return strings.HasSuffix(filePath, ".routing.yml") || strings.HasSuffix(filePath, ".routing.yaml")
+		},
+		run: func(h *HTTPExtractor, c *RouteExtractCtx) []Contract {
+			return h.extractDrupalRoutes(c.FilePath, c.Text, c.Lines, c.FileNodes, c.Lang, c.Tree)
 		},
 	})
 	RegisterFrameworkRoutePass(&routePass{

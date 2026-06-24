@@ -158,6 +158,46 @@ func routeFramework(n *graph.Node) string {
 	return fw
 }
 
+// handleAnalyzeDrupalHooks rolls up every detected Drupal hook
+// implementation, grouped by the hook it implements — the queryable face of
+// the hook layer ("which modules implement hook_node_insert?").
+func (s *Server) handleAnalyzeDrupalHooks(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	nameFilter := strings.TrimSpace(stringArg(req.GetArguments(), "name"))
+	hooks := map[string][]string{}
+	for _, n := range s.graph.AllNodes() {
+		if n == nil || n.Meta == nil {
+			continue
+		}
+		hook, _ := n.Meta["drupal_hook"].(string)
+		if hook == "" || (nameFilter != "" && hook != nameFilter) {
+			continue
+		}
+		hooks[hook] = append(hooks[hook], n.ID)
+	}
+	type hookRow struct {
+		Hook            string   `json:"hook"`
+		Implementations []string `json:"implementations"`
+		Count           int      `json:"count"`
+	}
+	rows := make([]hookRow, 0, len(hooks))
+	for h, impls := range hooks {
+		sort.Strings(impls)
+		rows = append(rows, hookRow{Hook: h, Implementations: impls, Count: len(impls)})
+	}
+	sort.Slice(rows, func(i, j int) bool { return rows[i].Hook < rows[j].Hook })
+	if isCompact(req) {
+		var b strings.Builder
+		for _, r := range rows {
+			fmt.Fprintf(&b, "%s: %d implementation(s)\n", r.Hook, r.Count)
+		}
+		if len(rows) == 0 {
+			b.WriteString("no drupal hooks\n")
+		}
+		return mcp.NewToolResultText(b.String()), nil
+	}
+	return s.respondJSONOrTOON(ctx, req, map[string]any{"hooks": rows, "total": len(rows)})
+}
+
 // routeMethodAndPath pulls the most useful pair of fields out of a
 // KindContract node's Meta. HTTP and WS routes use Meta["method"] +
 // Meta["path"]; gRPC uses Meta["service"] + Meta["method"]; topic uses

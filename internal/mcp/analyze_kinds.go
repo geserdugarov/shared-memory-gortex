@@ -34,6 +34,7 @@ var analyzeKinds = []string{
 	"def_use",
 	"doc_staleness",
 	"domain",
+	"drupal_hooks",
 	"edge_audit",
 	"env_var_users",
 	"error_surface",

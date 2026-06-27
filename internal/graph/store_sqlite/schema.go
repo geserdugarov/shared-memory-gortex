@@ -67,10 +67,11 @@ CREATE TABLE IF NOT EXISTS nodes (
     meta          BLOB
 ) WITHOUT ROWID;
 
-CREATE INDEX IF NOT EXISTS nodes_by_name ON nodes(name);
-CREATE INDEX IF NOT EXISTS nodes_by_kind ON nodes(kind);
-CREATE INDEX IF NOT EXISTS nodes_by_file ON nodes(file_path);
-CREATE INDEX IF NOT EXISTS nodes_by_repo ON nodes(repo_prefix) WHERE repo_prefix <> '';
+-- nodes_by_name / _kind / _file / _repo are created from the shared
+-- bulkDroppableIndexes set (see bulk_load.go), not here, so the bulk-load
+-- fast path can drop and rebuild the EXACT same DDL without drift.
+-- nodes_by_qual is UNIQUE — it enforces qual_name dedup on every
+-- INSERT OR REPLACE, so it is never dropped and stays defined here.
 CREATE UNIQUE INDEX IF NOT EXISTS nodes_by_qual ON nodes(qual_name) WHERE qual_name <> '';
 
 CREATE TABLE IF NOT EXISTS edges (
@@ -89,14 +90,14 @@ CREATE TABLE IF NOT EXISTS edges (
     UNIQUE(from_id, to_id, kind, file_path, line)
 );
 
-CREATE INDEX IF NOT EXISTS edges_by_from ON edges(from_id, kind);
-CREATE INDEX IF NOT EXISTS edges_by_to   ON edges(to_id, kind);
+-- edges_by_from / _to / _kind are created from the shared
+-- bulkDroppableIndexes set (see bulk_load.go), not here, so the bulk-load
+-- fast path can drop and rebuild the EXACT same DDL without drift.
 -- edges_by_kind backs EdgesByKind / EdgesByKinds (resolver whole-graph
 -- passes probe single kinds like provides/imports on every file save);
 -- without it those are full edges-table scans — edges_by_from/to lead
 -- with an id column and the partial edges_external index only covers
 -- its own predicate.
-CREATE INDEX IF NOT EXISTS edges_by_kind ON edges(kind);
 
 CREATE TABLE IF NOT EXISTS file_mtimes (
     repo_prefix TEXT NOT NULL,

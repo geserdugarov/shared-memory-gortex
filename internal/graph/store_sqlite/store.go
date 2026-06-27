@@ -90,6 +90,17 @@ type Store struct {
 	// makes SearchSymbolBundles fall through to the uncached path.
 	bundles *bundleCache
 
+	// Bulk-load fast path (graph.BulkLoader). Non-nil only between
+	// BeginBulkLoad and FlushBulk, and only on a first/empty cold index.
+	// database/sql PRAGMAs are connection-local, so the fast path pins one
+	// connection (bulkConn) carrying synchronous=OFF + an enlarged page
+	// cache and routes every bulk write through it; bulkPrevSync /
+	// bulkPrevCacheSize hold the values FlushBulk restores before the
+	// connection returns to the pool. All three are guarded by writeMu.
+	bulkConn          *sql.Conn
+	bulkPrevSync      int64
+	bulkPrevCacheSize int64
+
 	// Prepared statements (compiled once in Open, closed in Close).
 	stmtInsertNode         *sql.Stmt
 	stmtGetNode            *sql.Stmt
@@ -267,6 +278,17 @@ func openWith(path string, current int, migrations []schemaMigration, allowRebui
 	if _, err := db.Exec(schemaSQL); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("sqlite schema: %w", err)
+	}
+	// Create the droppable secondary indexes from the shared set so their
+	// initial-creation DDL is byte-identical to the DDL the bulk-load fast
+	// path rebuilds them with (BeginBulkLoad drops these, FlushBulk
+	// recreates them — see bulk_load.go). Kept out of schemaSQL so the two
+	// sites cannot drift.
+	for _, idx := range bulkDroppableIndexes {
+		if _, err := db.Exec(idx.ddl); err != nil {
+			_ = db.Close()
+			return nil, fmt.Errorf("sqlite create index %s: %w", idx.name, err)
+		}
 	}
 	// edges_external is a partial index over exactly the external-call
 	// terminals, so ExternalCallCandidateEdges scans a tiny index instead
@@ -705,7 +727,7 @@ func (s *Store) AddBatch(nodes []*graph.Node, edges []*graph.Edge) {
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 
-	tx, err := s.db.Begin()
+	tx, err := s.beginWrite()
 	if err != nil {
 		panicOnFatal(err)
 		return
@@ -1706,19 +1728,10 @@ func (s *Store) FindNodesByNames(names []string) map[string][]*graph.Node {
 
 // -- BulkLoader implementation -------------------------------------------
 
-// Compile-time assertion: *Store satisfies graph.BulkLoader. The
-// sqlite AddBatch path already runs inside one transaction per
-// chunk and the resolver's batched mutators (ReindexEdges,
-// SetEdgeProvenanceBatch) are already amortised. The BulkLoad
-// bracket is marker-only here: it exists so the indexer's
-// in-memory shadow swap activates — the resolver and its
-// post-resolve passes then run against an in-memory *Graph at
-// nanosecond latency, and the final AddBatch dumps the resolved
-// graph to sqlite in one shot.
-var _ graph.BulkLoader = (*Store)(nil)
-
-// BeginBulkLoad enters bulk mode. No-op for sqlite.
-func (s *Store) BeginBulkLoad() {}
-
-// FlushBulk exits bulk mode. No-op for sqlite.
-func (s *Store) FlushBulk() error { return nil }
+// BeginBulkLoad / FlushBulk (the graph.BulkLoader bracket) live in
+// bulk_load.go. The bracket exists so the indexer's in-memory shadow
+// swap activates — the resolver and its post-resolve passes run against
+// an in-memory *Graph at nanosecond latency, and the final drain dumps
+// the resolved graph to sqlite in one shot. On a first/empty cold index
+// the bracket additionally engages a bulk-persist fast path (dropped
+// secondary indexes + synchronous=OFF on a pinned connection).

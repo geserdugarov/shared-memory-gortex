@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -483,6 +484,27 @@ func isSymbolSearcherBackend(b search.Backend) bool {
 	}
 	_, ok := b.(*search.SymbolSearcherBackend)
 	return ok
+}
+
+// lessEdgeKey orders edges by their logical key (from, to, kind,
+// file_path, line) — the same tuple the sqlite edges table's
+// UNIQUE(from_id, …) index is built on. Draining edges in this order on
+// the cold bulk load keeps that index's inserts local instead of random,
+// reducing B-tree page splits.
+func lessEdgeKey(a, b *graph.Edge) bool {
+	if a.From != b.From {
+		return a.From < b.From
+	}
+	if a.To != b.To {
+		return a.To < b.To
+	}
+	if a.Kind != b.Kind {
+		return a.Kind < b.Kind
+	}
+	if a.FilePath != b.FilePath {
+		return a.FilePath < b.FilePath
+	}
+	return a.Line < b.Line
 }
 
 // ftsTokensFor produces the pre-tokenised text the backend FTS path
@@ -2208,8 +2230,22 @@ func (idx *Indexer) IndexCtx(ctx context.Context, root string) (result *IndexRes
 				// churn on a 600k-node Vscode-shape repo.
 				ftsItems = make([]graph.SymbolFTSItem, 0, inMemShadow.NodeCount())
 			}
+			// Key-ordered bulk drain. The nodes table is WITHOUT ROWID
+			// (its primary key IS the B-tree), so inserting in ascending
+			// id order makes each insert an append to the rightmost leaf
+			// instead of a random split mid-tree — far fewer page splits
+			// on the cold load. The edges table's UNIQUE(from_id, …) index
+			// benefits the same way from from-id-ordered inserts. So the
+			// whole drain is collected, sorted once, then chunk-written.
+			//
+			// This block only runs on the first/empty cold index (the
+			// shadow-swap branch above), and the shadow node/edge sets
+			// already fit in RAM (the branch is gated on the shadow byte /
+			// file budget). DrainNodes / DrainEdges free each shard as they
+			// yield, so holding the drained set in one slice to sort costs
+			// no more peak RAM than the shadow already did.
 			const persistChunk = 100000
-			nodeBuf := make([]*graph.Node, 0, persistChunk)
+			allNodes := make([]*graph.Node, 0, shadowNodeCount)
 			for n := range inMemShadow.DrainNodes() {
 				if hasFTS && idx.shouldIndexForSearch(n) {
 					ftsItems = append(ftsItems, graph.SymbolFTSItem{
@@ -2217,28 +2253,29 @@ func (idx *Indexer) IndexCtx(ctx context.Context, root string) (result *IndexRes
 						Tokens: ftsTokensFor(n, idx.projectName),
 					})
 				}
-				nodeBuf = append(nodeBuf, n)
-				if len(nodeBuf) >= persistChunk {
-					diskTarget.AddBatch(nodeBuf, nil)
-					nodeBuf = nodeBuf[:0]
-				}
+				allNodes = append(allNodes, n)
 			}
-			if len(nodeBuf) > 0 {
-				diskTarget.AddBatch(nodeBuf, nil)
-				nodeBuf = nil
+			sort.Slice(allNodes, func(i, j int) bool {
+				return allNodes[i].ID < allNodes[j].ID
+			})
+			for start := 0; start < len(allNodes); start += persistChunk {
+				end := min(start+persistChunk, len(allNodes))
+				diskTarget.AddBatch(allNodes[start:end], nil)
 			}
-			edgeBuf := make([]*graph.Edge, 0, persistChunk)
+			allNodes = nil
+
+			allEdges := make([]*graph.Edge, 0, shadowEdgeCount)
 			for e := range inMemShadow.DrainEdges() {
-				edgeBuf = append(edgeBuf, e)
-				if len(edgeBuf) >= persistChunk {
-					diskTarget.AddBatch(nil, edgeBuf)
-					edgeBuf = edgeBuf[:0]
-				}
+				allEdges = append(allEdges, e)
 			}
-			if len(edgeBuf) > 0 {
-				diskTarget.AddBatch(nil, edgeBuf)
-				edgeBuf = nil
+			sort.Slice(allEdges, func(i, j int) bool {
+				return lessEdgeKey(allEdges[i], allEdges[j])
+			})
+			for start := 0; start < len(allEdges); start += persistChunk {
+				end := min(start+persistChunk, len(allEdges))
+				diskTarget.AddBatch(nil, allEdges[start:end])
 			}
+			allEdges = nil
 			flushStart := time.Now()
 			idx.logger.Info("indexer: FlushBulk start",
 				zap.String("repo", idx.RepoPrefix()),

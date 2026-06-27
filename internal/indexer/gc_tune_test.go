@@ -1,0 +1,284 @@
+package indexer
+
+import (
+	"errors"
+	"os"
+	"runtime/debug"
+	"testing"
+)
+
+func TestIndexMemoryBudget(t *testing.T) {
+	const (
+		gib = uint64(1) << 30
+		mib = uint64(1) << 20
+	)
+	tests := []struct {
+		name        string
+		hostRAM     uint64
+		cgroupLimit uint64
+		want        int64
+	}{
+		{
+			name:    "host ram only, no cgroup",
+			hostRAM: 32 * gib,
+			want:    int64(16 * gib),
+		},
+		{
+			name:        "cgroup below host wins",
+			hostRAM:     32 * gib,
+			cgroupLimit: 4 * gib,
+			want:        int64(2 * gib),
+		},
+		{
+			name:        "cgroup above host falls back to host",
+			hostRAM:     8 * gib,
+			cgroupLimit: 64 * gib,
+			want:        int64(4 * gib),
+		},
+		{
+			name:        "cgroup present, host unknown",
+			hostRAM:     0,
+			cgroupLimit: 6 * gib,
+			want:        int64(3 * gib),
+		},
+		{
+			name:    "host unknown and no cgroup yields no budget",
+			hostRAM: 0,
+			want:    0,
+		},
+		{
+			name:    "zero everything yields no budget",
+			hostRAM: 0,
+			want:    0,
+		},
+		{
+			name:        "absurd cgroup sentinel ignored, host used",
+			hostRAM:     16 * gib,
+			cgroupLimit: 1<<63 - 1, // cgroup v1 uncapped sentinel-class value
+			want:        int64(8 * gib),
+		},
+		{
+			name:        "absurd cgroup and unknown host yields no budget",
+			hostRAM:     0,
+			cgroupLimit: 1<<63 - 1,
+			want:        0,
+		},
+		{
+			name:    "tiny host below floor yields no budget",
+			hostRAM: 512 * mib, // half == 256 MiB, below the 512 MiB floor
+			want:    0,
+		},
+		{
+			name:        "tiny cgroup below floor yields no budget",
+			hostRAM:     32 * gib,
+			cgroupLimit: 256 * mib,
+			want:        0,
+		},
+		{
+			name:    "exactly at floor is kept",
+			hostRAM: 1 * gib, // half == 512 MiB == floor
+			want:    int64(512 * mib),
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := indexMemoryBudget(tt.hostRAM, tt.cgroupLimit)
+			if got != tt.want {
+				t.Fatalf("indexMemoryBudget(%d, %d) = %d, want %d",
+					tt.hostRAM, tt.cgroupLimit, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestParseCgroupMemoryLimit(t *testing.T) {
+	const path = "/sys/fs/cgroup/memory.max"
+	reader := func(body string, err error) func(string) ([]byte, error) {
+		return func(string) ([]byte, error) {
+			if err != nil {
+				return nil, err
+			}
+			return []byte(body), nil
+		}
+	}
+
+	tests := []struct {
+		name   string
+		read   func(string) ([]byte, error)
+		want   uint64
+		wantOK bool
+	}{
+		{name: "valid numeric", read: reader("4294967296\n", nil), want: 4294967296, wantOK: true},
+		{name: "literal max", read: reader("max\n", nil), wantOK: false},
+		{name: "empty body", read: reader("", nil), wantOK: false},
+		{name: "missing file", read: reader("", errors.New("no such file")), wantOK: false},
+		{name: "zero value", read: reader("0", nil), wantOK: false},
+		{name: "non-numeric", read: reader("garbage", nil), wantOK: false},
+		{name: "absurd sentinel", read: reader("9223372036854771712", nil), wantOK: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := parseCgroupMemoryLimit(tt.read, path)
+			if ok != tt.wantOK || (ok && got != tt.want) {
+				t.Fatalf("parseCgroupMemoryLimit() = (%d, %v), want (%d, %v)",
+					got, ok, tt.want, tt.wantOK)
+			}
+		})
+	}
+}
+
+func TestCgroupMemoryLimitFrom(t *testing.T) {
+	// v2 present and capped: used directly, v1 never consulted.
+	got := cgroupMemoryLimitFrom(func(p string) ([]byte, error) {
+		if p == "/sys/fs/cgroup/memory.max" {
+			return []byte("2147483648"), nil
+		}
+		t.Fatalf("v1 path should not be read when v2 is capped, got read of %q", p)
+		return nil, nil
+	})
+	if got != 2147483648 {
+		t.Fatalf("v2 capped: got %d, want 2147483648", got)
+	}
+
+	// v2 reports "max" (uncapped): fall through to v1.
+	got = cgroupMemoryLimitFrom(func(p string) ([]byte, error) {
+		switch p {
+		case "/sys/fs/cgroup/memory.max":
+			return []byte("max"), nil
+		case "/sys/fs/cgroup/memory/memory.limit_in_bytes":
+			return []byte("1073741824"), nil
+		}
+		return nil, errors.New("unexpected path")
+	})
+	if got != 1073741824 {
+		t.Fatalf("v2 uncapped -> v1: got %d, want 1073741824", got)
+	}
+
+	// Neither hierarchy present: no limit.
+	got = cgroupMemoryLimitFrom(func(string) ([]byte, error) {
+		return nil, errors.New("no such file")
+	})
+	if got != 0 {
+		t.Fatalf("no cgroup: got %d, want 0", got)
+	}
+}
+
+func TestGCTuneEnabled(t *testing.T) {
+	tests := []struct {
+		val  string
+		set  bool
+		want bool
+	}{
+		{set: false, want: true}, // unset -> default on
+		{val: "1", set: true, want: true},
+		{val: "0", set: true, want: false},
+		{val: "false", set: true, want: false},
+		{val: "FALSE", set: true, want: false},
+		{val: "true", set: true, want: true},
+		{val: "anything", set: true, want: true},
+	}
+	for _, tt := range tests {
+		name := "unset"
+		if tt.set {
+			name = tt.val
+		}
+		t.Run(name, func(t *testing.T) {
+			if tt.set {
+				t.Setenv("GORTEX_INDEX_GC_TUNE", tt.val)
+			} else {
+				os.Unsetenv("GORTEX_INDEX_GC_TUNE")
+			}
+			if got := gcTuneEnabled(); got != tt.want {
+				t.Fatalf("gcTuneEnabled() with %q = %v, want %v", tt.val, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestIndexGCPercent(t *testing.T) {
+	tests := []struct {
+		val  string
+		set  bool
+		want int
+	}{
+		{set: false, want: defaultIndexGCPercent},
+		{val: "150", set: true, want: 150},
+		{val: "0", set: true, want: defaultIndexGCPercent},   // non-positive rejected
+		{val: "-1", set: true, want: defaultIndexGCPercent},  // negative rejected
+		{val: "abc", set: true, want: defaultIndexGCPercent}, // non-numeric rejected
+	}
+	for _, tt := range tests {
+		t.Run(tt.val, func(t *testing.T) {
+			if tt.set {
+				t.Setenv("GORTEX_INDEX_GC_PERCENT", tt.val)
+			} else {
+				os.Unsetenv("GORTEX_INDEX_GC_PERCENT")
+			}
+			if got := indexGCPercent(); got != tt.want {
+				t.Fatalf("indexGCPercent() with %q = %d, want %d", tt.val, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestApplyIndexGCTuningRestores asserts the tuning round-trips: after the
+// returned closure runs, the GC percent and memory limit are exactly what they
+// were before applyIndexGCTuning was called.
+func TestApplyIndexGCTuningRestores(t *testing.T) {
+	// Pin a known prior GC percent for the duration of the test, then restore
+	// it at the end regardless of the assertions below.
+	const priorPct = 137
+	originalPct := debug.SetGCPercent(priorPct)
+	defer debug.SetGCPercent(originalPct)
+	originalLimit := debug.SetMemoryLimit(-1)
+	defer debug.SetMemoryLimit(originalLimit)
+
+	t.Setenv("GORTEX_INDEX_GC_TUNE", "1")
+	t.Setenv("GORTEX_INDEX_GC_PERCENT", "275")
+
+	restore := applyIndexGCTuning(nil)
+
+	// While tuned, the GC percent must be the configured value, not the prior.
+	if cur := debug.SetGCPercent(275); cur != 275 {
+		// SetGCPercent(275) returns the value that was in effect — should be
+		// 275 because the tuning installed it. (We immediately put it back.)
+		debug.SetGCPercent(cur)
+		t.Fatalf("expected GC percent 275 while tuned, got %d", cur)
+	}
+	debug.SetGCPercent(275)
+
+	restore()
+
+	// After restore, the GC percent is back to the pinned prior.
+	if cur := debug.SetGCPercent(priorPct); cur != priorPct {
+		debug.SetGCPercent(cur)
+		t.Fatalf("expected GC percent restored to %d, got %d", priorPct, cur)
+	}
+	debug.SetGCPercent(priorPct)
+
+	// And the memory limit is back to its captured prior.
+	if cur := debug.SetMemoryLimit(-1); cur != originalLimit {
+		t.Fatalf("expected memory limit restored to %d, got %d", originalLimit, cur)
+	}
+}
+
+// TestApplyIndexGCTuningDisabled asserts that with tuning disabled the runtime
+// knobs are left untouched and the returned closure is a harmless no-op.
+func TestApplyIndexGCTuningDisabled(t *testing.T) {
+	const priorPct = 91
+	originalPct := debug.SetGCPercent(priorPct)
+	defer debug.SetGCPercent(originalPct)
+
+	t.Setenv("GORTEX_INDEX_GC_TUNE", "0")
+
+	restore := applyIndexGCTuning(nil)
+	if cur := debug.SetGCPercent(priorPct); cur != priorPct {
+		debug.SetGCPercent(cur)
+		t.Fatalf("tuning disabled should not change GC percent; got %d, want %d", cur, priorPct)
+	}
+	restore() // must not panic or alter state
+	if cur := debug.SetGCPercent(priorPct); cur != priorPct {
+		debug.SetGCPercent(cur)
+		t.Fatalf("no-op restore changed GC percent; got %d, want %d", cur, priorPct)
+	}
+}

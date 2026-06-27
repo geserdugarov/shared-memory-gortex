@@ -1926,6 +1926,15 @@ func (idx *Indexer) IndexCtx(ctx context.Context, root string) (result *IndexRes
 	start := time.Now()
 	reporter := progress.FromContext(ctx)
 
+	// Cold/full-index GC tuning: raise the GC percent window and install a
+	// cgroup-aware soft memory limit for the duration of the index, then
+	// restore the prior settings on every exit path. The knobs affect only GC
+	// timing and peak RSS during the allocation burst of a full index — the
+	// graph content is identical with them on or off. Disable for A/B runs
+	// with GORTEX_INDEX_GC_TUNE=0; see gc_tune.go.
+	restoreGCTuning := applyIndexGCTuning(idx.logger)
+	defer restoreGCTuning()
+
 	absRoot, err := filepath.Abs(root)
 	if err != nil {
 		return nil, err

@@ -129,10 +129,29 @@ type LangSpec struct {
 	// KindPackage and `include M` targets them.
 	SupertypeKinds map[graph.NodeKind]bool
 
+	// InheritEdgeKinds lists the edge kinds methodOn climbs when it
+	// looks up an inherited member. An empty slice defaults to
+	// {EdgeExtends} — only the superclass / supertype chain. Languages
+	// whose inheritance spans more than subclassing widen it: Ruby adds
+	// EdgeImplements so the modules pulled in by `include` / `prepend`
+	// / `extend` contribute their methods.
+	InheritEdgeKinds []graph.EdgeKind
+
 	// NormalizeType reduces a written type to the bare name the graph
 	// indexes (strip generics / pointers / qualifiers). nil uses the
 	// shared default.
 	NormalizeType func(t string) string
+}
+
+// inheritEdgeKinds returns the edge kinds methodOn climbs when looking
+// up an inherited member: the spec's explicit set, or {EdgeExtends}
+// when it leaves the field empty — preserving the legacy
+// superclass-only walk for every language that does not widen it.
+func (s *LangSpec) inheritEdgeKinds() []graph.EdgeKind {
+	if len(s.InheritEdgeKinds) > 0 {
+		return s.InheritEdgeKinds
+	}
+	return []graph.EdgeKind{graph.EdgeExtends}
 }
 
 func (s *LangSpec) normalize(t string) string {

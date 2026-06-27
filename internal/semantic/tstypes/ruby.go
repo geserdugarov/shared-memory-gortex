@@ -50,6 +50,10 @@ func RubySpec() *LangSpec {
 			graph.KindInterface: true,
 			graph.KindPackage:   true,
 		},
+		// `include` / `prepend` / `extend` model the mixed-in module as
+		// an implements edge; climb it alongside the superclass chain
+		// so a module's methods resolve on the including class.
+		InheritEdgeKinds: []graph.EdgeKind{graph.EdgeExtends, graph.EdgeImplements},
 	}
 }
 

@@ -363,20 +363,47 @@ func (a *applier) methodOn(typeNode *graph.Node, method string, depth int) *grap
 	case 1:
 		return matches[0]
 	case 0:
+		// Climb every inheritance edge the spec recognises — the
+		// supertype chain plus, where the language widens it, the
+		// mixin / include edges that pull a module's methods in. A
+		// member contributed by exactly one ancestor resolves; one
+		// contributed by several distinct ancestors (ambiguous across
+		// mixins or supers) stays unresolved rather than half-guessed.
+		// The depth bound above guards diamonds and mutual mixins from
+		// looping.
+		inheritKinds := a.spec.inheritEdgeKinds()
+		parentKinds := a.supertypeKinds()
+		var found *graph.Node
 		for _, e := range a.g.GetOutEdges(typeNode.ID) {
-			if e.Kind != graph.EdgeExtends || graph.IsUnresolvedTarget(e.To) {
+			if graph.IsUnresolvedTarget(e.To) || !edgeKindIn(e.Kind, inheritKinds) {
 				continue
 			}
 			parent := a.g.GetNode(e.To)
-			if parent == nil || (parent.Kind != graph.KindType && parent.Kind != graph.KindInterface) {
+			if parent == nil || !parentKinds[parent.Kind] {
 				continue
 			}
-			if m := a.methodOn(parent, method, depth+1); m != nil {
-				return m
+			m := a.methodOn(parent, method, depth+1)
+			if m == nil {
+				continue
 			}
+			if found != nil && found.ID != m.ID {
+				return nil
+			}
+			found = m
 		}
+		return found
 	}
 	return nil
+}
+
+// edgeKindIn reports whether k is one of kinds.
+func edgeKindIn(k graph.EdgeKind, kinds []graph.EdgeKind) bool {
+	for _, want := range kinds {
+		if k == want {
+			return true
+		}
+	}
+	return false
 }
 
 // callableReturnType resolves a bare callee name to its graph

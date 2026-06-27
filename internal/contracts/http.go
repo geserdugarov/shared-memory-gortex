@@ -714,6 +714,17 @@ func (h *HTTPExtractor) extract(
 			}
 			path = text[m[pat.pathGrp*2]:m[pat.pathGrp*2+1]]
 
+			// Consumer literals that point at a filesystem location, a
+			// config file, or a static asset are not HTTP API consumers —
+			// drop them before they mint a spurious consumer contract. Only
+			// rooted "/..." literals are gated; relative and
+			// template-interpolated client calls keep their existing
+			// behaviour so legitimate dynamic consumers are not lost.
+			if pat.role == RoleConsumer && strings.HasPrefix(path, "/") &&
+				(!IsLikelyHTTPRouteLiteral(path, "") || IsStaticAssetPath(path)) {
+				continue
+			}
+
 			// Go's net/http stdlib mux treats a trailing slash as a
 			// subtree match — `mux.HandleFunc("POST /v1/tools/", h)`
 			// serves every POST under /v1/tools/. Without this fix

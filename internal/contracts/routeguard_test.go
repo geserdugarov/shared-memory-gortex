@@ -71,3 +71,37 @@ func TestIsLikelyHTTPRouteLiteral(t *testing.T) {
 		})
 	}
 }
+
+// TestStaticAssetVsGuard pins the boundary the consumer pass relies on: a
+// static-asset path like /static/app.js is NOT rejected by the general route
+// guard (.js is not a filesystem extension, so rule 8 accepts it), which is
+// exactly why the consumer pass needs IsStaticAssetPath as an extra reject.
+func TestStaticAssetVsGuard(t *testing.T) {
+	// The guard alone treats /static/app.js as a plausible route.
+	if !IsLikelyHTTPRouteLiteral("/static/app.js", "fetch") {
+		t.Fatalf("guard unexpectedly rejected /static/app.js; the consumer "+
+			"static-asset reject would be redundant")
+	}
+}
+
+func TestIsStaticAssetPath(t *testing.T) {
+	cases := []struct {
+		literal string
+		want    bool
+	}{
+		{"/static/app.js", true},
+		{"/assets/logo.png", true},
+		{"/public/index.html", true},
+		{"/api/x", false},
+		{"/v1/users", false},
+		{"/staticfoo/x", false}, // first-segment exact match, not prefix
+		{"static/app.js", false}, // not rooted
+		{"", false},
+		{"/", false},
+	}
+	for _, tc := range cases {
+		if got := IsStaticAssetPath(tc.literal); got != tc.want {
+			t.Errorf("IsStaticAssetPath(%q) = %v, want %v", tc.literal, got, tc.want)
+		}
+	}
+}

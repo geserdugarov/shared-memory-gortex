@@ -2083,7 +2083,32 @@ func (r *Resolver) buildReachabilityIndex() {
 		addDir(n.ID, filepath.Dir(n.FilePath))
 	}
 
+	// Materialise the import edges and batch-load the endpoints of the
+	// resolved ones (e.To naming a concrete node) in one GetNodesByIDs.
+	// A per-edge GetNode here is a query round-trip per import on a disk
+	// backend — the same batching buildImportClosure already applies.
+	// Unresolved / external targets never name an in-repo file node, so
+	// they're skipped from the batch (their directory comes from dirIndex
+	// or not at all).
+	var imports []*graph.Edge
+	ids := make(map[string]struct{})
 	for e := range r.graph.EdgesByKind(graph.EdgeImports) {
+		imports = append(imports, e)
+		if e.To == "" || graph.IsUnresolvedTarget(e.To) || strings.HasPrefix(e.To, "external::") {
+			continue
+		}
+		ids[e.To] = struct{}{}
+	}
+	var nodes map[string]*graph.Node
+	if len(ids) > 0 {
+		idList := make([]string, 0, len(ids))
+		for id := range ids {
+			idList = append(idList, id)
+		}
+		nodes = r.graph.GetNodesByIDs(idList)
+	}
+
+	for _, e := range imports {
 		var importedDir string
 		switch {
 		case graph.IsUnresolvedTarget(e.To) && strings.HasPrefix(graph.UnresolvedName(e.To), "import::"):
@@ -2098,7 +2123,7 @@ func (r *Resolver) buildReachabilityIndex() {
 		case strings.HasPrefix(e.To, "external::"):
 			// External / unindexed package — nothing to add.
 		default:
-			if n := r.graph.GetNode(e.To); n != nil && n.Kind == graph.KindFile {
+			if n := nodes[e.To]; n != nil && n.Kind == graph.KindFile {
 				importedDir = filepath.Dir(n.FilePath)
 			}
 		}

@@ -131,3 +131,40 @@ class Plain: NSObject {
 		}
 	}
 }
+
+func TestSwift_ObjCMembersPropagation(t *testing.T) {
+	src := `@objcMembers
+class C {
+    func a() {}
+    @nonobjc func b() {}
+    func move(from x: Int, to y: Int) {}
+    var title: String = ""
+    @nonobjc var secret: String = ""
+}
+`
+	nodes, _ := runSwiftExtract(t, "C.swift", src)
+	sel := map[string]any{}
+	for _, n := range nodes {
+		if n.Meta == nil {
+			continue
+		}
+		if s, ok := n.Meta["objc_selector"]; ok {
+			sel[n.Name] = s
+		}
+	}
+	if sel["a"] != "a" {
+		t.Errorf("@objcMembers should expose a with selector a, got %v", sel["a"])
+	}
+	if sel["move"] != "moveFrom:to:" {
+		t.Errorf("@objcMembers should derive move(from:to:) selector moveFrom:to:, got %v", sel["move"])
+	}
+	if sel["title"] != "title" {
+		t.Errorf("@objcMembers should expose property title, got %v", sel["title"])
+	}
+	if _, ok := sel["b"]; ok {
+		t.Errorf("@nonobjc func b must not be exposed, got selector %v", sel["b"])
+	}
+	if _, ok := sel["secret"]; ok {
+		t.Errorf("@nonobjc var secret must not be exposed, got selector %v", sel["secret"])
+	}
+}

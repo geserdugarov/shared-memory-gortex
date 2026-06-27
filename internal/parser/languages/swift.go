@@ -73,9 +73,10 @@ type swiftDeferredCall struct {
 }
 
 type swiftTypeRange struct {
-	name      string
-	startLine int // 0-based
-	endLine   int // 0-based
+	name        string
+	startLine   int  // 0-based
+	endLine     int  // 0-based
+	objcMembers bool // class declared @objcMembers -- exposes all members to ObjC
 }
 
 func (e *SwiftExtractor) Extract(filePath string, src []byte) (*parser.ExtractionResult, error) {
@@ -256,9 +257,10 @@ func (e *SwiftExtractor) emitTypeContainer(m parser.QueryResult, prefix, filePat
 	// class.def, once for enum.def on the same enum) is harmless: the
 	// findEnclosingType lookup picks the innermost match by size.
 	*typeRanges = append(*typeRanges, swiftTypeRange{
-		name:      name,
-		startLine: def.StartLine,
-		endLine:   def.EndLine,
+		name:        name,
+		startLine:   def.StartLine,
+		endLine:     def.EndLine,
+		objcMembers: swiftHasAttr(def.Node, "objcMembers", src),
 	})
 
 	if !seen[id] {
@@ -387,7 +389,8 @@ func (e *SwiftExtractor) emitFunction(m parser.QueryResult, filePath, fileID str
 		sig = "func " + name + "(...)"
 	}
 
-	if typeName, ok := findEnclosingSwiftType(typeRanges, startLine); ok {
+	if tr, ok := findEnclosingSwiftTypeRange(typeRanges, startLine); ok {
+		typeName := tr.name
 		id, idOK := disambiguateID(seen, filePath+"::"+typeName+"."+name, def.StartLine+1)
 		if !idOK {
 			return
@@ -401,7 +404,7 @@ func (e *SwiftExtractor) emitFunction(m parser.QueryResult, filePath, fileID str
 		if doc != "" {
 			meta["doc"] = doc
 		}
-		if sel := swiftObjCSelector(def.Node, name, src); sel != "" {
+		if sel := swiftObjCSelectorExposed(def.Node, name, tr.objcMembers, src); sel != "" {
 			meta["objc_selector"] = sel
 		}
 		result.Nodes = append(result.Nodes, &graph.Node{
@@ -460,7 +463,8 @@ func (e *SwiftExtractor) emitProperty(m parser.QueryResult, filePath, fileID str
 	mutable := swiftPropertyIsMutable(def.Node, src)
 	fieldType := swiftPropertyType(def.Node, src)
 
-	typeName, enclosed := findEnclosingSwiftType(typeRanges, def.StartLine)
+	tr, enclosed := findEnclosingSwiftTypeRange(typeRanges, def.StartLine)
+	typeName := tr.name
 	kind := graph.KindField
 	id := filePath + "::" + name
 	if enclosed {
@@ -485,7 +489,7 @@ func (e *SwiftExtractor) emitProperty(m parser.QueryResult, filePath, fileID str
 	if enclosed {
 		meta["receiver"] = typeName
 	}
-	if getter, setter := swiftObjCPropertySelectors(def.Node, name, mutable, src); getter != "" {
+	if getter, setter := swiftObjCPropertySelectorsExposed(def.Node, name, mutable, enclosed && tr.objcMembers, src); getter != "" {
 		meta["objc_selector"] = getter
 		if setter != "" {
 			meta["objc_setter_selector"] = setter
@@ -780,21 +784,43 @@ func (e *SwiftExtractor) emitImport(m parser.QueryResult, filePath, fileID strin
 // logic — picks the smallest enclosing range so nested types attribute
 // correctly.
 func findEnclosingSwiftType(ranges []swiftTypeRange, line int) (string, bool) {
-	best := ""
+	r, ok := findEnclosingSwiftTypeRange(ranges, line)
+	if !ok {
+		return "", false
+	}
+	return r.name, true
+}
+
+// findEnclosingSwiftTypeRange returns the innermost (smallest) type range
+// containing line, so a member can read its enclosing type's attributes
+// (e.g. @objcMembers), not just the type name.
+func findEnclosingSwiftTypeRange(ranges []swiftTypeRange, line int) (swiftTypeRange, bool) {
+	var best swiftTypeRange
+	found := false
 	bestSize := int(^uint(0) >> 1)
 	for _, r := range ranges {
 		if line >= r.startLine && line <= r.endLine {
 			size := r.endLine - r.startLine
 			if size < bestSize {
 				bestSize = size
-				best = r.name
+				best = r
+				found = true
 			}
 		}
 	}
-	if best == "" {
-		return "", false
+	// A type can hold two enclosing ranges -- the brace-matched fallback
+	// scan seeded before the query match, and the query match itself. Only
+	// the latter carries attributes, so OR the @objcMembers flag across
+	// every same-name range that contains the line.
+	if found && !best.objcMembers {
+		for _, r := range ranges {
+			if r.name == best.name && r.objcMembers && line >= r.startLine && line <= r.endLine {
+				best.objcMembers = true
+				break
+			}
+		}
 	}
-	return best, true
+	return best, found
 }
 
 // findEnclosingSwiftContainer walks the parent chain of n looking for

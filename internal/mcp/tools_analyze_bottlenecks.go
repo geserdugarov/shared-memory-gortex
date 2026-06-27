@@ -113,8 +113,10 @@ func (s *Server) handleAnalyzeBottlenecks(ctx context.Context, req mcp.CallToolR
 		callees[e.From][e.To] = struct{}{}
 	}
 
-	// transitive loop depth: tld(F) = loop(F) + max over callees G that
-	// themselves loop of tld(G). Memoised, cycle-guarded.
+	// transitive loop depth: tld(F) = loop(F) + max over callees G of
+	// tld(G). A non-looping intermediate still threads a deeper callee's
+	// loop depth up to its caller, since tld(G) already carries it.
+	// Memoised, cycle-guarded.
 	tldMemo := map[string]int{}
 	var tld func(id string, onPath map[string]bool) int
 	tld = func(id string, onPath map[string]bool) int {
@@ -127,10 +129,8 @@ func (s *Server) handleAnalyzeBottlenecks(ctx context.Context, req mcp.CallToolR
 		onPath[id] = true
 		best := 0
 		for callee := range callees[id] {
-			if metrics[callee].loop > 0 {
-				if d := tld(callee, onPath); d > best {
-					best = d
-				}
+			if d := tld(callee, onPath); d > best {
+				best = d
 			}
 		}
 		delete(onPath, id)

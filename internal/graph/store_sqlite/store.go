@@ -447,7 +447,7 @@ func (s *Store) prepare() error {
 	const nodeCols = lookupNodeCols
 
 	prep(&s.stmtInsertNode,
-		`INSERT OR REPLACE INTO nodes (`+nodeCols+`) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+		`INSERT OR REPLACE INTO nodes (`+nodeCols+`) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
 	prep(&s.stmtGetNode,
 		`SELECT `+nodeCols+` FROM nodes WHERE id = ?`)
 	prep(&s.stmtGetNodeByQual,
@@ -561,7 +561,7 @@ func scanNode(scanner interface {
 		&n.RepoPrefix, &n.WorkspaceID, &n.ProjectID,
 		&p.sig, &p.vis, &p.doc, &p.external, &p.returnType,
 		&p.isAsync, &p.isStatic, &p.isAbstract, &p.isExported, &p.updatedAt,
-		&metaBlob,
+		&p.dataClass, &metaBlob,
 	)
 	if err != nil {
 		return nil, err
@@ -671,7 +671,7 @@ func (s *Store) insertNodeLocked(stmt *sql.Stmt, n *graph.Node) error {
 		n.RepoPrefix, n.WorkspaceID, n.ProjectID,
 		p.sig, p.vis, p.doc, p.external, p.returnType,
 		p.isAsync, p.isStatic, p.isAbstract, p.isExported, p.updatedAt,
-		metaBlob,
+		p.dataClass, metaBlob,
 	)
 	return err
 }
@@ -1162,12 +1162,14 @@ func (s *Store) queryNodes(stmt *sql.Stmt, args ...any) []*graph.Node {
 // GetRepoNonContentNodes is the graph.NonContentNodeReader fast path: a
 // SQL-level enumeration that drops CONTENT (data_class="content") section
 // nodes, so the code-oriented passes never materialise a content-heavy
-// repo's hundreds of thousands of sections. Meta is JSON (encodeMeta) in a
-// BLOB column, so json_extract reads it via CAST(... AS TEXT); the NULL-safe
-// `IS NOT 'content'` keeps every node whose meta is absent or carries any
-// other (or no) data_class. An empty repoPrefix spans all repos.
+// repo's hundreds of thousands of sections. data_class is a promoted node
+// column for rows written by the flat codec; legacy JSON rows (no column)
+// fall back to json_extract, guarded by json_valid so the flat / gob blobs
+// — which are not JSON — are skipped without error. The NULL-safe
+// `IS NOT 'content'` keeps every node whose data_class is absent or carries
+// any other value. An empty repoPrefix spans all repos.
 func (s *Store) GetRepoNonContentNodes(repoPrefix string) []*graph.Node {
-	const filter = `json_extract(CAST(meta AS TEXT), '$.data_class') IS NOT 'content'`
+	const filter = `COALESCE(data_class, CASE WHEN json_valid(CAST(meta AS TEXT)) THEN json_extract(CAST(meta AS TEXT), '$.data_class') END) IS NOT 'content'`
 	if repoPrefix == "" {
 		return s.scanNodeQuery(`SELECT ` + lookupNodeCols + ` FROM nodes WHERE ` + filter)
 	}

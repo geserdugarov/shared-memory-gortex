@@ -9,16 +9,17 @@ import (
 	"github.com/zzet/gortex/internal/contracts"
 )
 
-// roundTrip encodes Meta to JSON and decodes it back, the persist->reload
-// path every reader sees after a daemon restart / store hydration.
+// roundTrip encodes Meta with the flat codec and decodes it back, the
+// persist->reload path every reader sees after a daemon restart / store
+// hydration.
 func roundTrip(t *testing.T, in map[string]any) map[string]any {
 	t.Helper()
 	b, err := encodeMeta(in)
 	if err != nil {
 		t.Fatalf("encodeMeta: %v", err)
 	}
-	if !isJSONObject(b) {
-		t.Fatalf("encodeMeta did not produce a JSON object: %q", b)
+	if !isFlatMeta(b) {
+		t.Fatalf("encodeMeta did not produce a flat-codec blob: %q", b)
 	}
 	out, err := decodeMeta(b)
 	if err != nil {

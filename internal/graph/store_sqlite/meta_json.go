@@ -3,32 +3,51 @@ package store_sqlite
 import (
 	"bytes"
 	"database/sql"
+	"encoding/binary"
 	"encoding/gob"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"math"
+	"sort"
 
 	"github.com/zzet/gortex/internal/contracts"
 	"github.com/zzet/gortex/internal/graph"
 )
 
 // Node / edge Meta is a map[string]any persisted in the `meta` column.
-// It is stored as JSON, not gob: JSON needs no per-call type-engine
-// compilation (the gob hot path recompiled its decoder on every edge,
-// which dominated cold-load CPU and allocation), and a JSON document is
-// human-readable and free of any custom binary versioning.
 //
-// JSON has one numeric type, so a naive json.Unmarshal into a
+// New rows use a compact, self-describing flat binary codec
+// (encodeMetaFast / decodeMetaFast): a 2-byte magic, then a varint entry
+// count, then per entry a length-prefixed key, a one-byte type tag, and the
+// type's payload. Map keys are sorted before encoding, so the blob is
+// deterministic (reproducible for content-hashing / dedup). Each value
+// carries its exact Go type tag, so decode reconstructs int / int64 /
+// float64 / string / bool / []string / []map[string]any / map[string]any /
+// *contracts.Shape exactly — no key-type guessing, and far less CPU and
+// allocation than a reflection codec. (The old gob hot path recompiled its
+// type engine on every edge, which dominated cold-load CPU and allocation;
+// JSON needs no engine but widens every number to float64 and every slice
+// to []any, so it needs the metaWire DTO below to recover the exact types.)
+//
+// A value whose type the flat codec does not model (rare) makes
+// encodeMetaFast bail and encodeMeta falls back to JSON for the whole blob;
+// decodeMeta still reads such a blob through the metaWire typed DTO. No data
+// is ever dropped.
+//
+// Older on-disk stores hold JSON or gob blobs. decodeMeta sniffs the leading
+// bytes to pick the decoder — the flat magic, '{' for JSON, otherwise gob —
+// so every prior format still loads and migrates to the flat codec on its
+// next write. No schema migration is required: the `meta` column type is
+// unchanged.
+//
+// metaWire (below) remains the decode path for legacy JSON rows and the JSON
+// fallback. JSON has one numeric type, so a naive json.Unmarshal into a
 // map[string]any widens every number to float64 and every []T to []any,
-// silently corrupting the readers that type-assert .(int) / .(float64) /
-// .([]string) / .(*contracts.Shape). decodeMeta therefore routes the
-// document through metaWire — a typed DTO whose fields parse each known
-// key as its exact Go type — and normalises the open tail (Extra plus
-// nested maps) with a small key-type table. The in-memory map a caller
-// receives is byte-for-byte type-identical to what the old gob path
-// produced, so no reader changes.
-//
-// Existing on-disk stores still hold gob blobs; decodeMeta sniffs the
-// leading byte ('{' => JSON) and falls back to gob for legacy rows, which
-// migrate to JSON on their next write. No schema migration is required.
+// silently corrupting readers that type-assert .(int) / .(float64) /
+// .([]string) / .(*contracts.Shape); metaWire is a typed DTO whose fields
+// parse each known key as its exact Go type and normalises the open tail
+// (Extra plus nested maps) with a small key-type table.
 
 // metaWire is the decode-side DTO. Scalar fields are pointers so an absent
 // key (nil) is distinguished from a present zero value — comma-ok readers
@@ -306,19 +325,29 @@ func normalizeSlice(key string, s []any) any {
 	return out
 }
 
-// encodeMeta serialises Meta to JSON. nil / empty Meta stores as NULL.
+// encodeMeta serialises Meta. nil / empty Meta stores as NULL. The common
+// case is the flat binary codec; a value type the flat codec doesn't model
+// falls back to JSON for the whole blob (decodeMeta auto-detects it by the
+// leading '{').
 func encodeMeta(m map[string]any) ([]byte, error) {
 	if len(m) == 0 {
 		return nil, nil
 	}
+	if b, ok := encodeMetaFast(m); ok {
+		return b, nil
+	}
 	return json.Marshal(m)
 }
 
-// decodeMeta reads a meta blob. New rows are JSON (routed through metaWire
-// for exact types); legacy rows are gob and decode through the fallback.
+// decodeMeta reads a meta blob, picking the decoder from the leading bytes:
+// the flat magic => the flat binary codec; '{' => JSON (routed through
+// metaWire for exact types); otherwise legacy gob.
 func decodeMeta(b []byte) (map[string]any, error) {
 	if len(b) == 0 {
 		return nil, nil
+	}
+	if isFlatMeta(b) {
+		return decodeMetaFast(b)
 	}
 	if isJSONObject(b) {
 		var w metaWire
@@ -356,6 +385,350 @@ func decodeMetaGob(b []byte) (map[string]any, error) {
 	return m, nil
 }
 
+// -- flat binary meta codec -----------------------------------------------
+//
+// Layout: metaFlatMagic0, metaFlatVersion, then a map body. A map body is a
+// uvarint entry count followed by that many [uvarint keyLen][key bytes]
+// [1-byte type tag][value] entries, keys sorted. Value layouts are listed on
+// the tag constants below. The format is self-describing (every value
+// carries its type), so decode is exact with no key-type heuristics.
+//
+// metaFlatMagic0 is 0x00: a non-empty gob stream never begins with 0x00 (its
+// leading message-length prefix is always > 0), and a JSON object always
+// begins with '{' (0x7B) — so a leading 0x00 unambiguously marks the flat
+// format and never collides with a legacy blob. metaFlatVersion guards the
+// layout if it ever changes.
+const (
+	metaFlatMagic0  = 0x00
+	metaFlatVersion = 0x01
+)
+
+// Flat value type tags. The byte after a key selects the value layout.
+const (
+	metaTagNil      = 0x01 // (no payload)
+	metaTagString   = 0x02 // uvarint len, len bytes
+	metaTagBool     = 0x03 // 1 byte (0 / 1)
+	metaTagInt      = 0x04 // zig-zag varint
+	metaTagInt64    = 0x05 // zig-zag varint
+	metaTagFloat64  = 0x06 // 8 bytes little-endian IEEE-754 bits
+	metaTagStrSlice = 0x07 // uvarint count, then count strings
+	metaTagMap      = 0x08 // a map body (recursive)
+	metaTagMapSlice = 0x09 // uvarint count, then count map bodies
+	metaTagAnySlice = 0x0A // uvarint count, then count tagged values
+	metaTagShape    = 0x0B // uvarint len, len bytes of JSON-encoded *contracts.Shape
+)
+
+var errMetaTruncated = errors.New("store_sqlite: truncated meta blob")
+
+// isFlatMeta reports whether b is a flat-codec blob.
+func isFlatMeta(b []byte) bool {
+	return len(b) >= 2 && b[0] == metaFlatMagic0 && b[1] == metaFlatVersion
+}
+
+// encodeMetaFast serialises m with the flat binary codec. It returns ok=false
+// (and the caller falls back to JSON) when any value — at any depth — has a
+// type the codec does not model, so no data is ever silently dropped.
+func encodeMetaFast(m map[string]any) (b []byte, ok bool) {
+	buf := make([]byte, 0, 32+len(m)*24)
+	buf = append(buf, metaFlatMagic0, metaFlatVersion)
+	buf, ok = appendMetaMap(buf, m)
+	if !ok {
+		return nil, false
+	}
+	return buf, true
+}
+
+// appendMetaMap writes a map body (count + sorted entries). Sorting the keys
+// makes the encoding deterministic.
+func appendMetaMap(buf []byte, m map[string]any) ([]byte, bool) {
+	buf = binary.AppendUvarint(buf, uint64(len(m)))
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		buf = appendMetaString(buf, k)
+		var ok bool
+		buf, ok = appendMetaValue(buf, m[k])
+		if !ok {
+			return buf, false
+		}
+	}
+	return buf, true
+}
+
+func appendMetaString(buf []byte, s string) []byte {
+	buf = binary.AppendUvarint(buf, uint64(len(s)))
+	return append(buf, s...)
+}
+
+// appendMetaValue writes a tagged value, returning ok=false for an
+// unmodelled type.
+func appendMetaValue(buf []byte, v any) ([]byte, bool) {
+	switch vv := v.(type) {
+	case nil:
+		return append(buf, metaTagNil), true
+	case string:
+		buf = append(buf, metaTagString)
+		return appendMetaString(buf, vv), true
+	case bool:
+		bb := byte(0)
+		if vv {
+			bb = 1
+		}
+		return append(buf, metaTagBool, bb), true
+	case int:
+		buf = append(buf, metaTagInt)
+		return binary.AppendVarint(buf, int64(vv)), true
+	case int64:
+		buf = append(buf, metaTagInt64)
+		return binary.AppendVarint(buf, vv), true
+	case float64:
+		buf = append(buf, metaTagFloat64)
+		return binary.LittleEndian.AppendUint64(buf, math.Float64bits(vv)), true
+	case []string:
+		buf = append(buf, metaTagStrSlice)
+		buf = binary.AppendUvarint(buf, uint64(len(vv)))
+		for _, s := range vv {
+			buf = appendMetaString(buf, s)
+		}
+		return buf, true
+	case map[string]any:
+		buf = append(buf, metaTagMap)
+		return appendMetaMap(buf, vv)
+	case []map[string]any:
+		buf = append(buf, metaTagMapSlice)
+		buf = binary.AppendUvarint(buf, uint64(len(vv)))
+		for _, mm := range vv {
+			var ok bool
+			buf, ok = appendMetaMap(buf, mm)
+			if !ok {
+				return buf, false
+			}
+		}
+		return buf, true
+	case []any:
+		buf = append(buf, metaTagAnySlice)
+		buf = binary.AppendUvarint(buf, uint64(len(vv)))
+		for _, e := range vv {
+			var ok bool
+			buf, ok = appendMetaValue(buf, e)
+			if !ok {
+				return buf, false
+			}
+		}
+		return buf, true
+	case *contracts.Shape:
+		js, err := json.Marshal(vv)
+		if err != nil {
+			return buf, false
+		}
+		buf = append(buf, metaTagShape)
+		return appendMetaString(buf, string(js)), true
+	default:
+		return buf, false
+	}
+}
+
+// decodeMetaFast reverses encodeMetaFast. A malformed blob returns an error
+// (never panics).
+func decodeMetaFast(b []byte) (map[string]any, error) {
+	if len(b) < 2 {
+		return nil, errMetaTruncated
+	}
+	d := &metaDecoder{buf: b[2:]} // skip magic + version
+	m, err := d.readMap()
+	if err != nil {
+		return nil, err
+	}
+	return m, nil
+}
+
+// metaDecoder is a bounds-checked cursor over a flat meta blob.
+type metaDecoder struct {
+	buf []byte
+	pos int
+}
+
+func (d *metaDecoder) uvarint() (uint64, error) {
+	v, n := binary.Uvarint(d.buf[d.pos:])
+	if n <= 0 {
+		return 0, errMetaTruncated
+	}
+	d.pos += n
+	return v, nil
+}
+
+func (d *metaDecoder) varint() (int64, error) {
+	v, n := binary.Varint(d.buf[d.pos:])
+	if n <= 0 {
+		return 0, errMetaTruncated
+	}
+	d.pos += n
+	return v, nil
+}
+
+func (d *metaDecoder) readByte() (byte, error) {
+	if d.pos >= len(d.buf) {
+		return 0, errMetaTruncated
+	}
+	b := d.buf[d.pos]
+	d.pos++
+	return b, nil
+}
+
+func (d *metaDecoder) readBytes(n int) ([]byte, error) {
+	if n < 0 || n > len(d.buf)-d.pos {
+		return nil, errMetaTruncated
+	}
+	b := d.buf[d.pos : d.pos+n]
+	d.pos += n
+	return b, nil
+}
+
+func (d *metaDecoder) readString() (string, error) {
+	n, err := d.uvarint()
+	if err != nil {
+		return "", err
+	}
+	if n > uint64(len(d.buf)-d.pos) {
+		return "", errMetaTruncated
+	}
+	b, err := d.readBytes(int(n))
+	if err != nil {
+		return "", err
+	}
+	return string(b), nil
+}
+
+// readCount reads a uvarint length and caps it to the remaining buffer so a
+// corrupt count cannot trigger a giant allocation (every element occupies at
+// least one byte).
+func (d *metaDecoder) readCount() (int, error) {
+	n, err := d.uvarint()
+	if err != nil {
+		return 0, err
+	}
+	if n > uint64(len(d.buf)-d.pos) {
+		return 0, errMetaTruncated
+	}
+	return int(n), nil
+}
+
+func (d *metaDecoder) readMap() (map[string]any, error) {
+	count, err := d.readCount()
+	if err != nil {
+		return nil, err
+	}
+	m := make(map[string]any, count)
+	for i := 0; i < count; i++ {
+		key, err := d.readString()
+		if err != nil {
+			return nil, err
+		}
+		val, err := d.readValue()
+		if err != nil {
+			return nil, err
+		}
+		m[key] = val
+	}
+	return m, nil
+}
+
+func (d *metaDecoder) readValue() (any, error) {
+	tag, err := d.readByte()
+	if err != nil {
+		return nil, err
+	}
+	switch tag {
+	case metaTagNil:
+		return nil, nil
+	case metaTagString:
+		return d.readString()
+	case metaTagBool:
+		b, err := d.readByte()
+		if err != nil {
+			return nil, err
+		}
+		return b != 0, nil
+	case metaTagInt:
+		v, err := d.varint()
+		if err != nil {
+			return nil, err
+		}
+		return int(v), nil
+	case metaTagInt64:
+		v, err := d.varint()
+		if err != nil {
+			return nil, err
+		}
+		return v, nil
+	case metaTagFloat64:
+		b, err := d.readBytes(8)
+		if err != nil {
+			return nil, err
+		}
+		return math.Float64frombits(binary.LittleEndian.Uint64(b)), nil
+	case metaTagStrSlice:
+		count, err := d.readCount()
+		if err != nil {
+			return nil, err
+		}
+		out := make([]string, 0, count)
+		for i := 0; i < count; i++ {
+			s, err := d.readString()
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, s)
+		}
+		return out, nil
+	case metaTagMap:
+		return d.readMap()
+	case metaTagMapSlice:
+		count, err := d.readCount()
+		if err != nil {
+			return nil, err
+		}
+		out := make([]map[string]any, 0, count)
+		for i := 0; i < count; i++ {
+			mm, err := d.readMap()
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, mm)
+		}
+		return out, nil
+	case metaTagAnySlice:
+		count, err := d.readCount()
+		if err != nil {
+			return nil, err
+		}
+		out := make([]any, 0, count)
+		for i := 0; i < count; i++ {
+			e, err := d.readValue()
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, e)
+		}
+		return out, nil
+	case metaTagShape:
+		s, err := d.readString()
+		if err != nil {
+			return nil, err
+		}
+		var sh *contracts.Shape
+		if err := json.Unmarshal([]byte(s), &sh); err != nil {
+			return nil, err
+		}
+		return sh, nil
+	default:
+		return nil, fmt.Errorf("store_sqlite: unknown meta value tag 0x%02x", tag)
+	}
+}
+
 // -- promoted node columns ------------------------------------------------
 //
 // signature / visibility / doc / external are universal, hot-read node
@@ -378,6 +751,7 @@ var promotedMetaColumns = []struct {
 	{"is_abstract", "is_abstract INTEGER"},
 	{"is_exported", "is_exported INTEGER"},
 	{"updated_at", "updated_at INTEGER"},
+	{"data_class", "data_class TEXT"},
 }
 
 // structNodeColumns are typed nodes columns read and written directly from
@@ -396,7 +770,7 @@ var structNodeColumns = []struct {
 // blob. A NULL (invalid) field means the key was absent (or had an unexpected
 // type and stayed in the blob).
 type promotedNodeMeta struct {
-	sig, vis, doc, returnType                           sql.NullString
+	sig, vis, doc, returnType, dataClass                sql.NullString
 	external, isAsync, isStatic, isAbstract, isExported sql.NullBool
 	updatedAt                                           sql.NullInt64
 }
@@ -498,6 +872,10 @@ func extractPromotedMeta(m map[string]any) (p promotedNodeMeta, rest map[string]
 			if nv, ok := str(v); ok {
 				p.returnType, promoted = nv, true
 			}
+		case "data_class":
+			if nv, ok := str(v); ok {
+				p.dataClass, promoted = nv, true
+			}
 		case "external":
 			if nv, ok := boolean(v); ok {
 				p.external, promoted = nv, true
@@ -554,8 +932,9 @@ func metaToInt64(v any) (int64, bool) {
 // survives.
 func restorePromotedMeta(n *graph.Node, p promotedNodeMeta) {
 	if !p.sig.Valid && !p.vis.Valid && !p.doc.Valid && !p.returnType.Valid &&
-		!p.external.Valid && !p.isAsync.Valid && !p.isStatic.Valid &&
-		!p.isAbstract.Valid && !p.isExported.Valid && !p.updatedAt.Valid {
+		!p.dataClass.Valid && !p.external.Valid && !p.isAsync.Valid &&
+		!p.isStatic.Valid && !p.isAbstract.Valid && !p.isExported.Valid &&
+		!p.updatedAt.Valid {
 		return
 	}
 	if n.Meta == nil {
@@ -572,6 +951,9 @@ func restorePromotedMeta(n *graph.Node, p promotedNodeMeta) {
 	}
 	if p.returnType.Valid {
 		n.Meta["return_type"] = p.returnType.String
+	}
+	if p.dataClass.Valid {
+		n.Meta["data_class"] = p.dataClass.String
 	}
 	if p.external.Valid {
 		n.Meta["external"] = p.external.Bool

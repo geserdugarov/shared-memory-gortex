@@ -64,6 +64,7 @@ CREATE TABLE IF NOT EXISTS nodes (
     is_abstract   INTEGER,
     is_exported   INTEGER,
     updated_at    INTEGER,
+    data_class    TEXT,
     meta          BLOB
 ) WITHOUT ROWID;
 

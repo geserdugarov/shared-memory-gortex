@@ -86,6 +86,14 @@ func resolveEndpointValue(arg *sitter.Node, src []byte, filePath, repoPrefix str
 			return v, false, true
 		}
 		return "", false, false
+	case "string", "string_literal", "template_string", "interpolated_string_expression":
+		// Cross-language string literals (python/rust/ruby/php/java/kotlin/scala).
+		// A plain literal is the author's explicit intent — like a Go literal it
+		// is reported as a non-deref value so the route guard does not vet it.
+		if v, ok := crossLangStringLiteral(arg, src); ok {
+			return v, false, true
+		}
+		return "", false, false
 	case "identifier":
 		v, ok := resolveConstIdentifier(arg.Content(src), filePath, repoPrefix, store)
 		return v, true, ok
@@ -218,6 +226,44 @@ func uniqueEndpointValue(vals map[string]string, restrict map[string]bool) (stri
 		return "", false
 	}
 	return found, true
+}
+
+// crossLangStringLiteral extracts the literal value of a non-Go string node
+// (python/rust/ruby/php/java/kotlin/scala). It prefers an inner content child
+// (`string_content` / `string_fragment`) so quote / prefix decoration is
+// stripped uniformly across grammars, descends through an interpolated-string
+// wrapper (scala `uri"..."`), and otherwise strips a matching pair of
+// surrounding quotes.
+func crossLangStringLiteral(n *sitter.Node, src []byte) (string, bool) {
+	if n == nil {
+		return "", false
+	}
+	for i := 0; i < int(n.NamedChildCount()); i++ {
+		ch := n.NamedChild(i)
+		if ch == nil {
+			continue
+		}
+		switch ch.Type() {
+		case "string_content", "string_fragment":
+			return ch.Content(src), true
+		case "interpolated_string", "string", "string_literal":
+			if v, ok := crossLangStringLiteral(ch, src); ok {
+				return v, true
+			}
+			return strings.Trim(ch.Content(src), "\"'`"), true
+		}
+	}
+	s := strings.TrimSpace(n.Content(src))
+	if len(s) >= 2 {
+		q := s[0]
+		if (q == '"' || q == '\'' || q == '`') && s[len(s)-1] == q {
+			return s[1 : len(s)-1], true
+		}
+	}
+	if s == "" {
+		return "", false
+	}
+	return s, true
 }
 
 // nodeInRepoScope reports whether a candidate const node belongs to the repo

@@ -34,6 +34,22 @@ func (s *Server) registerExportTools() {
 	)
 }
 
+// confineCallerPaths reports whether caller-supplied filesystem paths in the
+// current request must be confined to an indexed repository root.
+//
+// It is true for an MCP agent session — the prompt-injection surface, where a
+// tool's path argument can be attacker-influenced — and false for the local
+// control / CLI channel, which is operator-driven and may write anywhere it
+// likes (e.g. `gortex export --out /any/path`).
+//
+// The discriminator is the session cwd: the MCP proxy stamps every agent
+// session with the connecting client's working directory (daemon.Handshake.CWD)
+// before any tool call, and an agent cannot clear it from a tool-call frame.
+// The control / CLI channel and the embedded stdio server carry none.
+func (s *Server) confineCallerPaths(ctx context.Context) bool {
+	return SessionCWDFromContext(ctx) != ""
+}
+
 func (s *Server) handleExportGraph(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	g := s.graph
 	if g == nil {
@@ -60,6 +76,27 @@ func (s *Server) handleExportGraph(ctx context.Context, req mcp.CallToolRequest)
 
 	outputPath := stringArg(args, "output_path")
 	outputDir := stringArg(args, "output_dir")
+
+	// Confine caller-named output paths to indexed repository roots when the
+	// request comes from an MCP agent — a prompt-injected agent must not be
+	// able to drive the daemon into writing (or MkdirAll-creating) a tree
+	// outside any indexed repo. The local CLI / control channel is
+	// operator-driven and exempt: `gortex export --out/--out-dir` asks for the
+	// write in the user's own name and may target any path.
+	if s.confineCallerPaths(ctx) {
+		for _, p := range []string{outputPath, outputDir} {
+			if p == "" {
+				continue
+			}
+			abs, err := filepath.Abs(p)
+			if err != nil {
+				return mcp.NewToolResultError(fmt.Sprintf("export: resolve output path %q: %v", p, err)), nil
+			}
+			if err := s.guardSymlinkWithinRepo(abs); err != nil {
+				return mcp.NewToolResultError(err.Error()), nil
+			}
+		}
+	}
 
 	// Mermaid multi-file: one file per scope under output_dir.
 	if format == "mermaid" && outputDir != "" {

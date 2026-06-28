@@ -174,6 +174,75 @@ func TestClusters_EmptyCommunities(t *testing.T) {
 	assert.Equal(t, "leiden", out["algorithm"])
 }
 
+// newTieredClustersServer builds a server over a two-level hierarchy
+// (modules of tight cliques) so the Leiden resolution knob visibly
+// changes the partition through the handler.
+func newTieredClustersServer(t *testing.T) *Server {
+	t.Helper()
+	g := graph.New()
+	node := func(m, c, i int) string {
+		return "m" + string(rune('0'+m)) + "_c" + string(rune('0'+c)) + "_n" + string(rune('0'+i))
+	}
+	const nm, cpm, cs = 4, 3, 4
+	for m := 0; m < nm; m++ {
+		for c := 0; c < cpm; c++ {
+			for i := 0; i < cs; i++ {
+				g.AddNode(&graph.Node{ID: node(m, c, i), Name: node(m, c, i), Kind: graph.KindFunction, FilePath: "pkg/" + node(m, c, i) + ".go", Language: "go"})
+			}
+			for i := 0; i < cs; i++ {
+				for j := i + 1; j < cs; j++ {
+					g.AddEdge(&graph.Edge{From: node(m, c, i), To: node(m, c, j), Kind: graph.EdgeCalls})
+				}
+			}
+		}
+		// within-module bridges between clique hubs.
+		g.AddEdge(&graph.Edge{From: node(m, 0, 0), To: node(m, 1, 0), Kind: graph.EdgeReferences})
+		g.AddEdge(&graph.Edge{From: node(m, 0, 0), To: node(m, 2, 0), Kind: graph.EdgeReferences})
+		g.AddEdge(&graph.Edge{From: node(m, 1, 0), To: node(m, 2, 0), Kind: graph.EdgeReferences})
+	}
+	// inter-module ring (weakest scale).
+	for m := 0; m < nm; m++ {
+		next := (m + 1) % nm
+		g.AddEdge(&graph.Edge{From: node(m, 0, 0), To: node(next, 0, 0), Kind: graph.EdgeCalls})
+		g.AddEdge(&graph.Edge{From: node(m, 0, 1), To: node(next, 0, 1), Kind: graph.EdgeCalls})
+	}
+	s := &Server{
+		graph:      g,
+		session:    newSessionState(),
+		tokenStats: &tokenStats{},
+		symHistory: &symbolHistory{entries: make(map[string][]SymbolModification)},
+		sessions:   newSessionMap(),
+		toolScopes: newScopeRegistry(),
+	}
+	return s
+}
+
+func TestClusters_ResolutionEchoedAndHonored(t *testing.T) {
+	s := newTieredClustersServer(t)
+
+	// Default: resolution 1.0 is echoed and the cached/default path runs.
+	def := callAnalyzeClusters(t, s, map[string]any{})
+	defDet := def["detection"].(map[string]any)
+	assert.EqualValues(t, 1.0, defDet["resolution"].(float64))
+
+	// A higher resolution must yield MORE clusters than a lower one — the
+	// granularity knob is honored end-to-end through the handler.
+	hi := callAnalyzeClusters(t, s, map[string]any{"resolution": 2.0})
+	lo := callAnalyzeClusters(t, s, map[string]any{"resolution": 0.5})
+
+	hiDet := hi["detection"].(map[string]any)
+	assert.EqualValues(t, 2.0, hiDet["resolution"].(float64))
+	// Non-default resolution recomputes fully (the incremental cache is
+	// keyed to the default γ).
+	assert.Equal(t, "full", hiDet["recompute"])
+
+	hiN := len(hi["clusters"].([]any))
+	loN := len(lo["clusters"].([]any))
+	defN := len(def["clusters"].([]any))
+	t.Logf("clusters: gamma=0.5 -> %d, gamma=1.0 -> %d, gamma=2.0 -> %d", loN, defN, hiN)
+	assert.Greater(t, hiN, loN, "resolution=2.0 must produce more clusters than resolution=0.5")
+}
+
 func TestClusters_IntegrationViaDispatch(t *testing.T) {
 	s := newClustersTestServer(t)
 	req := mcp.CallToolRequest{}

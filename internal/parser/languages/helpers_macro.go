@@ -3,10 +3,13 @@ package languages
 import (
 	"regexp"
 	"strings"
+	"sync"
 
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/parser"
 	sitter "github.com/zzet/gortex/internal/parser/tsitter"
+	cgrammar "github.com/zzet/gortex/internal/parser/tsitter/c"
+	cppgrammar "github.com/zzet/gortex/internal/parser/tsitter/cpp"
 )
 
 // cMacroCallRe matches a call-like invocation `name(` inside a macro's
@@ -30,11 +33,14 @@ var cKeywordsInMacroBody = map[string]bool{
 // the function-like shape (parameters + call recovery). lang is "c" or "cpp".
 //
 // The replacement list is a raw preproc_arg token (tree-sitter does not
-// parse it), so call recovery scans its text for `name(` invocations,
-// excluding the macro's own parameters and C/C++ keywords. A call site
-// like `SQ(2)` parses as an ordinary call_expression and already resolves
-// against the macro by name, so caller -> macro -> body-call forms a
-// two-hop path through the expansion.
+// parse it as part of the enclosing file), so call recovery sub-parses
+// the body with the C/C++ grammar and walks it for call_expression
+// callees — plain `f()`, member `(o)->run()`, and qualified `ns::f()` —
+// excluding the macro's own parameters and C/C++ keywords. A malformed
+// body falls back to a regex scan. A call site like `SQ(2)` parses as an
+// ordinary call_expression and already resolves against the macro by
+// name, so caller -> macro -> body-call forms a two-hop path through the
+// expansion.
 func emitCMacro(defNode *sitter.Node, isFunc bool, filePath, fileID, lang string, src []byte, result *parser.ExtractionResult, seen map[string]bool) {
 	if defNode == nil {
 		return
@@ -81,10 +87,9 @@ func emitCMacro(defNode *sitter.Node, isFunc bool, filePath, fileID, lang string
 		meta["params"] = params
 	}
 	if replacement != "" {
-		const maxLen = 200
 		r := replacement
-		if len(r) > maxLen {
-			r = r[:maxLen]
+		if len(r) > macroBodyMaxLen {
+			r = r[:macroBodyMaxLen]
 		}
 		meta["replacement"] = r
 	}
@@ -106,8 +111,7 @@ func emitCMacro(defNode *sitter.Node, isFunc bool, filePath, fileID, lang string
 		paramSet[p] = true
 	}
 	callSeen := make(map[string]bool)
-	for _, m := range cMacroCallRe.FindAllStringSubmatch(replacement, -1) {
-		callee := m[1]
+	for _, callee := range recoverMacroCallees(replacement, lang) {
 		if paramSet[callee] || cKeywordsInMacroBody[callee] || callSeen[callee] {
 			continue
 		}
@@ -118,4 +122,146 @@ func emitCMacro(defNode *sitter.Node, isFunc bool, filePath, fileID, lang string
 			Origin: graph.OriginASTInferred,
 		})
 	}
+}
+
+// macroBodyMaxLen bounds how much of a macro replacement list is both
+// stored on the node and fed to the sub-parser. Macro bodies are almost
+// always short; a body longer than this is pathological (e.g. a
+// generated table) and is truncated for storage and scanned with the
+// linear regex fallback rather than the tree-sitter parser, keeping
+// recovery cheap and bounded.
+const macroBodyMaxLen = 4096
+
+// macroWrapPrefix / macroWrapSuffix wrap a replacement list in a minimal
+// function body so an expression / statement fragment parses as a
+// well-formed C/C++ translation unit. The leading newline before the
+// closing `;}` keeps a trailing `//` line comment in the body from
+// swallowing the terminator. Recovered names are read from the wrapped
+// source, so the wrapper text never leaks into a callee name and no byte
+// offset translation is needed.
+const (
+	macroWrapPrefix = "void __gx_macro_probe(void){\n"
+	macroWrapSuffix = "\n;}"
+)
+
+// cMacroLang / cppMacroLang lazily build (once) the grammars used to
+// sub-parse a macro body. GetLanguage allocates a fresh wrapper per call,
+// so caching avoids an allocation on every function-like macro.
+var (
+	cMacroLang   = sync.OnceValue(cgrammar.GetLanguage)
+	cppMacroLang = sync.OnceValue(cppgrammar.GetLanguage)
+)
+
+// recoverMacroCallees returns the callee names hidden in a macro
+// replacement list, in source order. It prefers a real tree-sitter
+// sub-parse of the body (which recovers member calls `(o)->run()` and
+// qualified calls `ns::f()` the regex cannot see) and falls back to the
+// regex scan whenever the body cannot be parsed cleanly — a parse
+// failure or any ERROR/MISSING node — so a malformed body never recovers
+// fewer calls than the historical regex behaviour. Pathologically long
+// bodies skip the parser and use the linear regex directly.
+func recoverMacroCallees(replacement, lang string) []string {
+	if len(replacement) > macroBodyMaxLen {
+		return regexMacroCallees(replacement)
+	}
+	if names, ok := subparseMacroCallees(replacement, lang); ok {
+		return names
+	}
+	return regexMacroCallees(replacement)
+}
+
+// regexMacroCallees is the historical scan: every `name(` invocation in
+// the body, in order, before parameter / keyword filtering (applied by
+// the caller).
+func regexMacroCallees(replacement string) []string {
+	matches := cMacroCallRe.FindAllStringSubmatch(replacement, -1)
+	out := make([]string, 0, len(matches))
+	for _, m := range matches {
+		out = append(out, m[1])
+	}
+	return out
+}
+
+// subparseMacroCallees parses the macro body with the C or C++ grammar
+// (selected by the macro's file language) and walks the tree for
+// call_expression callees. It returns (names, true) only on a clean
+// parse; a parse error, an ERROR/MISSING node anywhere in the tree, or a
+// panic from the parser yields (nil, false) so the caller falls back to
+// the regex. parser.ParseFile owns parser-pool safety: it Closes a
+// parser whose parse errored rather than recycling it, so a malformed
+// body cannot poison a pooled parser.
+func subparseMacroCallees(replacement, lang string) (names []string, ok bool) {
+	defer func() {
+		if r := recover(); r != nil {
+			names, ok = nil, false
+		}
+	}()
+	grammar := cMacroLang()
+	if lang == "cpp" {
+		grammar = cppMacroLang()
+	}
+	wrapped := []byte(macroWrapPrefix + replacement + macroWrapSuffix)
+	tree, err := parser.ParseFile(wrapped, grammar)
+	if err != nil {
+		return nil, false
+	}
+	defer tree.Close()
+	root := tree.RootNode()
+	if root == nil || root.HasError() {
+		return nil, false
+	}
+	walkMacroCalls(root, wrapped, &names)
+	return names, true
+}
+
+// walkMacroCalls appends the callee name of every call_expression in the
+// subtree, in source order, descending into arguments so nested calls
+// (`f(g())`) are all recovered.
+func walkMacroCalls(n *sitter.Node, src []byte, out *[]string) {
+	if n == nil {
+		return
+	}
+	if n.Type() == "call_expression" {
+		if name := macroCalleeName(n, src); name != "" {
+			*out = append(*out, name)
+		}
+	}
+	for c := range n.NamedChildren() {
+		walkMacroCalls(c, src, out)
+	}
+}
+
+// macroCalleeName recovers the callee name from a call_expression's
+// `function` child across the three shapes a macro body can hide it in:
+// a plain identifier (`f()`), a field access (`(o)->run()` / `o.run()`),
+// or a qualified name (`ns::f()`).
+func macroCalleeName(call *sitter.Node, src []byte) string {
+	fn := call.ChildByFieldName("function")
+	if fn == nil {
+		return ""
+	}
+	switch fn.Type() {
+	case "identifier":
+		return fn.Content(src)
+	case "field_expression":
+		if field := fn.ChildByFieldName("field"); field != nil {
+			return field.Content(src)
+		}
+	case "qualified_identifier":
+		return rightmostQualifiedName(fn, src)
+	}
+	return ""
+}
+
+// rightmostQualifiedName returns the final segment of a (possibly nested)
+// qualified_identifier — `deep` for `A::B::deep`, `f` for `ns::f`.
+func rightmostQualifiedName(q *sitter.Node, src []byte) string {
+	cur := q
+	for cur != nil && cur.Type() == "qualified_identifier" {
+		cur = cur.ChildByFieldName("name")
+	}
+	if cur != nil && (cur.Type() == "identifier" || cur.Type() == "field_identifier") {
+		return cur.Content(src)
+	}
+	return ""
 }

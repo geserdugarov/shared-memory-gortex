@@ -16,9 +16,9 @@ import (
 // every node-shaped SELECT in the package. It must stay in sync with
 // scanNode. The struct columns (start_column/end_column) sit with the line
 // range; the promoted meta columns (signature/visibility/doc/external/
-// return_type/is_async/is_static/is_abstract/is_exported/updated_at) precede
-// meta.
-const lookupNodeCols = `id, kind, name, qual_name, file_path, start_line, end_line, start_column, end_column, language, repo_prefix, workspace_id, project_id, signature, visibility, doc, external, return_type, is_async, is_static, is_abstract, is_exported, updated_at, meta`
+// return_type/is_async/is_static/is_abstract/is_exported/updated_at/
+// data_class) precede meta.
+const lookupNodeCols = `id, kind, name, qual_name, file_path, start_line, end_line, start_column, end_column, language, repo_prefix, workspace_id, project_id, signature, visibility, doc, external, return_type, is_async, is_static, is_abstract, is_exported, updated_at, data_class, meta`
 const lookupEdgeCols = `from_id, to_id, kind, file_path, line, confidence, confidence_label, origin, tier, cross_repo, meta`
 
 // FindNodesByNameContaining returns nodes whose Name contains substr,

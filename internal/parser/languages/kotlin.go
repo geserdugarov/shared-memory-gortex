@@ -444,6 +444,12 @@ func (e *KotlinExtractor) emitClassOrInterface(m parser.QueryResult, filePath, f
 	emitKotlinAnnotationEdges(kotlinCollectAnnotations(def.Node, src), id, filePath, result, annotationSeen)
 	emitKotlinGenericParamNodes(id, def.Node, src, filePath, startLine, result)
 
+	// A `data class` auto-generates one `componentN()` accessor per
+	// primary-constructor property (in order) plus a `copy()` returning the
+	// class — the compiler really emits these, so model them as members so
+	// destructuring (`val (x, y) = p`) and `p.copy()` chains resolve.
+	emitKotlinDataClassMembers(def.Node, name, id, filePath, startLine, endLine, src, result, seen)
+
 	if enumBody == nil {
 		return
 	}
@@ -477,6 +483,142 @@ func (e *KotlinExtractor) emitClassOrInterface(m parser.QueryResult, filePath, f
 			FilePath: filePath, Line: entryStart,
 		})
 	}
+}
+
+// kotlinIsDataClass reports whether a class_declaration carries the `data`
+// modifier (`modifiers` → `class_modifier` token "data").
+func kotlinIsDataClass(decl *sitter.Node, src []byte) bool {
+	if decl == nil {
+		return false
+	}
+	mods := firstChildOfType(decl, "modifiers")
+	if mods == nil {
+		return false
+	}
+	for c := range mods.NamedChildren() {
+		if c.Type() == "class_modifier" && strings.TrimSpace(c.Content(src)) == "data" {
+			return true
+		}
+	}
+	return false
+}
+
+// kotlinDataClassProperty is one primary-constructor `val`/`var` property of
+// a data class, in declaration order. `typ` is the normalized element type
+// (empty for a primitive / unresolvable annotation).
+type kotlinDataClassProperty struct {
+	name string
+	typ  string
+}
+
+// kotlinPrimaryCtorProperties returns the primary-constructor property
+// parameters of a class declaration, in order. Only `val`/`var` parameters
+// (those carrying a binding_pattern_kind child) are properties; a plain
+// constructor parameter is a local and is skipped — mirroring kotlinFields
+// in the type engine.
+func kotlinPrimaryCtorProperties(decl *sitter.Node, src []byte) []kotlinDataClassProperty {
+	pc := firstChildOfType(decl, "primary_constructor")
+	if pc == nil {
+		return nil
+	}
+	var out []kotlinDataClassProperty
+	for c := range pc.NamedChildren() {
+		if c.Type() != "class_parameter" {
+			continue
+		}
+		if firstChildOfType(c, "binding_pattern_kind") == nil {
+			continue
+		}
+		ident := firstChildOfType(c, "simple_identifier")
+		if ident == nil {
+			continue
+		}
+		name := ident.Content(src)
+		if name == "" {
+			continue
+		}
+		typ := ""
+		if ut := firstChildOfType(c, "user_type"); ut != nil {
+			typ = normalizeKotlinTypeName(ut.Content(src))
+		}
+		out = append(out, kotlinDataClassProperty{name: name, typ: typ})
+	}
+	return out
+}
+
+// kotlinDeclaredMethodNames returns the set of method names a class declares
+// in its own body, so synthesis can yield to a user-written `copy` /
+// `componentN` (an explicitly declared member must win over the synthetic
+// one; emitting both would make the member lookup ambiguous).
+func kotlinDeclaredMethodNames(decl *sitter.Node, src []byte) map[string]bool {
+	out := make(map[string]bool)
+	body := firstChildOfType(decl, "class_body")
+	if body == nil {
+		return out
+	}
+	for c := range body.NamedChildren() {
+		if c.Type() != "function_declaration" {
+			continue
+		}
+		if ident := firstChildOfType(c, "simple_identifier"); ident != nil {
+			out[ident.Content(src)] = true
+		}
+	}
+	return out
+}
+
+// emitKotlinDataClassMembers synthesizes the compiler-generated members of a
+// Kotlin `data class`: `component1()..componentN()` (componentI returns the
+// I-th primary-constructor property's type) and `copy()` (returns the class).
+// They are emitted as KindMethod members (EdgeMemberOf to the class, like the
+// enum-entry / companion-alias members) so the type engine's member lookup
+// resolves `p.componentN()` / `p.copy()` with no engine change, and so they
+// surface in find_usages / get_callers. Each is marked
+// Meta["synthetic"]="data_class" and Meta["generated"]=true — the latter
+// keeps them out of dead-code reporting (they have no hand-written call site
+// by construction). An explicitly declared member of the same name wins:
+// synthesis is skipped for any name the class body already declares.
+func emitKotlinDataClassMembers(decl *sitter.Node, className, ownerID, filePath string, startLine, endLine int, src []byte, result *parser.ExtractionResult, seen map[string]bool) {
+	if !kotlinIsDataClass(decl, src) {
+		return
+	}
+	declared := kotlinDeclaredMethodNames(decl, src)
+	props := kotlinPrimaryCtorProperties(decl, src)
+
+	emit := func(method, returnType string) {
+		if declared[method] {
+			return
+		}
+		memberID := filePath + "::" + className + "." + method
+		if seen[memberID] {
+			return
+		}
+		seen[memberID] = true
+		meta := map[string]any{
+			"receiver":   className,
+			"visibility": "public",
+			"synthetic":  "data_class",
+			"generated":  true,
+		}
+		if returnType != "" {
+			meta["return_type"] = returnType
+		}
+		result.Nodes = append(result.Nodes, &graph.Node{
+			ID: memberID, Kind: graph.KindMethod, Name: method,
+			FilePath: filePath, StartLine: startLine, EndLine: endLine,
+			Language: "kotlin",
+			Meta:     meta,
+		})
+		result.Edges = append(result.Edges, &graph.Edge{
+			From: memberID, To: ownerID, Kind: graph.EdgeMemberOf, FilePath: filePath, Line: startLine,
+		})
+	}
+
+	for i, p := range props {
+		emit(fmt.Sprintf("component%d", i+1), p.typ)
+	}
+	// `copy` returns the data class itself, so `p.copy().componentN()` chains.
+	emit("copy", className)
 }
 
 func (e *KotlinExtractor) emitObject(m parser.QueryResult, filePath, fileID string, src []byte, result *parser.ExtractionResult, seen, annotationSeen map[string]bool) {
@@ -543,6 +685,15 @@ func (e *KotlinExtractor) emitFunction(m parser.QueryResult, filePath, fileID st
 			"visibility": visibility,
 		}
 		kotlinStampModMeta(meta, isAsync, kmpRole)
+		// An extension function (`fun Foo.ext()`) is declared at file scope,
+		// not inside Foo's body, so it is not a structural member of Foo and
+		// its synthetic member_of edge points at a same-file node that, when
+		// Foo lives in another file, does not exist. Mark it so the type
+		// engine can resolve `recv.ext()` against the real receiver type by
+		// name, as a fallback after a real member lookup misses.
+		if ownerKind == "extension" {
+			meta["extension_receiver"] = owner
+		}
 		// Companion-object members dispatch on the TYPE (`Foo.create()`),
 		// so the method is attributed to the enclosing class and flagged
 		// static. Without this an agent can't see that the companion's
@@ -790,41 +941,40 @@ func kotlinStampModMeta(meta map[string]any, isAsync bool, kmpRole string) {
 	}
 }
 
-// kotlinExtensionReceiver returns the receiver type of an extension function
-// (`fun Foo.bar()` -> "Foo"), or "" when fn is not an extension. A leading
-// type-parameter list and the receiver's own generic arguments are stripped, and
-// a dotted receiver is reduced to its last segment.
+// kotlinExtensionReceiver returns the receiver type name of an extension
+// function (`fun Foo.bar()` -> "Foo"), or "" when fn is not an extension.
+// The receiver is the `receiver_type` child that precedes the function name
+// in the function_declaration; a plain `fun free()` has no such child and is
+// not an extension. The bare type name is the last `type_identifier` under
+// the (possibly nullable) `user_type`, which drops a nullable marker
+// (`Foo?` -> "Foo"), generic arguments (`List<T>` -> "List", whose `T` hangs
+// off a nested type_arguments node, not a direct child), and a package
+// qualifier (`com.x.Foo` -> "Foo", whose earlier segments are the leading
+// type_identifier children).
 func kotlinExtensionReceiver(fn *sitter.Node, src []byte) string {
-	if fn == nil {
+	if fn == nil || fn.Type() != "function_declaration" {
 		return ""
 	}
-	header := fn.Content(src)
-	fi := strings.Index(header, "fun ")
-	if fi < 0 {
+	rt := firstChildOfType(fn, "receiver_type")
+	if rt == nil {
 		return ""
 	}
-	header = strings.TrimSpace(header[fi+4:])
-	if strings.HasPrefix(header, "<") {
-		if i := strings.IndexByte(header, '>'); i >= 0 {
-			header = strings.TrimSpace(header[i+1:])
+	ut := firstChildOfType(rt, "user_type")
+	if ut == nil {
+		if nt := firstChildOfType(rt, "nullable_type"); nt != nil {
+			ut = firstChildOfType(nt, "user_type")
 		}
 	}
-	if p := strings.IndexByte(header, '('); p >= 0 {
-		header = header[:p]
-	}
-	header = strings.TrimSpace(header)
-	dot := strings.LastIndexByte(header, '.')
-	if dot < 0 {
+	if ut == nil {
 		return ""
 	}
-	recv := strings.TrimSpace(header[:dot])
-	if i := strings.IndexByte(recv, '<'); i >= 0 {
-		recv = recv[:i]
+	name := ""
+	for i := 0; i < int(ut.ChildCount()); i++ {
+		if c := ut.Child(i); c != nil && c.Type() == "type_identifier" {
+			name = c.Content(src)
+		}
 	}
-	if i := strings.LastIndexByte(recv, '.'); i >= 0 {
-		recv = recv[i+1:]
-	}
-	return strings.TrimSpace(recv)
+	return strings.TrimSpace(name)
 }
 
 func (e *KotlinExtractor) emitImport(m parser.QueryResult, filePath, fileID string, result *parser.ExtractionResult) {

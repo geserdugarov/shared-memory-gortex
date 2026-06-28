@@ -423,7 +423,7 @@ func (e *RubyExtractor) emitMethod(m parser.QueryResult, filePath, fileID string
 	def := m.Captures["method.def"]
 	startLine1 := def.StartLine + 1
 
-	className := rubyDirectClassParent(def.Node, src)
+	className, _ := rubyDirectTypeParent(def.Node, src)
 	if className != "" {
 		id, ok := disambiguateID(seen, filePath+"::"+className+"."+name, startLine1)
 		if !ok {
@@ -542,28 +542,46 @@ func (e *RubyExtractor) emitConstant(m parser.QueryResult, filePath, fileID stri
 
 // --- Helpers --------------------------------------------------------
 
-// rubyDirectClassParent returns the enclosing class name when the
-// method/singleton_method is a direct child of a class's body_statement
-// (mirrors the legacy nested qRbClassMethod / qRbSingletonMethod
-// patterns). Returns "" for nested-in-method definitions or top-level
-// defs, preserving the legacy free-function bucket.
-func rubyDirectClassParent(def *sitter.Node, src []byte) string {
+// rubyDirectTypeParent returns the name of the class or module that
+// directly owns def — def being a direct child of that type's
+// body_statement — and whether the owner is a class (false for a
+// module). Returns "", false for nested-in-method definitions or
+// top-level defs, preserving the legacy free-function bucket. A method
+// defined directly in a module body is a member of that module, the
+// same way a class's method is a member of the class.
+func rubyDirectTypeParent(def *sitter.Node, src []byte) (string, bool) {
 	if def == nil {
-		return ""
+		return "", false
 	}
 	parent := def.Parent()
 	if parent == nil || parent.Type() != "body_statement" {
-		return ""
+		return "", false
 	}
 	grand := parent.Parent()
-	if grand == nil || grand.Type() != "class" {
-		return ""
+	if grand == nil {
+		return "", false
+	}
+	t := grand.Type()
+	if t != "class" && t != "module" {
+		return "", false
 	}
 	nameNode := grand.ChildByFieldName("name")
 	if nameNode == nil {
-		return ""
+		return "", false
 	}
-	return nameNode.Content(src)
+	return nameNode.Content(src), t == "class"
+}
+
+// rubyDirectClassParent returns the enclosing class name when the
+// method/singleton_method is a direct child of a class's body_statement
+// (mirrors the legacy nested qRbClassMethod / qRbSingletonMethod
+// patterns). It is class-only: a `def self.foo` singleton method is
+// only meaningful as a class method, so a module owner yields "".
+func rubyDirectClassParent(def *sitter.Node, src []byte) string {
+	if name, isClass := rubyDirectTypeParent(def, src); isClass {
+		return name
+	}
+	return ""
 }
 
 // railsCallbackMethods enumerates the Rails controller macros that

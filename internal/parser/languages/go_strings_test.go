@@ -207,8 +207,49 @@ func TestLooksLikeRoute(t *testing.T) {
 		"orders.checkout.event": false,
 	}
 	for in, want := range cases {
-		if got := looksLikeRoute(in); got != want {
+		if got := looksLikeRoute(in, ""); got != want {
 			t.Errorf("looksLikeRoute(%q) = %v, want %v", in, got, want)
 		}
+	}
+}
+
+func TestLooksLikeRoute_FilesystemPathRejected(t *testing.T) {
+	// A rooted literal that is a filesystem/config path must not survive the
+	// route guard, even though the old shape heuristic accepted any "/..."
+	// literal. A real route alongside it still passes.
+	if looksLikeRoute("/etc/app.conf", "HandleFunc") {
+		t.Errorf("looksLikeRoute(/etc/app.conf) accepted a config path as a route")
+	}
+	if looksLikeRoute("/Users/zzet/x", "Get") {
+		t.Errorf("looksLikeRoute(/Users/zzet/x) accepted a home path as a route")
+	}
+	if !looksLikeRoute("/api/users", "Get") {
+		t.Errorf("looksLikeRoute(/api/users) wrongly rejected a real route")
+	}
+	if !looksLikeRoute("GET /api/orders", "HandleFunc") {
+		t.Errorf("looksLikeRoute(GET /api/orders) wrongly rejected a net/http route")
+	}
+}
+
+func TestGoStrings_FilesystemPathNotRoute(t *testing.T) {
+	// A route-registration call whose literal is a filesystem/config path no
+	// longer mints a route node, while a real route in the same file still does.
+	src := `package foo
+
+type Mux struct{}
+func (m *Mux) HandleFunc(pattern string, h func()) {}
+
+func Wire(m *Mux) {
+	m.HandleFunc("/etc/app.conf", nil)
+	m.HandleFunc("/api/v1/users", nil)
+}
+`
+	fix := runGoExtract(t, src)
+	strs := fix.nodesByKind[graph.KindString]
+	if len(strs) != 1 {
+		t.Fatalf("expected exactly 1 route (the config path filtered), got %d: %+v", len(strs), strs)
+	}
+	if strs[0].Name != "/api/v1/users" {
+		t.Errorf("expected surviving route /api/v1/users, got %q", strs[0].Name)
 	}
 }

@@ -22,6 +22,35 @@ const maxFileBytes = 4 << 20
 // grounded but not type-checked.
 const astConfidence = 0.95
 
+// inferredConfidence is the graded confidence stamped on edges this
+// engine derives by a type heuristic rather than a direct structural
+// match (e.g. a receiver type narrowed by inference). Honestly weaker
+// than astConfidence, yet well above the name-only text-match floor.
+// The edge still carries OriginASTResolved provenance — only the
+// confidence and the resolution_strategy label distinguish it from the
+// direct path.
+const inferredConfidence = 0.7
+
+// resolutionStrategy labels how the engine derived an edge it emits. It
+// rides on Meta["resolution_strategy"] for graded (non-direct)
+// emissions so consumers can see the inference path; the direct path
+// carries no label. Extensible: later inference forms add their own
+// constants.
+type resolutionStrategy string
+
+const (
+	// strategyDirect is the default: a structurally grounded
+	// tree-sitter resolution. Emitted at astConfidence with no
+	// resolution_strategy label (its zero value is the empty string, so
+	// the direct path stamps nothing extra).
+	strategyDirect resolutionStrategy = ""
+	// strategyInferred marks an edge derived by a type heuristic rather
+	// than a direct scope match — emitted at inferredConfidence and
+	// labelled so it stays honestly distinguishable from a direct
+	// resolution.
+	strategyInferred resolutionStrategy = "inferred"
+)
+
 // extendsWalkDepth bounds the inherited-method lookup walk up the
 // resolved EdgeExtends chain.
 const extendsWalkDepth = 3
@@ -103,6 +132,16 @@ func analyzeFile(spec *LangSpec, ref fileRef) (*fileFacts, error) {
 	return facts, nil
 }
 
+// resolvedAlias is a trait-use alias resolved against the graph: on the
+// using type, `alias` routes to method `method`. When trait is non-nil
+// the method is looked up on that specific trait; otherwise it is looked
+// up on the using type's own inheritance closure.
+type resolvedAlias struct {
+	alias  string
+	trait  *graph.Node
+	method string
+}
+
 // applier owns every graph interaction of an enrichment pass. It runs
 // single-goroutine so in-place edge mutations never race.
 type applier struct {
@@ -110,10 +149,38 @@ type applier struct {
 	spec         *LangSpec
 	provider     string
 	stampedNodes map[string]*graph.Node // collected for one AddBatch round-trip
+	// aliases maps a using type's node ID to its trait-use alias
+	// adaptations, built in the alias phase and consulted when a call's
+	// method name is not a direct or inherited member.
+	aliases map[string][]resolvedAlias
+	// extensions indexes the language's extension functions by
+	// (receiver-type-name, method-name). An extension `fun Foo.ext()` is
+	// callable as `recv.ext()` on any Foo receiver but is declared at file
+	// scope, so it is not a structural member of Foo (and cross-file its
+	// synthetic member_of edge points at a same-file phantom of the
+	// receiver type). The call phase consults this index as a FALLBACK,
+	// only after a real member lookup misses, so a real member of the same
+	// name always wins. nil until the first lookup lazily builds it; built
+	// only for specs that set ExtensionFunctions.
+	extensions   map[extKey][]*graph.Node
+	extensionsOK bool
+}
+
+// extKey indexes an extension function by its receiver type name and its
+// own method name — the pair a `recv.method()` call resolves against.
+type extKey struct {
+	receiver string
+	method   string
 }
 
 func newApplier(g graph.Store, spec *LangSpec, provider string) *applier {
-	return &applier{g: g, spec: spec, provider: provider, stampedNodes: make(map[string]*graph.Node)}
+	return &applier{
+		g:            g,
+		spec:         spec,
+		provider:     provider,
+		stampedNodes: make(map[string]*graph.Node),
+		aliases:      make(map[string][]resolvedAlias),
+	}
 }
 
 // receiverTypeKinds is the node-kind set a call receiver's type may
@@ -197,6 +264,11 @@ func (a *applier) applyAll(all []*fileFacts, res *semantic.EnrichResult) {
 	for i, facts := range all {
 		for _, mf := range facts.metas {
 			a.applyMeta(idxs[i], mf, res)
+		}
+	}
+	for i, facts := range all {
+		for _, af := range facts.aliases {
+			a.applyAlias(idxs[i], af)
 		}
 	}
 	for i, facts := range all {
@@ -338,10 +410,12 @@ func pathSegSuffix(cand, want string) bool {
 
 // methodOn resolves a method name against a type's member set,
 // following resolved EdgeExtends links for inherited methods. Returns
-// nil when the type (and its ancestry) declares zero or several
-// same-named members — overload sets stay untouched rather than
-// half-guessed.
-func (a *applier) methodOn(typeNode *graph.Node, method string, depth int) *graph.Node {
+// nil when the type (and its ancestry) declares zero same-named
+// members. When it declares several (an overload set), the call site's
+// argument count (argCount) may still pick a unique target by arity;
+// argCount < 0 means the arity is unknown, in which case an overload
+// set stays untouched rather than half-guessed.
+func (a *applier) methodOn(typeNode *graph.Node, method string, argCount, depth int) *graph.Node {
 	if typeNode == nil || depth > extendsWalkDepth {
 		return nil
 	}
@@ -354,7 +428,12 @@ func (a *applier) methodOn(typeNode *graph.Node, method string, depth int) *grap
 	var matches []*graph.Node
 	if len(fromIDs) > 0 {
 		for _, n := range a.g.GetNodesByIDs(fromIDs) {
-			if n.Kind == graph.KindMethod && n.Name == method {
+			// An extension function carries a synthetic member_of edge to
+			// its receiver type but is NOT a real member — a real member of
+			// the same name must shadow it. Exclude extensions here so the
+			// direct/inherited lookup sees only real members; the call phase
+			// resolves extensions separately, as a fallback.
+			if n.Kind == graph.KindMethod && n.Name == method && !nodeIsExtension(n) {
 				matches = append(matches, n)
 			}
 		}
@@ -363,31 +442,126 @@ func (a *applier) methodOn(typeNode *graph.Node, method string, depth int) *grap
 	case 1:
 		return matches[0]
 	case 0:
+		// Climb every inheritance edge the spec recognises — the
+		// supertype chain plus, where the language widens it, the
+		// mixin / include edges that pull a module's methods in. A
+		// member contributed by exactly one ancestor resolves; one
+		// contributed by several distinct ancestors (ambiguous across
+		// mixins or supers) stays unresolved rather than half-guessed.
+		// The depth bound above guards diamonds and mutual mixins from
+		// looping.
+		inheritKinds := a.spec.inheritEdgeKinds()
+		parentKinds := a.supertypeKinds()
+		var found *graph.Node
 		for _, e := range a.g.GetOutEdges(typeNode.ID) {
-			if e.Kind != graph.EdgeExtends || graph.IsUnresolvedTarget(e.To) {
+			if graph.IsUnresolvedTarget(e.To) || !edgeKindIn(e.Kind, inheritKinds) {
 				continue
 			}
 			parent := a.g.GetNode(e.To)
-			if parent == nil || (parent.Kind != graph.KindType && parent.Kind != graph.KindInterface) {
+			if parent == nil || !parentKinds[parent.Kind] {
 				continue
 			}
-			if m := a.methodOn(parent, method, depth+1); m != nil {
-				return m
+			m := a.methodOn(parent, method, argCount, depth+1)
+			if m == nil {
+				continue
 			}
+			if found != nil && found.ID != m.ID {
+				return nil
+			}
+			found = m
 		}
+		return found
+	}
+	// Several same-named members: an overload set. Today this is always
+	// skipped. Narrow that skip with an arity filter — when the call
+	// site's argument count uniquely selects ONE fixed-arity candidate,
+	// resolve to it; in every other shape keep skipping (see
+	// disambiguateByArity).
+	return a.disambiguateByArity(matches, argCount)
+}
+
+// disambiguateByArity selects the unique member of an overload set whose
+// declared parameter count equals the call site's argument count. It
+// resolves ONLY among FIXED-arity candidates and only when exactly one
+// of them matches: a variadic candidate that could also accept the call
+// (its minimum arity is satisfied) makes the set ambiguous, because it
+// would shadow the fixed match — in that case, and whenever the arity is
+// unknown (argCount < 0), zero candidates match, or more than one fixed
+// candidate matches, it returns nil so the caller keeps skipping.
+func (a *applier) disambiguateByArity(matches []*graph.Node, argCount int) *graph.Node {
+	if argCount < 0 {
+		return nil
+	}
+	var fixedHit *graph.Node
+	fixedHits := 0
+	for _, m := range matches {
+		count, variadic := a.paramArity(m)
+		if variadic {
+			// A variadic candidate accepts any arg count at or above its
+			// minimum (non-variadic) arity. If the call could land here, the
+			// set cannot be disambiguated safely.
+			if argCount >= count-1 {
+				return nil
+			}
+			continue
+		}
+		if count == argCount {
+			fixedHit = m
+			fixedHits++
+		}
+	}
+	if fixedHits == 1 {
+		return fixedHit
 	}
 	return nil
 }
 
+// paramArity returns a method's declared parameter count and whether its
+// last parameter is variadic, derived from the KindParam nodes the
+// extractor links to it via EdgeParamOf. A variadic parameter counts as
+// one toward the total; its presence widens the method's acceptable
+// arity to [count-1, +inf). A method whose extractor emits no parameter
+// nodes reports count 0 — languages that opt into arity disambiguation
+// via the CallArgCount hook must emit parameter nodes for the count to
+// be meaningful.
+func (a *applier) paramArity(m *graph.Node) (count int, variadic bool) {
+	for _, e := range a.g.GetInEdges(m.ID) {
+		if e.Kind != graph.EdgeParamOf {
+			continue
+		}
+		count++
+		if p := a.g.GetNode(e.From); p != nil && p.Meta != nil {
+			if v, _ := p.Meta["variadic"].(bool); v {
+				variadic = true
+			}
+		}
+	}
+	return count, variadic
+}
+
+// edgeKindIn reports whether k is one of kinds.
+func edgeKindIn(k graph.EdgeKind, kinds []graph.EdgeKind) bool {
+	for _, want := range kinds {
+		if k == want {
+			return true
+		}
+	}
+	return false
+}
+
 // callableReturnType resolves a bare callee name to its graph
 // return_type: same-file declaration first, then a repo-unique
-// function. The returned name is normalized to the bare type name.
-func (a *applier) callableReturnType(idx *fileIndex, callee string) string {
+// function. The returned name is normalized to the bare type name. When
+// no in-repo function grounds the callee, the stdlib seed table is
+// consulted as a LAST RESORT — an in-repo symbol always wins. The bool
+// reports whether the type came from the seed (a heuristic, graded at the
+// inferred confidence band) rather than a grounded in-repo return type.
+func (a *applier) callableReturnType(idx *fileIndex, callee string) (string, bool) {
 	var match *graph.Node
 	for _, n := range idx.funcs {
 		if n.Name == callee {
 			if match != nil {
-				return "" // same-file overloads: ambiguous
+				return "", false // same-file overloads: ambiguous
 			}
 			match = n
 		}
@@ -408,16 +582,28 @@ func (a *applier) callableReturnType(idx *fileIndex, callee string) string {
 				continue
 			}
 			if match != nil {
-				return ""
+				return "", false
 			}
 			match = c
 		}
 	}
-	if match == nil || match.Meta == nil {
-		return ""
+	if match != nil {
+		// An in-repo callee resolved the name — its declared return type
+		// (possibly empty) wins; the seed is never consulted.
+		if match.Meta == nil {
+			return "", false
+		}
+		rt, _ := match.Meta["return_type"].(string)
+		return a.spec.normalize(rt), false
 	}
-	rt, _ := match.Meta["return_type"].(string)
-	return a.spec.normalize(rt)
+	// No in-repo function carries this name: fall back to the curated
+	// stdlib seed table for a well-known free-function return type.
+	if a.spec.StdlibReturnType != nil {
+		if rt, ok := a.spec.StdlibReturnType(callee, ""); ok {
+			return a.spec.normalize(rt), true
+		}
+	}
+	return "", false
 }
 
 // enclosingCallable returns the innermost function/method node
@@ -439,22 +625,23 @@ func (idx *fileIndex) enclosingCallable(line int) *graph.Node {
 // --- Call application -------------------------------------------------
 
 func (a *applier) applyCall(idx *fileIndex, cf callFact, res *semantic.EnrichResult) {
-	recvType := cf.recvType
-	if recvType == "" && cf.recvPendingCallee != "" {
-		recvType = a.callableReturnType(idx, cf.recvPendingCallee)
-	}
-	var typeNode *graph.Node
-	if recvType != "" {
-		typeNode = a.resolveTypeNode(idx, recvType)
-	} else if cf.recvIdent != "" {
-		// Static / type-qualified call: only when the identifier is a
-		// real type in scope of this file's imports.
-		typeNode = a.resolveTypeNode(idx, cf.recvIdent)
-	}
+	typeNode, inferred := a.callReceiverType(idx, &cf)
 	if typeNode == nil {
 		return
 	}
-	target := a.methodOn(typeNode, cf.method, 0)
+	target := a.methodOn(typeNode, cf.method, cf.arity(), 0)
+	if target == nil {
+		// A trait-use alias renames the member onto the using type; the
+		// alias name is not a member of the type or its ancestry, so the
+		// direct climb misses it. The alias map routes it through.
+		target = a.resolveAlias(typeNode, cf.method)
+	}
+	if target == nil {
+		// No real (own or inherited) member and no alias — try an extension
+		// function declared on the receiver type. A real member would have
+		// resolved above, so this honours members-shadow-extensions.
+		target = a.extensionMethod(typeNode, cf.method)
+	}
 	if target == nil {
 		return
 	}
@@ -462,7 +649,264 @@ func (a *applier) applyCall(idx *fileIndex, cf callFact, res *semantic.EnrichRes
 	if caller == nil || caller.ID == target.ID {
 		return
 	}
-	a.upgradeOrCreateCall(caller, target, cf, idx.facts.file, res)
+	strategy, confidence := strategyDirect, astConfidence
+	if inferred {
+		// The receiver type was derived through a chained return-type
+		// rewrite rather than a direct binding — grade the edge honestly.
+		strategy, confidence = strategyInferred, inferredConfidence
+	}
+	a.upgradeOrCreateCall(caller, target, cf, idx.facts.file, res, strategy, confidence)
+}
+
+// callReceiverType resolves a call's receiver to a graph type node. The
+// bool reports whether the type was derived by inference — a chained
+// return-type rewrite — rather than a direct binding; an inferred
+// receiver lands its call edge at the graded confidence band.
+func (a *applier) callReceiverType(idx *fileIndex, cf *callFact) (*graph.Node, bool) {
+	if cf.recvChain != nil {
+		return a.chainReturnType(idx, cf.recvChain), true
+	}
+	recvType := cf.recvType
+	inferred := cf.inferred
+	if recvType == "" && cf.recvPendingCallee != "" {
+		rt, seeded := a.callableReturnType(idx, cf.recvPendingCallee)
+		recvType = rt
+		// A seed-derived receiver type is a heuristic, not a grounded
+		// return type — grade any call through it at the inferred band.
+		inferred = inferred || seeded
+	}
+	if recvType != "" {
+		// cf.inferred is set when recvType came from a guard narrowing;
+		// seeded marks a stdlib-table return type. A direct annotation /
+		// constructor / propagation / in-repo return type leaves both
+		// false, so the direct path is unchanged.
+		return a.resolveTypeNode(idx, recvType), inferred
+	}
+	if cf.recvIdent != "" {
+		// Static / type-qualified call: only when the identifier is a
+		// real type in scope of this file's imports.
+		return a.resolveTypeNode(idx, cf.recvIdent), false
+	}
+	return nil, false
+}
+
+// chainReturnType types the result of a method call standing in receiver
+// position (`a.step().done()`): it resolves the inner receiver and method,
+// reads the inner method's declared return type, and applies the fluent
+// self / trait return rewrite so a trait method returning the trait type,
+// called on a using class, types as that class. Returns nil when any link
+// fails to ground — a missing edge beats a wrong one.
+func (a *applier) chainReturnType(idx *fileIndex, inner *callFact) *graph.Node {
+	// Stdlib element access on a typed collection builder:
+	// `mutableListOf<Foo>().first()` types to Foo. Consulted before the
+	// real-member path so the captured element type is preferred over the
+	// (unresolvable, stdlib) container type.
+	if elem := a.stdlibElementType(idx, inner); elem != nil {
+		return elem
+	}
+	recv, _ := a.callReceiverType(idx, inner)
+	if recv == nil {
+		return nil
+	}
+	m := a.methodOn(recv, inner.method, inner.arity(), 0)
+	if m == nil {
+		m = a.resolveAlias(recv, inner.method)
+	}
+	if m == nil {
+		// No in-repo member grounds the call. As a last resort, seed a
+		// well-known stdlib transform's return type on the resolved
+		// container (`Collection::map` -> Collection), so a fluent stdlib
+		// chain keeps its type even where the container's members are not
+		// declared in-repo.
+		if a.spec.StdlibReturnType != nil {
+			if rt, ok := a.spec.StdlibReturnType(inner.method, recv.Name); ok {
+				return a.resolveTypeNode(idx, a.spec.normalize(rt))
+			}
+		}
+		return nil
+	}
+	return a.effectiveReturnType(idx, m, recv)
+}
+
+// stdlibElementType types a stdlib collection element access whose receiver
+// is a typed collection builder: `mutableListOf<Foo>().first()` resolves to
+// the element type Foo. It fires only when the inner call is a bare builder
+// call carrying an explicit type argument and the method is a seeded element
+// accessor; otherwise it returns nil and the normal member path runs.
+func (a *applier) stdlibElementType(idx *fileIndex, inner *callFact) *graph.Node {
+	if a.spec.StdlibElementAccess == nil {
+		return nil
+	}
+	if inner.recvPendingCallee == "" || inner.recvCallTypeArg == "" {
+		return nil
+	}
+	if !a.spec.StdlibElementAccess(inner.recvPendingCallee, inner.method) {
+		return nil
+	}
+	return a.resolveTypeNode(idx, a.spec.normalize(inner.recvCallTypeArg))
+}
+
+// effectiveReturnType resolves a method's declared return type to a graph
+// type node, applying the fluent return rewrite: a method returning
+// `self` / `static` types as the receiver, and a TRAIT method that
+// returns its own trait name, reached through a using class, rebinds to
+// that using class. Any other named return type resolves normally.
+func (a *applier) effectiveReturnType(idx *fileIndex, m, receiver *graph.Node) *graph.Node {
+	rt := a.spec.normalize(methodReturnTypeName(m))
+	if rt == "" {
+		return nil
+	}
+	if isSelfReturn(rt) {
+		return receiver
+	}
+	// A trait method whose return type IS the trait itself, reached
+	// through a class that uses the trait, fluently returns the using
+	// class — rebind. Restricted to trait owners (Meta kind == "trait")
+	// and to the case where the method was inherited (owner != receiver),
+	// so a class method returning its own class is left to resolve
+	// normally (it already lands on the right type).
+	if owner := a.ownerType(m); owner != nil && owner.ID != receiver.ID &&
+		isTraitNode(owner) && rt == owner.Name {
+		return receiver
+	}
+	return a.resolveTypeNode(idx, rt)
+}
+
+// ownerType returns the type a method is a member of, following its
+// EdgeMemberOf link; nil when the method has no resolved owner.
+func (a *applier) ownerType(m *graph.Node) *graph.Node {
+	for _, e := range a.g.GetOutEdges(m.ID) {
+		if e.Kind == graph.EdgeMemberOf {
+			if owner := a.g.GetNode(e.To); owner != nil {
+				return owner
+			}
+		}
+	}
+	return nil
+}
+
+// applyAlias resolves one trait-use alias adaptation against the graph
+// and records it under the using type's node ID for the call phase. A
+// qualified alias whose trait cannot be resolved is dropped rather than
+// guessed.
+func (a *applier) applyAlias(idx *fileIndex, af aliasFact) {
+	typeNode := idx.types[af.typeName]
+	if typeNode == nil {
+		return
+	}
+	var traitNode *graph.Node
+	if af.trait != "" {
+		if traitNode = a.resolveSuperNode(idx, af.trait); traitNode == nil {
+			return
+		}
+	}
+	a.aliases[typeNode.ID] = append(a.aliases[typeNode.ID], resolvedAlias{
+		alias: af.alias, trait: traitNode, method: af.method,
+	})
+}
+
+// resolveAlias routes a method name through a trait-use alias on the
+// type: the aliased name resolves to the original trait member. Returns
+// nil when no alias matches or the original member does not ground.
+func (a *applier) resolveAlias(typeNode *graph.Node, method string) *graph.Node {
+	for _, al := range a.aliases[typeNode.ID] {
+		if al.alias != method {
+			continue
+		}
+		owner := al.trait
+		if owner == nil {
+			owner = typeNode
+		}
+		// The alias path carries no call site, so its arity is unknown
+		// (-1): an aliased overload set stays un-narrowed, as before.
+		if m := a.methodOn(owner, al.method, -1, 0); m != nil {
+			return m
+		}
+	}
+	return nil
+}
+
+// nodeIsExtension reports whether a method node is an extension function —
+// a top-level callable declared with a receiver type, stamped by the
+// extractor with Meta["extension_receiver"]. Such a node is callable as a
+// member of its receiver but is not a structural member, so it is excluded
+// from the real-member lookup and resolved only as a fallback.
+func nodeIsExtension(n *graph.Node) bool {
+	if n == nil || n.Meta == nil {
+		return false
+	}
+	r, _ := n.Meta["extension_receiver"].(string)
+	return r != ""
+}
+
+// extensionMethod resolves a method name against the extension functions
+// declared on the receiver type. It is consulted ONLY after a real member
+// lookup (direct, inherited, and alias) misses, so a real member of the
+// same name always wins — even an ambiguous real overload set keeps the
+// extension from resolving, because the type genuinely declares the method.
+// Resolution is on the exact receiver type name within the receiver's repo;
+// a name claimed by more than one extension on that receiver stays
+// unresolved rather than guessed. Returns nil unless the spec opts in.
+func (a *applier) extensionMethod(typeNode *graph.Node, method string) *graph.Node {
+	if typeNode == nil || !a.spec.ExtensionFunctions {
+		return nil
+	}
+	if a.typeHasRealMember(typeNode, method) {
+		return nil
+	}
+	a.buildExtensionIndex()
+	var hit *graph.Node
+	for _, m := range a.extensions[extKey{receiver: typeNode.Name, method: method}] {
+		if m.RepoPrefix != typeNode.RepoPrefix {
+			continue
+		}
+		if hit != nil {
+			return nil // two extensions claim this receiver+name — ambiguous.
+		}
+		hit = m
+	}
+	return hit
+}
+
+// typeHasRealMember reports whether the type declares a real (non-extension)
+// method of this name directly. It guards the extension fallback so an
+// ambiguous real overload set — which makes methodOn return nil without
+// meaning "no member" — never resolves to an extension instead.
+func (a *applier) typeHasRealMember(typeNode *graph.Node, method string) bool {
+	for _, e := range a.g.GetInEdges(typeNode.ID) {
+		if e.Kind != graph.EdgeMemberOf {
+			continue
+		}
+		n := a.g.GetNode(e.From)
+		if n != nil && n.Kind == graph.KindMethod && n.Name == method && !nodeIsExtension(n) {
+			return true
+		}
+	}
+	return false
+}
+
+// buildExtensionIndex lazily indexes every extension function in the graph
+// (KindMethod nodes carrying Meta["extension_receiver"], in the spec's
+// languages) by (normalized receiver type name, method name). Built once
+// per applier, on first use; a no-op for specs that never call it.
+func (a *applier) buildExtensionIndex() {
+	if a.extensionsOK {
+		return
+	}
+	a.extensionsOK = true
+	a.extensions = make(map[extKey][]*graph.Node)
+	lang := a.languageSet()
+	for n := range a.g.NodesByKind(graph.KindMethod) {
+		if n.Meta == nil || !lang[n.Language] || n.Name == "" {
+			continue
+		}
+		recv, _ := n.Meta["extension_receiver"].(string)
+		if recv == "" {
+			continue
+		}
+		k := extKey{receiver: a.spec.normalize(recv), method: n.Name}
+		a.extensions[k] = append(a.extensions[k], n)
+	}
 }
 
 // upgradeOrCreateCall lands a grounded call resolution on the graph:
@@ -470,11 +914,11 @@ func (a *applier) applyCall(idx *fileIndex, cf callFact, res *semantic.EnrichRes
 // weaker-tier or still-unresolved edge at the same line, otherwise add
 // a fresh edge. Edges that already carry compiler/AST-grade provenance
 // pointing elsewhere are never overridden.
-func (a *applier) upgradeOrCreateCall(caller, target *graph.Node, cf callFact, file string, res *semantic.EnrichResult) {
+func (a *applier) upgradeOrCreateCall(caller, target *graph.Node, cf callFact, file string, res *semantic.EnrichResult, strategy resolutionStrategy, confidence float64) {
 	outs := a.g.GetOutEdges(caller.ID)
 	for _, e := range outs {
 		if e.Kind == graph.EdgeCalls && e.To == target.ID {
-			if a.confirmAST(e) {
+			if a.confirmCall(e, strategy, confidence) {
 				res.EdgesConfirmed++
 			}
 			return
@@ -496,12 +940,89 @@ func (a *applier) upgradeOrCreateCall(caller, target *graph.Node, cf callFact, f
 		oldTo := e.To
 		e.To = target.ID
 		a.g.ReindexEdge(e, oldTo)
-		a.confirmAST(e)
+		a.confirmCall(e, strategy, confidence)
 		res.EdgesConfirmed++
 		return
 	}
-	a.addASTEdge(caller.ID, target.ID, graph.EdgeCalls, file, cf.line)
+	a.addASTEdge(caller.ID, target.ID, graph.EdgeCalls, file, cf.line, strategy, confidence)
 	res.EdgesAdded++
+}
+
+// confirmCall lands the provenance of a resolved call edge at the band
+// the resolution earned: the direct path raises it to the AST ceiling
+// (confirmAST), the inferred path stamps the graded band and the
+// resolution_strategy label without ever downgrading a stronger edge.
+func (a *applier) confirmCall(e *graph.Edge, strategy resolutionStrategy, confidence float64) bool {
+	if strategy == strategyDirect {
+		return a.confirmAST(e)
+	}
+	return a.confirmInferred(e, confidence)
+}
+
+// confirmInferred stamps the graded inferred band on an edge the engine
+// resolved by a return-type rewrite: OriginASTResolved provenance at the
+// honest inferred confidence, the inferred resolution_strategy label,
+// and the provider — never downgrading an edge that already carries
+// stronger provenance or a higher confidence.
+func (a *applier) confirmInferred(e *graph.Edge, confidence float64) bool {
+	if graph.OriginRank(effectiveOrigin(e)) > graph.OriginRank(graph.OriginASTResolved) {
+		return false
+	}
+	changed := false
+	if effectiveOrigin(e) != graph.OriginASTResolved {
+		a.g.SetEdgeProvenance(e, graph.OriginASTResolved)
+		changed = true
+	}
+	if e.Meta == nil {
+		e.Meta = make(map[string]any)
+	}
+	if s, _ := e.Meta["semantic_source"].(string); s == "" {
+		e.Meta["semantic_source"] = a.provider
+		changed = true
+	}
+	if rs, _ := e.Meta["resolution_strategy"].(string); rs == "" {
+		e.Meta["resolution_strategy"] = string(strategyInferred)
+		changed = true
+	}
+	if e.Confidence < confidence {
+		e.Confidence = confidence
+		e.ConfidenceLabel = graph.ConfidenceLabelFor(e.Kind, confidence)
+		changed = true
+	}
+	if changed {
+		a.persistEdgeRow(e)
+	}
+	return changed
+}
+
+// methodReturnTypeName returns a method node's declared return type as
+// recorded in Meta["return_type"], "" when absent.
+func methodReturnTypeName(m *graph.Node) string {
+	if m == nil || m.Meta == nil {
+		return ""
+	}
+	rt, _ := m.Meta["return_type"].(string)
+	return rt
+}
+
+// isTraitNode reports whether a type node was extracted as a trait
+// (Meta kind == "trait"), the marker the PHP extractor stamps.
+func isTraitNode(n *graph.Node) bool {
+	if n == nil || n.Meta == nil {
+		return false
+	}
+	k, _ := n.Meta["kind"].(string)
+	return k == "trait"
+}
+
+// isSelfReturn reports whether a normalized return type names the
+// receiver's own type — the fluent self / late-static-binding forms.
+func isSelfReturn(t string) bool {
+	switch t {
+	case "self", "static", "$this", "this":
+		return true
+	}
+	return false
 }
 
 // --- Supertype application --------------------------------------------
@@ -562,11 +1083,11 @@ func (a *applier) applySuper(idx *fileIndex, sf superFact, res *semantic.EnrichR
 		// correct kind instead, mirroring how the compiler-grade providers
 		// only ever add new edges rather than flip an existing one's kind.
 		a.g.RemoveEdge(e.From, e.To, e.Kind)
-		a.addASTEdge(typeNode.ID, superNode.ID, kind, idx.facts.file, sf.line)
+		a.addASTEdge(typeNode.ID, superNode.ID, kind, idx.facts.file, sf.line, strategyDirect, astConfidence)
 		res.EdgesAdded++
 		return
 	}
-	a.addASTEdge(typeNode.ID, superNode.ID, kind, idx.facts.file, sf.line)
+	a.addASTEdge(typeNode.ID, superNode.ID, kind, idx.facts.file, sf.line, strategyDirect, astConfidence)
 	res.EdgesAdded++
 }
 
@@ -687,22 +1208,66 @@ func (a *applier) persistEdgeRow(e *graph.Edge) {
 	}
 }
 
-func (a *applier) addASTEdge(from, to string, kind graph.EdgeKind, file string, line int) *graph.Edge {
+// addASTEdge mints an AST-grade resolution edge. The default direct
+// path (strategyDirect, astConfidence) keeps the structurally-grounded
+// confidence and carries no resolution_strategy label — its callers
+// have already arbitrated the edge state before reaching here, so it
+// adds unconditionally exactly as before. A graded path (e.g.
+// strategyInferred, inferredConfidence) emits the same OriginASTResolved
+// provenance at a lower, honest confidence and stamps
+// Meta["resolution_strategy"] with its label. A graded emission never
+// clobbers or downgrades a pre-existing equal-or-stronger edge on the
+// same (from,to,kind): on contention the stronger edge is returned
+// untouched.
+func (a *applier) addASTEdge(from, to string, kind graph.EdgeKind, file string, line int, strategy resolutionStrategy, confidence float64) *graph.Edge {
+	if strategy != strategyDirect {
+		if existing := a.strongerEdge(from, to, kind, confidence); existing != nil {
+			return existing
+		}
+	}
 	e := &graph.Edge{
 		From:            from,
 		To:              to,
 		Kind:            kind,
 		FilePath:        file,
 		Line:            line,
-		Confidence:      astConfidence,
-		ConfidenceLabel: graph.ConfidenceLabelFor(kind, astConfidence),
+		Confidence:      confidence,
+		ConfidenceLabel: graph.ConfidenceLabelFor(kind, confidence),
 		Origin:          graph.OriginASTResolved,
 		Meta: map[string]any{
 			"semantic_source": a.provider,
 		},
 	}
+	if strategy != strategyDirect {
+		e.Meta["resolution_strategy"] = string(strategy)
+	}
 	a.g.AddEdge(e)
 	return e
+}
+
+// strongerEdge returns an existing (from->to, kind) edge whose
+// provenance outranks the AST-grade origin a graded emission would
+// stamp — or whose confidence is equal-or-higher at the same rank — so
+// a lower-confidence inferred edge yields to it instead of downgrading
+// it. Returns nil when no such edge exists. Graded emissions stay at
+// OriginASTResolved, so the rank floor is that tier: a pre-existing LSP
+// edge (higher rank) or a direct AST edge (same rank, higher
+// confidence) both win.
+func (a *applier) strongerEdge(from, to string, kind graph.EdgeKind, confidence float64) *graph.Edge {
+	gradedRank := graph.OriginRank(graph.OriginASTResolved)
+	for _, e := range a.g.GetOutEdges(from) {
+		if e.Kind != kind || e.To != to {
+			continue
+		}
+		rank := graph.OriginRank(effectiveOrigin(e))
+		if rank > gradedRank {
+			return e
+		}
+		if rank == gradedRank && e.Confidence >= confidence {
+			return e
+		}
+	}
+	return nil
 }
 
 // claimable reports whether the engine may rewire this edge's target:

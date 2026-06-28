@@ -40,6 +40,7 @@ func JavaSpec() *LangSpec {
 		},
 		LocalBinding: javaLocalBinding,
 		Call:         javaCall,
+		CallArgCount: javaCallArgCount,
 		NewExprType: func(n *sitter.Node, src []byte) string {
 			if n.Type() != "object_creation_expression" {
 				return ""
@@ -57,6 +58,11 @@ func JavaSpec() *LangSpec {
 			return fieldText(n, "field", src), true
 		},
 		Imports: javaImports,
+		// A higher-order collection call whose lambda's first parameter is the
+		// element type (`xs.forEach(x -> x.foo())`) binds that parameter to the
+		// receiver's element type and re-walks the body, so an inner member call
+		// on the element resolves.
+		CollectionLambda: javaCollectionLambda,
 	}
 }
 
@@ -65,8 +71,7 @@ func javaSupertypes(n *sitter.Node, src []byte) []SuperRef {
 	switch n.Type() {
 	case "class_declaration":
 		if sup := n.ChildByFieldName("superclass"); sup != nil {
-			for i := 0; i < int(sup.NamedChildCount()); i++ {
-				c := sup.NamedChild(i)
+			for c := range sup.NamedChildren() {
 				switch c.Type() {
 				case "type_identifier", "generic_type", "scoped_type_identifier":
 					out = append(out, SuperRef{Name: c.Content(src), Kind: graph.EdgeExtends, Line: nodeLine(c)})
@@ -103,15 +108,15 @@ func javaTypeList(n *sitter.Node, src []byte, kind graph.EdgeKind) []SuperRef {
 		}
 		switch c.Type() {
 		case "type_list":
-			for i := 0; i < int(c.NamedChildCount()); i++ {
-				visit(c.NamedChild(i))
+			for child := range c.NamedChildren() {
+				visit(child)
 			}
 		case "type_identifier", "generic_type", "scoped_type_identifier":
 			out = append(out, SuperRef{Name: c.Content(src), Kind: kind, Line: nodeLine(c)})
 		}
 	}
-	for i := 0; i < int(n.NamedChildCount()); i++ {
-		visit(n.NamedChild(i))
+	for child := range n.NamedChildren() {
+		visit(child)
 	}
 	return out
 }
@@ -122,14 +127,12 @@ func javaFields(n *sitter.Node, src []byte) []Binding {
 		return nil
 	}
 	var out []Binding
-	for i := 0; i < int(body.NamedChildCount()); i++ {
-		c := body.NamedChild(i)
+	for c := range body.NamedChildren() {
 		if c.Type() != "field_declaration" {
 			continue
 		}
 		typ := fieldText(c, "type", src)
-		for j := 0; j < int(c.NamedChildCount()); j++ {
-			d := c.NamedChild(j)
+		for d := range c.NamedChildren() {
 			if d.Type() != "variable_declarator" {
 				continue
 			}
@@ -149,8 +152,7 @@ func javaParams(fn *sitter.Node, src []byte) []Binding {
 		return nil
 	}
 	var out []Binding
-	for i := 0; i < int(params.NamedChildCount()); i++ {
-		p := params.NamedChild(i)
+	for p := range params.NamedChildren() {
 		switch p.Type() {
 		case "formal_parameter", "spread_parameter":
 			name := fieldText(p, "name", src)
@@ -208,10 +210,149 @@ func javaCall(n *sitter.Node, src []byte) (*sitter.Node, string, bool) {
 	return obj, fieldText(n, "name", src), true
 }
 
+// javaCallArgCount counts the argument expressions of a method
+// invocation (`recv.m(a, b, c)` -> 3, `recv.m()` -> 0). Commas and
+// parentheses are anonymous, so the argument_list's named children are
+// the arguments; comment nodes that the grammar admits as extras are
+// skipped so they never inflate the count.
+func javaCallArgCount(n *sitter.Node, _ []byte) (int, bool) {
+	if n.Type() != "method_invocation" {
+		return 0, false
+	}
+	args := n.ChildByFieldName("arguments")
+	if args == nil {
+		for i := 0; i < int(n.NamedChildCount()); i++ {
+			c := n.NamedChild(i)
+			if c != nil && c.Type() == "argument_list" {
+				args = c
+				break
+			}
+		}
+	}
+	if args == nil {
+		return 0, false
+	}
+	count := 0
+	for i := 0; i < int(args.NamedChildCount()); i++ {
+		c := args.NamedChild(i)
+		if c == nil {
+			continue
+		}
+		switch c.Type() {
+		case "line_comment", "block_comment":
+			continue
+		}
+		count++
+	}
+	return count, true
+}
+
+// javaElementCallbacks is the curated set of Stream / Iterable higher-order
+// methods whose lambda's first (and only) parameter is the receiver's element
+// type. Kept tiny and honest: a fold (`reduce`) or a comparator-taking
+// `sorted` is excluded, so the parameter is never bound to the wrong type.
+var javaElementCallbacks = map[string]bool{
+	"forEach":        true,
+	"forEachOrdered": true,
+	"filter":         true,
+	"map":            true,
+	"anyMatch":       true,
+	"allMatch":       true,
+	"noneMatch":      true,
+	"takeWhile":      true,
+	"dropWhile":      true,
+	"peek":           true,
+	"removeIf":       true,
+}
+
+// javaCollectionLambda decodes a higher-order collection call whose lambda's
+// first parameter is the receiver's element type — `xs.forEach(x -> x.foo())`.
+// It grounds the receiver (the call's `object`) and gates the method on the
+// element-callback set, then requires the sole argument to be a
+// single-parameter lambda it can decode. The receiver may be a chained call
+// (`xs.stream().filter(…)`); the binder declines to element-type a
+// chained-call receiver, so that form is walked generically. ok=false for any
+// other call.
+func javaCollectionLambda(n *sitter.Node, src []byte) (CollectionLambdaCall, bool) {
+	if n.Type() != "method_invocation" {
+		return CollectionLambdaCall{}, false
+	}
+	obj := n.ChildByFieldName("object")
+	if obj == nil || !javaElementCallbacks[fieldText(n, "name", src)] {
+		return CollectionLambdaCall{}, false
+	}
+	lambda := javaSingleLambdaArg(n)
+	if lambda == nil {
+		return CollectionLambdaCall{}, false
+	}
+	param := javaLambdaParam(lambda, src)
+	body := lambda.ChildByFieldName("body")
+	if param == "" || body == nil {
+		return CollectionLambdaCall{}, false
+	}
+	return CollectionLambdaCall{Receiver: obj, Param: param, Body: body}, true
+}
+
+// javaSingleLambdaArg returns the lambda_expression when it is the SOLE
+// argument of a method invocation, nil otherwise (zero, multiple, or
+// non-lambda arguments). Comment extras the grammar admits are ignored so
+// they never inflate the count.
+func javaSingleLambdaArg(n *sitter.Node) *sitter.Node {
+	args := n.ChildByFieldName("arguments")
+	if args == nil {
+		return nil
+	}
+	var lambda *sitter.Node
+	count := 0
+	for c := range args.NamedChildren() {
+		switch c.Type() {
+		case "line_comment", "block_comment":
+			continue
+		}
+		count++
+		if c.Type() == "lambda_expression" {
+			lambda = c
+		}
+	}
+	if count != 1 {
+		return nil
+	}
+	return lambda
+}
+
+// javaLambdaParam returns the single parameter name of a lambda_expression:
+// the bare `x -> …` identifier, or the lone identifier / formal parameter of a
+// parenthesized `(x) -> …` / `(Foo x) -> …` list. "" when the lambda binds
+// more than one parameter — those are not a plain element bind.
+func javaLambdaParam(lambda *sitter.Node, src []byte) string {
+	params := lambda.ChildByFieldName("parameters")
+	if params == nil {
+		return ""
+	}
+	if params.Type() == "identifier" {
+		return params.Content(src)
+	}
+	var only string
+	count := 0
+	for c := range params.NamedChildren() {
+		switch c.Type() {
+		case "identifier":
+			count++
+			only = c.Content(src)
+		case "formal_parameter":
+			count++
+			only = fieldText(c, "name", src)
+		}
+	}
+	if count != 1 {
+		return ""
+	}
+	return only
+}
+
 func javaImports(root *sitter.Node, src []byte) []Import {
 	var out []Import
-	for i := 0; i < int(root.NamedChildCount()); i++ {
-		c := root.NamedChild(i)
+	for c := range root.NamedChildren() {
 		if c.Type() != "import_declaration" {
 			continue
 		}

@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -483,6 +484,27 @@ func isSymbolSearcherBackend(b search.Backend) bool {
 	}
 	_, ok := b.(*search.SymbolSearcherBackend)
 	return ok
+}
+
+// lessEdgeKey orders edges by their logical key (from, to, kind,
+// file_path, line) — the same tuple the sqlite edges table's
+// UNIQUE(from_id, …) index is built on. Draining edges in this order on
+// the cold bulk load keeps that index's inserts local instead of random,
+// reducing B-tree page splits.
+func lessEdgeKey(a, b *graph.Edge) bool {
+	if a.From != b.From {
+		return a.From < b.From
+	}
+	if a.To != b.To {
+		return a.To < b.To
+	}
+	if a.Kind != b.Kind {
+		return a.Kind < b.Kind
+	}
+	if a.FilePath != b.FilePath {
+		return a.FilePath < b.FilePath
+	}
+	return a.Line < b.Line
 }
 
 // ftsTokensFor produces the pre-tokenised text the backend FTS path
@@ -1871,17 +1893,35 @@ func (idx *Indexer) applyRepoPrefix(nodes []*graph.Node, edges []*graph.Edge) {
 	// interning each reference is a distinct `prefix + s` allocation —
 	// interning collapses them to one shared backing array, and edge
 	// endpoints end up sharing storage with the node ID they name.
+	//
+	// The file path is identical for every node and edge extracted from
+	// the same file — thousands of them. Concatenating `prefix + path`
+	// per reference would mint thousands of throwaway strings before
+	// interning collapses their storage. This per-call cache computes
+	// the interned prefixed path once per distinct raw path, so a file
+	// with N symbols pays one concatenation instead of N.
+	prefixedPath := make(map[string]string)
+	internFilePath := func(raw string) string {
+		if c, ok := prefixedPath[raw]; ok {
+			return c
+		}
+		c := intern.String(prefix + raw)
+		prefixedPath[raw] = c
+		return c
+	}
 	for _, n := range nodes {
 		n.ID = intern.String(prefix + n.ID)
-		n.FilePath = intern.String(prefix + n.FilePath)
+		n.FilePath = internFilePath(n.FilePath)
 		n.RepoPrefix = idx.repoPrefix
-		// Name and Language are low-cardinality and recur across
+		// Name, Language and Kind are low-cardinality and recur across
 		// thousands of nodes — method/function names like String, New,
-		// Get… and the ~20 distinct languages. Interning collapses
-		// each to a single backing array; it also shrinks the byName
-		// secondary index, whose keys are these same strings.
+		// Get…, the ~20 distinct languages, and the fixed set of node
+		// kinds. Interning collapses each to a single backing array; it
+		// also shrinks the byName secondary index, whose keys are these
+		// same strings.
 		n.Name = intern.String(n.Name)
 		n.Language = intern.String(n.Language)
+		n.Kind = graph.NodeKind(intern.String(string(n.Kind)))
 	}
 	for _, e := range edges {
 		e.From = intern.String(prefix + e.From)
@@ -1892,7 +1932,7 @@ func (idx *Indexer) applyRepoPrefix(nodes []*graph.Node, edges []*graph.Edge) {
 		} else {
 			e.To = intern.String(prefix + e.To)
 		}
-		e.FilePath = intern.String(prefix + e.FilePath)
+		e.FilePath = internFilePath(e.FilePath)
 	}
 }
 
@@ -1925,6 +1965,15 @@ func clampParseWeight(size, budget int64) int64 {
 func (idx *Indexer) IndexCtx(ctx context.Context, root string) (result *IndexResult, retErr error) {
 	start := time.Now()
 	reporter := progress.FromContext(ctx)
+
+	// Cold/full-index GC tuning: raise the GC percent window and install a
+	// cgroup-aware soft memory limit for the duration of the index, then
+	// restore the prior settings on every exit path. The knobs affect only GC
+	// timing and peak RSS during the allocation burst of a full index — the
+	// graph content is identical with them on or off. Disable for A/B runs
+	// with GORTEX_INDEX_GC_TUNE=0; see gc_tune.go.
+	restoreGCTuning := applyIndexGCTuning(idx.logger)
+	defer restoreGCTuning()
 
 	absRoot, err := filepath.Abs(root)
 	if err != nil {
@@ -2199,8 +2248,22 @@ func (idx *Indexer) IndexCtx(ctx context.Context, root string) (result *IndexRes
 				// churn on a 600k-node Vscode-shape repo.
 				ftsItems = make([]graph.SymbolFTSItem, 0, inMemShadow.NodeCount())
 			}
+			// Key-ordered bulk drain. The nodes table is WITHOUT ROWID
+			// (its primary key IS the B-tree), so inserting in ascending
+			// id order makes each insert an append to the rightmost leaf
+			// instead of a random split mid-tree — far fewer page splits
+			// on the cold load. The edges table's UNIQUE(from_id, …) index
+			// benefits the same way from from-id-ordered inserts. So the
+			// whole drain is collected, sorted once, then chunk-written.
+			//
+			// This block only runs on the first/empty cold index (the
+			// shadow-swap branch above), and the shadow node/edge sets
+			// already fit in RAM (the branch is gated on the shadow byte /
+			// file budget). DrainNodes / DrainEdges free each shard as they
+			// yield, so holding the drained set in one slice to sort costs
+			// no more peak RAM than the shadow already did.
 			const persistChunk = 100000
-			nodeBuf := make([]*graph.Node, 0, persistChunk)
+			allNodes := make([]*graph.Node, 0, shadowNodeCount)
 			for n := range inMemShadow.DrainNodes() {
 				if hasFTS && idx.shouldIndexForSearch(n) {
 					ftsItems = append(ftsItems, graph.SymbolFTSItem{
@@ -2208,28 +2271,29 @@ func (idx *Indexer) IndexCtx(ctx context.Context, root string) (result *IndexRes
 						Tokens: ftsTokensFor(n, idx.projectName),
 					})
 				}
-				nodeBuf = append(nodeBuf, n)
-				if len(nodeBuf) >= persistChunk {
-					diskTarget.AddBatch(nodeBuf, nil)
-					nodeBuf = nodeBuf[:0]
-				}
+				allNodes = append(allNodes, n)
 			}
-			if len(nodeBuf) > 0 {
-				diskTarget.AddBatch(nodeBuf, nil)
-				nodeBuf = nil
+			sort.Slice(allNodes, func(i, j int) bool {
+				return allNodes[i].ID < allNodes[j].ID
+			})
+			for start := 0; start < len(allNodes); start += persistChunk {
+				end := min(start+persistChunk, len(allNodes))
+				diskTarget.AddBatch(allNodes[start:end], nil)
 			}
-			edgeBuf := make([]*graph.Edge, 0, persistChunk)
+			allNodes = nil
+
+			allEdges := make([]*graph.Edge, 0, shadowEdgeCount)
 			for e := range inMemShadow.DrainEdges() {
-				edgeBuf = append(edgeBuf, e)
-				if len(edgeBuf) >= persistChunk {
-					diskTarget.AddBatch(nil, edgeBuf)
-					edgeBuf = edgeBuf[:0]
-				}
+				allEdges = append(allEdges, e)
 			}
-			if len(edgeBuf) > 0 {
-				diskTarget.AddBatch(nil, edgeBuf)
-				edgeBuf = nil
+			sort.Slice(allEdges, func(i, j int) bool {
+				return lessEdgeKey(allEdges[i], allEdges[j])
+			})
+			for start := 0; start < len(allEdges); start += persistChunk {
+				end := min(start+persistChunk, len(allEdges))
+				diskTarget.AddBatch(nil, allEdges[start:end])
 			}
+			allEdges = nil
 			flushStart := time.Now()
 			idx.logger.Info("indexer: FlushBulk start",
 				zap.String("repo", idx.RepoPrefix()),
@@ -2300,6 +2364,14 @@ func (idx *Indexer) IndexCtx(ctx context.Context, root string) (result *IndexRes
 	workers := idx.config.Workers
 	if workers <= 0 {
 		workers = 1
+	}
+	// idx.config.Workers defaults to the host's runtime.NumCPU(); inside a
+	// CPU-limited container that exceeds the cgroup CPU quota and the pool
+	// over-subscribes, so CFS throttling drags throughput down. Clamp the
+	// effective pool size to the quota when one is present (lowers only, floor
+	// of 1, host-identical when unquotaed). GORTEX_INDEX_CPU_CLAMP=0 opts out.
+	if cpuClampEnabled() {
+		workers = clampWorkersToCPUQuota(workers, cgroupCPUQuota())
 	}
 
 	// Optional crash isolation: run tree-sitter extraction in worker
@@ -2597,6 +2669,17 @@ func (idx *Indexer) IndexCtx(ctx context.Context, root string) (result *IndexRes
 		close(fileCh)
 		wg.Wait()
 	}
+
+	// Dispatch the largest files first. Both dispatch paths below
+	// consume this slice in order: the plain path feeds it straight to
+	// the worker pool, and the streaming-flush path carves it into
+	// chunks from the front. Feeding the biggest file to the workers
+	// first lets its long parse overlap with the tail of small files,
+	// instead of the whole index waiting on a large file that would
+	// otherwise be dispatched last. The sort is stable and a pure
+	// permutation, so the set of indexed files and the resulting graph
+	// are identical — only the dispatch order changes.
+	sortBySizeDesc(files)
 
 	// Streaming-flush path: above shadowMaxFileCount with a
 	// BulkLoader-capable backend, we can't fit the whole shadow in
@@ -4745,6 +4828,7 @@ func (idx *Indexer) buildPerFileContractExtractors() ([]contracts.Extractor, map
 		&contracts.GRPCExtractor{},
 		&contracts.ThriftExtractor{},
 		&contracts.GraphQLExtractor{},
+		&contracts.TRPCExtractor{},
 		&contracts.OpenAPIExtractor{},
 		&contracts.TopicExtractor{},
 		&contracts.WebSocketExtractor{},
@@ -4787,9 +4871,20 @@ func (idx *Indexer) runContractExtractorsForFile(
 	// category so the dashboard can filter them out by default.
 	testSource := fixtures.TestContractSource(graphPath)
 	var out []contracts.Contract
+	// The graph store backs graph-wide constant resolution for endpoint
+	// arguments (a route path / queue / topic referenced by a const). Resolved
+	// once per call; nil when the backend can't satisfy the reader (const
+	// dereference is then disabled and store-aware extractors degrade to their
+	// tree-aware behaviour).
+	var endpointStore contracts.EndpointConstStore
+	if es, ok := idx.graph.(contracts.EndpointConstStore); ok {
+		endpointStore = es
+	}
 	for _, ex := range exts {
 		var found []contracts.Contract
-		if tae, ok := ex.(contracts.TreeAwareExtractor); ok && tree != nil {
+		if sae, ok := ex.(contracts.StoreAwareExtractor); ok {
+			found = sae.ExtractWithStore(graphPath, src, fileNodes, fileEdges, tree, endpointStore, idx.repoPrefix)
+		} else if tae, ok := ex.(contracts.TreeAwareExtractor); ok && tree != nil {
 			found = tae.ExtractWithTree(graphPath, src, fileNodes, fileEdges, tree)
 		} else {
 			found = ex.Extract(graphPath, src, fileNodes, fileEdges)

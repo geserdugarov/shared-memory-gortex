@@ -58,19 +58,82 @@ type Node struct {
 	// call and no allocation. Nil means "not stamped" — Type() then
 	// derives the language, which is slower but still correct.
 	langKey unsafe.Pointer
+	// arena bump-allocates Node wrappers in chunks so a deep tree walk
+	// produces a few large backing arrays instead of millions of tiny heap
+	// objects. The per-object GC mark cost dominated CPU when indexing a
+	// large TS monorepo (vscode: ~70% of cycles in GC, scanning millions of
+	// 1-node spans). Chunks are never explicitly freed — they are reachable
+	// only through the Nodes that point into them and are reclaimed by the
+	// GC once the tree's nodes are dropped. A nil arena falls back to a plain
+	// heap Node (zero-value and SetInner-pooled nodes have no arena).
+	arena *nodeArena
+}
+
+// nodeArena is a per-tree bump allocator for Node wrappers. It is not
+// safe for concurrent use; each parse tree is walked by a single
+// goroutine, and distinct files use distinct trees (and arenas).
+type nodeArena struct {
+	cur  []Node
+	used int
+}
+
+const (
+	// arenaFirstChunk keeps the first backing array small so a file with a
+	// handful of nodes (the common case in a many-small-files repo) wastes
+	// little; chunks then double up to arenaMaxChunk so a deep file still
+	// ends up with only a few large objects.
+	arenaFirstChunk = 64
+	arenaMaxChunk   = 4096
+)
+
+func newNodeArena() *nodeArena { return &nodeArena{} }
+
+// alloc returns a pointer to a fresh zeroed Node. The pointer is stable:
+// when the current chunk fills, a new (geometrically larger) backing array
+// is allocated and the old chunk stays alive through the Nodes that point
+// into it.
+func (a *nodeArena) alloc() *Node {
+	if a.used >= len(a.cur) {
+		size := len(a.cur) * 2
+		if size == 0 {
+			size = arenaFirstChunk
+		} else if size > arenaMaxChunk {
+			size = arenaMaxChunk
+		}
+		a.cur = make([]Node, size)
+		a.used = 0
+	}
+	n := &a.cur[a.used]
+	a.used++
+	return n
 }
 
 // WrapNode wraps a value Node from the new API into our shim. It derives
-// the language key eagerly so navigation from the result stays alloc-free.
+// the language key eagerly so navigation from the result stays alloc-free,
+// and seeds a fresh arena so the subtree walk below it allocates in chunks.
 func WrapNode(n ts.Node) *Node {
-	return &Node{inner: n, valid: true, langKey: unsafe.Pointer(n.Language().Inner)}
+	a := newNodeArena()
+	nn := a.alloc()
+	nn.inner = n
+	nn.valid = true
+	nn.langKey = unsafe.Pointer(n.Language().Inner)
+	nn.arena = a
+	return nn
 }
 
 // WrapVal wraps a ts.Node reached from n (e.g. a query capture),
 // carrying n's language key so Type() on the result and its descendants
 // needs neither CGO nor allocation.
 func (n *Node) WrapVal(c ts.Node) *Node {
-	return &Node{inner: c, valid: true, langKey: n.langKey}
+	if n.arena == nil {
+		return &Node{inner: c, valid: true, langKey: n.langKey}
+	}
+	nn := n.arena.alloc()
+	nn.inner = c
+	nn.valid = true
+	nn.langKey = n.langKey
+	nn.arena = n.arena
+	return nn
 }
 
 // SetInner overwrites the receiver's wrapped ts.Node and marks it
@@ -90,7 +153,15 @@ func (n *Node) wrap(c *ts.Node) *Node {
 	if c == nil {
 		return nil
 	}
-	return &Node{inner: *c, valid: true, langKey: n.langKey}
+	if n.arena == nil {
+		return &Node{inner: *c, valid: true, langKey: n.langKey}
+	}
+	nn := n.arena.alloc()
+	nn.inner = *c
+	nn.valid = true
+	nn.langKey = n.langKey
+	nn.arena = n.arena
+	return nn
 }
 
 // Inner returns a pointer to the underlying ts.Node. Internal use by
@@ -304,11 +375,13 @@ func (t *Tree) RootNode() *Node {
 	if root == nil {
 		return nil
 	}
-	return &Node{
-		inner:   *root,
-		valid:   true,
-		langKey: unsafe.Pointer(root.Language().Inner),
-	}
+	a := newNodeArena()
+	nn := a.alloc()
+	nn.inner = *root
+	nn.valid = true
+	nn.langKey = unsafe.Pointer(root.Language().Inner)
+	nn.arena = a
+	return nn
 }
 
 // Close releases the tree's C resources.

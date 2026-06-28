@@ -913,3 +913,170 @@ func TestKotlin_DataClassUserCopyWins(t *testing.T) {
 		t.Error("component1 should still be synthesized when only copy is user-declared")
 	}
 }
+
+// HIGH-VALUE: a typed collection builder followed by an element accessor
+// element-types the chain — `mutableListOf<Foo>().first().bar()` resolves
+// `bar` on Foo (the captured `<Foo>` element type), not on the stdlib
+// container. The edge is seed-derived, so it lands at the inferred band.
+func TestKotlin_StdlibElementAccessTypesChain(t *testing.T) {
+	g, dir := buildFixture(t, map[string]string{
+		"Foo.kt": `class Foo {
+    fun bar() {}
+}
+`,
+		"App.kt": `class App {
+    fun main() {
+        mutableListOf<Foo>().first().bar()
+    }
+}
+`,
+	})
+	p := NewProvider(KotlinSpec(), zap.NewNop())
+	if _, err := p.Enrich(g, dir); err != nil {
+		t.Fatal(err)
+	}
+	caller := nodeByNameKind(t, g, "main", graph.KindMethod)
+	target := nodeByNameKind(t, g, "bar", graph.KindMethod)
+	e := callEdgeTo(g, caller.ID, target.ID)
+	if e == nil {
+		t.Fatalf("element-typed chain mutableListOf<Foo>().first().bar() not resolved to Foo::bar; edges: %v", g.GetOutEdges(caller.ID))
+	}
+	if e.Origin != graph.OriginASTResolved {
+		t.Errorf("origin = %q, want %q", e.Origin, graph.OriginASTResolved)
+	}
+	if e.Meta["semantic_source"] != "kotlin-types" {
+		t.Errorf("semantic_source = %v, want kotlin-types", e.Meta["semantic_source"])
+	}
+	if e.Meta["resolution_strategy"] != string(strategyInferred) {
+		t.Errorf("resolution_strategy = %v, want %q", e.Meta["resolution_strategy"], strategyInferred)
+	}
+	if e.Confidence != inferredConfidence {
+		t.Errorf("confidence = %v, want %v", e.Confidence, inferredConfidence)
+	}
+}
+
+// A collection-builder free call seeds its container type: `listOf<Foo>()`
+// types as List, so a member call on an in-repo List type resolves through
+// the seeded receiver at the inferred band. (When List is NOT an in-repo
+// type — the realistic stdlib case — the chain honestly stops, as the
+// negative test below shows.)
+func TestKotlin_StdlibContainerSeedResolvesMember(t *testing.T) {
+	g, dir := buildFixture(t, map[string]string{
+		"List.kt": `class List {
+    fun custom() {}
+}
+`,
+		"App.kt": `class App {
+    fun main() {
+        listOf<Foo>().custom()
+    }
+}
+`,
+	})
+	p := NewProvider(KotlinSpec(), zap.NewNop())
+	if _, err := p.Enrich(g, dir); err != nil {
+		t.Fatal(err)
+	}
+	caller := nodeByNameKind(t, g, "main", graph.KindMethod)
+	target := nodeByNameKind(t, g, "custom", graph.KindMethod)
+	e := callEdgeTo(g, caller.ID, target.ID)
+	if e == nil {
+		t.Fatalf("container seed listOf<Foo>().custom() not resolved to List::custom; edges: %v", g.GetOutEdges(caller.ID))
+	}
+	if e.Meta["resolution_strategy"] != string(strategyInferred) {
+		t.Errorf("resolution_strategy = %v, want %q (seed-derived)", e.Meta["resolution_strategy"], strategyInferred)
+	}
+}
+
+// HONESTY: a non-accessor method on a collection builder is NOT
+// element-typed — only the seeded accessors (first/last/...) yield the
+// element. With no in-repo List type, mutableListOf<Foo>().bar() resolves
+// to nothing rather than minting a false Foo::bar edge.
+func TestKotlin_StdlibBuilderNonElementMethodSkipped(t *testing.T) {
+	g, dir := buildFixture(t, map[string]string{
+		"Foo.kt": `class Foo {
+    fun bar() {}
+}
+`,
+		"App.kt": `class App {
+    fun main() {
+        mutableListOf<Foo>().bar()
+    }
+}
+`,
+	})
+	p := NewProvider(KotlinSpec(), zap.NewNop())
+	if _, err := p.Enrich(g, dir); err != nil {
+		t.Fatal(err)
+	}
+	caller := nodeByNameKind(t, g, "main", graph.KindMethod)
+	target := nodeByNameKind(t, g, "bar", graph.KindMethod)
+	if e := callEdgeTo(g, caller.ID, target.ID); e != nil {
+		t.Fatalf("non-accessor bar() on a builder must not resolve to Foo::bar; got %+v", e)
+	}
+}
+
+// IN-REPO WINS: an in-repo function shadowing a seeded builder name grounds
+// the receiver through its own declared return type at the DIRECT band; the
+// stdlib seed is never consulted.
+func TestKotlin_InRepoFunctionShadowsStdlibSeed(t *testing.T) {
+	g, dir := buildFixture(t, map[string]string{
+		"App.kt": `class Bar {
+    fun run() {}
+}
+
+fun listOf(): Bar { return Bar() }
+
+class App {
+    fun main() {
+        listOf().run()
+    }
+}
+`,
+	})
+	p := NewProvider(KotlinSpec(), zap.NewNop())
+	if _, err := p.Enrich(g, dir); err != nil {
+		t.Fatal(err)
+	}
+	caller := nodeByNameKind(t, g, "main", graph.KindMethod)
+	target := nodeByNameKind(t, g, "run", graph.KindMethod)
+	e := callEdgeTo(g, caller.ID, target.ID)
+	if e == nil {
+		t.Fatalf("in-repo listOf(): Bar should resolve run() to Bar::run; edges: %v", g.GetOutEdges(caller.ID))
+	}
+	if e.Meta["resolution_strategy"] == string(strategyInferred) {
+		t.Errorf("in-repo-grounded chain should be direct, got inferred")
+	}
+}
+
+// A List transform keeps the List type through the chain: a member call
+// after `listOf<Foo>().filter { ... }` resolves on the in-repo List type
+// even though it declares no `filter` (the transform seed supplies its List
+// return type), at the inferred band.
+func TestKotlin_StdlibListTransformChain(t *testing.T) {
+	g, dir := buildFixture(t, map[string]string{
+		"List.kt": `class List {
+    fun custom() {}
+}
+`,
+		"App.kt": `class App {
+    fun main() {
+        listOf<Foo>().filter { it.x }.custom()
+    }
+}
+`,
+	})
+	p := NewProvider(KotlinSpec(), zap.NewNop())
+	if _, err := p.Enrich(g, dir); err != nil {
+		t.Fatal(err)
+	}
+	caller := nodeByNameKind(t, g, "main", graph.KindMethod)
+	target := nodeByNameKind(t, g, "custom", graph.KindMethod)
+	e := callEdgeTo(g, caller.ID, target.ID)
+	if e == nil {
+		t.Fatalf("listOf<Foo>().filter{}.custom() not resolved to List::custom; edges: %v", g.GetOutEdges(caller.ID))
+	}
+	if e.Meta["resolution_strategy"] != string(strategyInferred) {
+		t.Errorf("resolution_strategy = %v, want %q (seed-derived)", e.Meta["resolution_strategy"], strategyInferred)
+	}
+}

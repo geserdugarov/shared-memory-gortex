@@ -50,6 +50,15 @@ func PHPSpec() *LangSpec {
 		IfStmt:           phpIfStmt,
 		EarlyExit:        phpEarlyExit,
 		DocType:          phpDocType,
+		// A bare free-function call standing in receiver position
+		// (`collect($x)->map()`) is grounded by its callee name so the apply
+		// phase can seed its stdlib return type. PHP carries no call-site
+		// generic argument, so the type-arg slot is always empty.
+		BareCall: phpBareCall,
+		// Tiny curated seed of the unambiguous `collect()` helper and the
+		// shape-preserving Collection transforms, consulted only when no
+		// in-repo function resolves the callee.
+		StdlibReturnType: phpStdlibReturnType,
 	}
 }
 
@@ -908,4 +917,63 @@ func phpDocFirstSigil(fields []string) string {
 		}
 	}
 	return ""
+}
+
+// phpBareCall grounds a bare free-function call standing in receiver
+// position (`collect($x)->map()`): a function_call_expression whose callee
+// is a plain `name` / `qualified_name`. PHP has no call-site generic
+// argument, so the type-arg slot is always empty. A dynamic callee
+// (`$fn()`) or a method / static call names no free function and yields
+// ok=false.
+func phpBareCall(n *sitter.Node, src []byte) (string, string, bool) {
+	if n.Type() != "function_call_expression" {
+		return "", "", false
+	}
+	fn := n.ChildByFieldName("function")
+	if fn == nil {
+		fn = n.NamedChild(0)
+	}
+	if fn == nil {
+		return "", "", false
+	}
+	switch fn.Type() {
+	case "name", "qualified_name":
+		return strings.TrimSpace(fn.Content(src)), "", true
+	}
+	return "", "", false
+}
+
+// phpCollectionTransforms is the set of Collection methods that return a
+// Collection — a transform on a Collection stays a Collection, so a fluent
+// `collect()->map()->...` chain keeps its type. Only shape-preserving,
+// unambiguously Collection-returning operations are seeded.
+var phpCollectionTransforms = map[string]bool{
+	"map":     true,
+	"filter":  true,
+	"values":  true,
+	"keys":    true,
+	"reverse": true,
+	"sort":    true,
+	"sortBy":  true,
+	"unique":  true,
+	"reject":  true,
+	"flatten": true,
+	"groupBy": true,
+}
+
+// phpStdlibReturnType is the PHP stdlib return-type seed. The `collect()`
+// helper (recv == "") builds a Collection, and a Collection transform on a
+// Collection receiver stays a Collection. Anything else is unseeded — the
+// table stays tiny and unambiguous.
+func phpStdlibReturnType(callee, recv string) (string, bool) {
+	if recv == "" {
+		if callee == "collect" {
+			return "Collection", true
+		}
+		return "", false
+	}
+	if recv == "Collection" && phpCollectionTransforms[callee] {
+		return "Collection", true
+	}
+	return "", false
 }

@@ -30,9 +30,17 @@ type callFact struct {
 	// constructor inference, or propagation through locals).
 	recvType string
 	// recvPendingCallee is set when the receiver local was initialised
-	// from a bare call (`u = build_user()`); the apply phase resolves
-	// the callee's graph return_type.
+	// from a bare call (`u = build_user()`), or the receiver is itself a
+	// bare free-function call standing in receiver position
+	// (`listOf<Foo>().x()`, `collect()->y()`); the apply phase resolves the
+	// callee's graph return_type, falling back to the stdlib seed table.
 	recvPendingCallee string
+	// recvCallTypeArg carries the explicit generic type ARGUMENT of a bare
+	// free-function call receiver (the `Foo` in `listOf<Foo>()`), when the
+	// grammar exposes one. It lets the apply phase element-type a stdlib
+	// collection access (`mutableListOf<Foo>().first()` -> Foo). "" when the
+	// call site carried no type argument.
+	recvCallTypeArg string
 	// recvIdent is set when the receiver is an identifier with no
 	// binding in scope — a type-qualified (static) call candidate. Only
 	// used when it resolves to a real graph type node.
@@ -617,6 +625,15 @@ func (b *binder) receiverFact(recv *sitter.Node, env *scopeEnv) (callFact, bool)
 	if b.spec.NewExprType != nil {
 		if t := b.spec.normalize(b.spec.NewExprType(recv, b.src)); t != "" {
 			return callFact{recvType: t}, true
+		}
+	}
+	// Bare free-function call in receiver position (`listOf<Foo>().x()`,
+	// `collect()->y()`): ground the callee name (and any explicit type
+	// argument) so the apply phase can resolve its return type — an in-repo
+	// function first, then the stdlib seed table as a last resort.
+	if b.spec.BareCall != nil {
+		if callee, typeArg, ok := b.spec.BareCall(recv, b.src); ok && callee != "" {
+			return callFact{recvPendingCallee: callee, recvCallTypeArg: typeArg}, true
 		}
 	}
 	// Chained receiver: the receiver is itself a method call

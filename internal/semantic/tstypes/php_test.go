@@ -970,3 +970,137 @@ class Other {
 	other := nodeByNameKind(t, g, "go", graph.KindMethod)
 	assertUntouched(t, g, other.ID, "baz", "php-types")
 }
+
+// The `collect()` helper seeds a Collection receiver: `collect($x)->first()`
+// resolves first() on an in-repo Collection at the inferred band, even
+// though collect() is not an in-repo function. Seed consulted only after the
+// in-repo lookup misses.
+func TestPHP_StdlibCollectSeedResolvesMember(t *testing.T) {
+	g, dir := buildFixture(t, map[string]string{
+		"app.php": `<?php
+class Collection {
+    public function first() {}
+}
+
+class App {
+    public function run($x): void {
+        collect($x)->first();
+    }
+}
+`,
+	})
+	p := NewProvider(PHPSpec(), zap.NewNop())
+	if _, err := p.Enrich(g, dir); err != nil {
+		t.Fatal(err)
+	}
+	run := nodeByNameKind(t, g, "run", graph.KindMethod)
+	first := nodeByNameKind(t, g, "first", graph.KindMethod)
+	e := callEdgeTo(g, run.ID, first.ID)
+	if e == nil {
+		t.Fatalf("collect()->first() not resolved to Collection::first; edges: %v", g.GetOutEdges(run.ID))
+	}
+	if e.Origin != graph.OriginASTResolved {
+		t.Errorf("origin = %q, want %q", e.Origin, graph.OriginASTResolved)
+	}
+	if e.Meta["semantic_source"] != "php-types" {
+		t.Errorf("semantic_source = %v, want php-types", e.Meta["semantic_source"])
+	}
+	if e.Meta["resolution_strategy"] != string(strategyInferred) {
+		t.Errorf("resolution_strategy = %v, want %q (seed-derived)", e.Meta["resolution_strategy"], strategyInferred)
+	}
+	if e.Confidence != inferredConfidence {
+		t.Errorf("confidence = %v, want %v", e.Confidence, inferredConfidence)
+	}
+}
+
+// A fluent Collection transform keeps the Collection type through the chain:
+// `collect($x)->map($f)->first()` resolves first() on Collection even though
+// Collection here declares no `map` (the transform seed supplies its
+// Collection return type).
+func TestPHP_StdlibCollectionTransformChain(t *testing.T) {
+	g, dir := buildFixture(t, map[string]string{
+		"app.php": `<?php
+class Collection {
+    public function first() {}
+}
+
+class App {
+    public function run($x, $f): void {
+        collect($x)->map($f)->first();
+    }
+}
+`,
+	})
+	p := NewProvider(PHPSpec(), zap.NewNop())
+	if _, err := p.Enrich(g, dir); err != nil {
+		t.Fatal(err)
+	}
+	run := nodeByNameKind(t, g, "run", graph.KindMethod)
+	first := nodeByNameKind(t, g, "first", graph.KindMethod)
+	e := callEdgeTo(g, run.ID, first.ID)
+	if e == nil {
+		t.Fatalf("collect()->map()->first() not resolved to Collection::first; edges: %v", g.GetOutEdges(run.ID))
+	}
+	if e.Meta["resolution_strategy"] != string(strategyInferred) {
+		t.Errorf("resolution_strategy = %v, want %q (seed-derived)", e.Meta["resolution_strategy"], strategyInferred)
+	}
+}
+
+// HONESTY: a non-seeded free function standing in receiver position resolves
+// nothing — `helper($x)->first()` mints no edge when helper is neither
+// in-repo nor seeded.
+func TestPHP_UnseededFreeCallReceiverSkipped(t *testing.T) {
+	g, dir := buildFixture(t, map[string]string{
+		"app.php": `<?php
+class Collection {
+    public function first() {}
+}
+
+class App {
+    public function run($x): void {
+        helper($x)->first();
+    }
+}
+`,
+	})
+	p := NewProvider(PHPSpec(), zap.NewNop())
+	if _, err := p.Enrich(g, dir); err != nil {
+		t.Fatal(err)
+	}
+	run := nodeByNameKind(t, g, "run", graph.KindMethod)
+	assertUntouched(t, g, run.ID, "first", "php-types")
+}
+
+// IN-REPO WINS: an in-repo `collect()` function shadows the seed — its
+// declared return type grounds the receiver at the DIRECT band, and the
+// Collection seed is never consulted.
+func TestPHP_InRepoFunctionShadowsCollectSeed(t *testing.T) {
+	g, dir := buildFixture(t, map[string]string{
+		"app.php": `<?php
+class Bag {
+    public function first() {}
+}
+
+function collect($x): Bag { return new Bag(); }
+
+class App {
+    public function run($x): void {
+        collect($x)->first();
+    }
+}
+`,
+	})
+	p := NewProvider(PHPSpec(), zap.NewNop())
+	if _, err := p.Enrich(g, dir); err != nil {
+		t.Fatal(err)
+	}
+	run := nodeByNameKind(t, g, "run", graph.KindMethod)
+	first := nodeByNameKind(t, g, "first", graph.KindMethod)
+	e := callEdgeTo(g, run.ID, first.ID)
+	if e == nil {
+		t.Fatalf("in-repo collect(): Bag should resolve first() to Bag::first; edges: %v", g.GetOutEdges(run.ID))
+	}
+	if e.Meta["resolution_strategy"] == string(strategyInferred) {
+		t.Errorf("in-repo-grounded chain should be direct, got inferred")
+	}
+}

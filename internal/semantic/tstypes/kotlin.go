@@ -80,6 +80,17 @@ func KotlinSpec() *LangSpec {
 		IfStmt:            kotlinIfStmt,
 		EarlyExit:         kotlinEarlyExit,
 		SubjectNarrowings: kotlinSubjectNarrowings,
+		// A bare free-function call standing in receiver position
+		// (`listOf<Foo>().first()`) is grounded by its callee name plus any
+		// explicit `<Foo>` type argument, so the apply phase can seed the
+		// stdlib return type and element-type a collection access.
+		BareCall: kotlinBareCall,
+		// Tiny curated seed of unambiguous stdlib collection builders and
+		// transforms (consulted only when no in-repo function resolves the
+		// callee), plus the element-access predicate that types
+		// `mutableListOf<Foo>().first()` to its element.
+		StdlibReturnType:    kotlinStdlibReturnType,
+		StdlibElementAccess: kotlinStdlibElementAccess,
 	}
 }
 
@@ -820,4 +831,121 @@ func kotlinTypeTestName(cond *sitter.Node, src []byte) string {
 		}
 	}
 	return ""
+}
+
+// kotlinBareCall grounds a bare free-function call standing in receiver
+// position (`listOf<Foo>().first()`): a call_expression whose callee is a
+// lowercase simple_identifier (a Capitalized callee is a construction,
+// handled by kotlinNewExprType, not a free function). It returns the callee
+// name and the first explicit generic type argument (`Foo` in
+// `listOf<Foo>()`), "" when the call carries none.
+func kotlinBareCall(n *sitter.Node, src []byte) (string, string, bool) {
+	if n.Type() != "call_expression" {
+		return "", "", false
+	}
+	callee := n.NamedChild(0)
+	if callee == nil || callee.Type() != "simple_identifier" {
+		return "", "", false
+	}
+	name := strings.TrimSpace(callee.Content(src))
+	if name == "" || kotlinIsTypeName(name) {
+		return "", "", false
+	}
+	return name, kotlinFirstTypeArg(n, src), true
+}
+
+// kotlinFirstTypeArg returns the first explicit type argument of a call's
+// call_suffix (`<Foo>` in `listOf<Foo>()` -> "Foo"), "" when the call has no
+// type arguments. The shape is call_suffix > type_arguments >
+// type_projection > user_type.
+func kotlinFirstTypeArg(call *sitter.Node, src []byte) string {
+	suffix := firstChildOfType(call, "call_suffix")
+	if suffix == nil {
+		return ""
+	}
+	ta := firstChildOfType(suffix, "type_arguments")
+	if ta == nil {
+		return ""
+	}
+	proj := firstChildOfType(ta, "type_projection")
+	if proj == nil {
+		return ""
+	}
+	ut := firstChildOfType(proj, "user_type")
+	if ut == nil {
+		return ""
+	}
+	return strings.TrimSpace(ut.Content(src))
+}
+
+// kotlinStdlibBuilders maps a collection-builder free function to the
+// container type it returns. Only the unambiguous, return-stable builders
+// are seeded — a wrong mapping would mint a false edge.
+var kotlinStdlibBuilders = map[string]string{
+	"listOf":        "List",
+	"mutableListOf": "List",
+	"arrayListOf":   "List",
+	"listOfNotNull": "List",
+	"emptyList":     "List",
+	"setOf":         "Set",
+	"mutableSetOf":  "Set",
+	"hashSetOf":     "Set",
+	"emptySet":      "Set",
+	"mapOf":         "Map",
+	"mutableMapOf":  "Map",
+	"hashMapOf":     "Map",
+	"emptyMap":      "Map",
+}
+
+// kotlinListTransforms is the set of List-returning transforms — a transform
+// applied to a List stays a List. Only shape-preserving, unambiguously
+// List-returning operations are seeded.
+var kotlinListTransforms = map[string]bool{
+	"filter":        true,
+	"filterNotNull": true,
+	"map":           true,
+	"toList":        true,
+	"sorted":        true,
+	"sortedBy":      true,
+	"reversed":      true,
+}
+
+// kotlinStdlibReturnType is the Kotlin stdlib return-type seed: a collection
+// builder (recv == "") returns its container type, and a List transform on a
+// List receiver stays a List. Anything else is unseeded.
+func kotlinStdlibReturnType(callee, recv string) (string, bool) {
+	if recv == "" {
+		rt, ok := kotlinStdlibBuilders[callee]
+		return rt, ok
+	}
+	if recv == "List" && kotlinListTransforms[callee] {
+		return "List", true
+	}
+	return "", false
+}
+
+// kotlinListBuilders is the subset of builders whose result is an indexed
+// sequence, so an element accessor on it yields the element type. emptyList
+// is excluded — it has no element to access.
+var kotlinListBuilders = map[string]bool{
+	"listOf":        true,
+	"mutableListOf": true,
+	"arrayListOf":   true,
+	"listOfNotNull": true,
+}
+
+// kotlinElementAccessors is the set of List members that return one element
+// of the receiver collection — the element type, not the container.
+var kotlinElementAccessors = map[string]bool{
+	"first":     true,
+	"last":      true,
+	"single":    true,
+	"get":       true,
+	"elementAt": true,
+}
+
+// kotlinStdlibElementAccess reports whether `method` reads a single element
+// out of a `builder<Elem>()` collection, so the chain types to Elem.
+func kotlinStdlibElementAccess(builder, method string) bool {
+	return kotlinListBuilders[builder] && kotlinElementAccessors[method]
 }

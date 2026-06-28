@@ -387,6 +387,42 @@ type LangSpec struct {
 	// walk exactly as before, so a language that leaves it unset behaves
 	// byte-for-byte as before.
 	SubjectNarrowings func(n *sitter.Node, src []byte) (SubjectMatch, bool)
+
+	// BareCall decodes a receiver-less call standing in receiver position —
+	// a free function whose result is immediately navigated
+	// (`listOf<Foo>().first()`, `collect()->map()`). It returns the callee
+	// name and, when the grammar carries one at the call site, the explicit
+	// generic type ARGUMENT (the `Foo` in `listOf<Foo>()`); typeArg is ""
+	// when absent. ok=false for anything that is not a bare free call
+	// (construction, navigation chain, identifier). The apply phase grounds
+	// such a receiver through the callee's return type — an in-repo function
+	// first, then the stdlib seed table — and uses the type argument to
+	// element-type a subsequent collection access. nil (the default) leaves
+	// a bare-call receiver ungrounded, byte-for-byte as before.
+	BareCall func(n *sitter.Node, src []byte) (callee, typeArg string, ok bool)
+
+	// StdlibReturnType maps a well-known standard-library callable to the
+	// container type it returns, consulted ONLY as a last resort — after an
+	// in-repo function / method of the same name fails to resolve, so an
+	// in-repo symbol always wins. recv is the normalized receiver type for a
+	// method call, "" for a free function: ("listOf","") -> "List",
+	// ("collect","") -> "Collection", ("map","Collection") -> "Collection".
+	// ok=false leaves the callee unseeded. The table must stay TINY and
+	// hold only unambiguous mappings — a wrong seed mints a false edge. An
+	// edge resolved through a seeded type is graded at the inferred
+	// confidence band. nil (the default) disables the seed entirely
+	// (byte-for-byte no-op for every other language).
+	StdlibReturnType func(callee, recv string) (ret string, ok bool)
+
+	// StdlibElementAccess reports whether `method` reads a single ELEMENT
+	// out of a collection produced by the standard-library builder
+	// `builder` (`mutableListOf<Foo>().first()` — builder "mutableListOf",
+	// method "first"). When it does, a `builder<Elem>().method()` chain
+	// types to Elem: the apply phase resolves the captured element type
+	// rather than the container, so a call on the element resolves at the
+	// inferred band. Consulted only when both the builder and a captured
+	// element type are present. nil (the default) disables element typing.
+	StdlibElementAccess func(builder, method string) bool
 }
 
 // inheritEdgeKinds returns the edge kinds methodOn climbs when looking

@@ -485,13 +485,17 @@ func edgeKindIn(k graph.EdgeKind, kinds []graph.EdgeKind) bool {
 
 // callableReturnType resolves a bare callee name to its graph
 // return_type: same-file declaration first, then a repo-unique
-// function. The returned name is normalized to the bare type name.
-func (a *applier) callableReturnType(idx *fileIndex, callee string) string {
+// function. The returned name is normalized to the bare type name. When
+// no in-repo function grounds the callee, the stdlib seed table is
+// consulted as a LAST RESORT — an in-repo symbol always wins. The bool
+// reports whether the type came from the seed (a heuristic, graded at the
+// inferred confidence band) rather than a grounded in-repo return type.
+func (a *applier) callableReturnType(idx *fileIndex, callee string) (string, bool) {
 	var match *graph.Node
 	for _, n := range idx.funcs {
 		if n.Name == callee {
 			if match != nil {
-				return "" // same-file overloads: ambiguous
+				return "", false // same-file overloads: ambiguous
 			}
 			match = n
 		}
@@ -512,16 +516,28 @@ func (a *applier) callableReturnType(idx *fileIndex, callee string) string {
 				continue
 			}
 			if match != nil {
-				return ""
+				return "", false
 			}
 			match = c
 		}
 	}
-	if match == nil || match.Meta == nil {
-		return ""
+	if match != nil {
+		// An in-repo callee resolved the name — its declared return type
+		// (possibly empty) wins; the seed is never consulted.
+		if match.Meta == nil {
+			return "", false
+		}
+		rt, _ := match.Meta["return_type"].(string)
+		return a.spec.normalize(rt), false
 	}
-	rt, _ := match.Meta["return_type"].(string)
-	return a.spec.normalize(rt)
+	// No in-repo function carries this name: fall back to the curated
+	// stdlib seed table for a well-known free-function return type.
+	if a.spec.StdlibReturnType != nil {
+		if rt, ok := a.spec.StdlibReturnType(callee, ""); ok {
+			return a.spec.normalize(rt), true
+		}
+	}
+	return "", false
 }
 
 // enclosingCallable returns the innermost function/method node
@@ -585,14 +601,20 @@ func (a *applier) callReceiverType(idx *fileIndex, cf *callFact) (*graph.Node, b
 		return a.chainReturnType(idx, cf.recvChain), true
 	}
 	recvType := cf.recvType
+	inferred := cf.inferred
 	if recvType == "" && cf.recvPendingCallee != "" {
-		recvType = a.callableReturnType(idx, cf.recvPendingCallee)
+		rt, seeded := a.callableReturnType(idx, cf.recvPendingCallee)
+		recvType = rt
+		// A seed-derived receiver type is a heuristic, not a grounded
+		// return type — grade any call through it at the inferred band.
+		inferred = inferred || seeded
 	}
 	if recvType != "" {
-		// cf.inferred is set only when recvType came from a guard
-		// narrowing; a direct annotation / constructor / propagation
-		// leaves it false, so the direct path is unchanged.
-		return a.resolveTypeNode(idx, recvType), cf.inferred
+		// cf.inferred is set when recvType came from a guard narrowing;
+		// seeded marks a stdlib-table return type. A direct annotation /
+		// constructor / propagation / in-repo return type leaves both
+		// false, so the direct path is unchanged.
+		return a.resolveTypeNode(idx, recvType), inferred
 	}
 	if cf.recvIdent != "" {
 		// Static / type-qualified call: only when the identifier is a
@@ -609,6 +631,13 @@ func (a *applier) callReceiverType(idx *fileIndex, cf *callFact) (*graph.Node, b
 // called on a using class, types as that class. Returns nil when any link
 // fails to ground — a missing edge beats a wrong one.
 func (a *applier) chainReturnType(idx *fileIndex, inner *callFact) *graph.Node {
+	// Stdlib element access on a typed collection builder:
+	// `mutableListOf<Foo>().first()` types to Foo. Consulted before the
+	// real-member path so the captured element type is preferred over the
+	// (unresolvable, stdlib) container type.
+	if elem := a.stdlibElementType(idx, inner); elem != nil {
+		return elem
+	}
 	recv, _ := a.callReceiverType(idx, inner)
 	if recv == nil {
 		return nil
@@ -618,9 +647,37 @@ func (a *applier) chainReturnType(idx *fileIndex, inner *callFact) *graph.Node {
 		m = a.resolveAlias(recv, inner.method)
 	}
 	if m == nil {
+		// No in-repo member grounds the call. As a last resort, seed a
+		// well-known stdlib transform's return type on the resolved
+		// container (`Collection::map` -> Collection), so a fluent stdlib
+		// chain keeps its type even where the container's members are not
+		// declared in-repo.
+		if a.spec.StdlibReturnType != nil {
+			if rt, ok := a.spec.StdlibReturnType(inner.method, recv.Name); ok {
+				return a.resolveTypeNode(idx, a.spec.normalize(rt))
+			}
+		}
 		return nil
 	}
 	return a.effectiveReturnType(idx, m, recv)
+}
+
+// stdlibElementType types a stdlib collection element access whose receiver
+// is a typed collection builder: `mutableListOf<Foo>().first()` resolves to
+// the element type Foo. It fires only when the inner call is a bare builder
+// call carrying an explicit type argument and the method is a seeded element
+// accessor; otherwise it returns nil and the normal member path runs.
+func (a *applier) stdlibElementType(idx *fileIndex, inner *callFact) *graph.Node {
+	if a.spec.StdlibElementAccess == nil {
+		return nil
+	}
+	if inner.recvPendingCallee == "" || inner.recvCallTypeArg == "" {
+		return nil
+	}
+	if !a.spec.StdlibElementAccess(inner.recvPendingCallee, inner.method) {
+		return nil
+	}
+	return a.resolveTypeNode(idx, a.spec.normalize(inner.recvCallTypeArg))
 }
 
 // effectiveReturnType resolves a method's declared return type to a graph

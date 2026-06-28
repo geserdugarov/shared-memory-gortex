@@ -10,6 +10,7 @@ import (
 
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/parser"
+	"github.com/zzet/gortex/internal/routeguard"
 )
 
 // goStringContext labels the API position the literal was found in.
@@ -143,7 +144,7 @@ func detectGoRoute(callExpr *sitter.Node, method string, src []byte) (string, bo
 	if !ok {
 		return "", false
 	}
-	if !looksLikeRoute(value) {
+	if !looksLikeRoute(value, method) {
 		return "", false
 	}
 	return value, true
@@ -153,20 +154,29 @@ func detectGoRoute(callExpr *sitter.Node, method string, src []byte) (string, bo
 // and similar generics out of the route bucket. Accepts paths that
 // start with "/" (most common), "GET /…" / "POST /…" mux-1.22 form,
 // or a wildcard segment.
-func looksLikeRoute(s string) bool {
+func looksLikeRoute(s, calleeName string) bool {
 	if s == "" {
 		return false
 	}
-	if strings.HasPrefix(s, "/") {
-		return true
-	}
-	// net/http 1.22+ pattern syntax: "GET /foo".
+	// The path literal we ultimately classify. For the net/http 1.22+
+	// "VERB /foo" pattern form, isolate the rooted path portion so the route
+	// guard sees a literal it can judge ("GET /etc/passwd" must still be
+	// rejected as a filesystem path, while "GET /users" stays a route).
+	candidate := s
 	for _, m := range []string{"GET ", "POST ", "PUT ", "DELETE ", "PATCH ", "OPTIONS ", "HEAD "} {
 		if strings.HasPrefix(s, m) {
-			return true
+			candidate = strings.TrimSpace(s[len(m):])
+			break
 		}
 	}
-	return false
+	// Only rooted "/..." literals reach the route bucket; a bare identifier
+	// (map.Get("foo")) or a verb with no rooted path is not a route.
+	if !strings.HasPrefix(candidate, "/") {
+		return false
+	}
+	// The shape heuristic accepted the literal — require the route guard to
+	// agree, so filesystem/config strings stop minting false routes.
+	return routeguard.IsLikelyHTTPRoute(candidate, calleeName)
 }
 
 // firstStringLiteralArg returns the value of the first string-literal

@@ -203,6 +203,7 @@ func (s *Server) registerEnhancementTools() {
 			mcp.WithString("group_by", mcp.Description("(tests_as_edges) symbol (default — tested symbol → its tests) or test (test → symbols it exercises).")),
 			mcp.WithString("algorithm", mcp.Description("(clusters) Community-detection algorithm — leiden (default), louvain, or spectral (recursive Fiedler-vector bisection).")),
 			mcp.WithNumber("min_size", mcp.Description("(clusters) Drop clusters with fewer than this many members — default 3.")),
+			mcp.WithNumber("resolution", mcp.Description("(clusters, leiden) Modularity resolution γ — default 1.0. Higher γ (e.g. 2.0) yields more, smaller communities; lower γ (e.g. 0.5) yields fewer, larger ones. γ = 1.0 is standard modularity and uses the cached incremental partition.")),
 		),
 		s.handleAnalyze,
 	)

@@ -50,6 +50,10 @@ func RubySpec() *LangSpec {
 			graph.KindInterface: true,
 			graph.KindPackage:   true,
 		},
+		// `include` / `prepend` / `extend` model the mixed-in module as
+		// an implements edge; climb it alongside the superclass chain
+		// so a module's methods resolve on the including class.
+		InheritEdgeKinds: []graph.EdgeKind{graph.EdgeExtends, graph.EdgeImplements},
 	}
 }
 
@@ -70,8 +74,7 @@ func rubySupertypes(n *sitter.Node, src []byte) []SuperRef {
 	if body == nil {
 		return out
 	}
-	for i := 0; i < int(body.NamedChildCount()); i++ {
-		c := body.NamedChild(i)
+	for c := range body.NamedChildren() {
 		if c.Type() != "call" {
 			continue
 		}
@@ -86,8 +89,7 @@ func rubySupertypes(n *sitter.Node, src []byte) []SuperRef {
 		if args == nil {
 			continue
 		}
-		for j := 0; j < int(args.NamedChildCount()); j++ {
-			a := args.NamedChild(j)
+		for a := range args.NamedChildren() {
 			if name := rubyConstantText(a, src); name != "" {
 				out = append(out, SuperRef{Name: name, Kind: graph.EdgeImplements, Line: nodeLine(a)})
 			}
@@ -148,12 +150,12 @@ func rubyFields(n *sitter.Node, src []byte) []Binding {
 				}
 			}
 		}
-		for i := 0; i < int(node.NamedChildCount()); i++ {
-			visit(node.NamedChild(i))
+		for child := range node.NamedChildren() {
+			visit(child)
 		}
 	}
-	for i := 0; i < int(body.NamedChildCount()); i++ {
-		visit(body.NamedChild(i))
+	for child := range body.NamedChildren() {
+		visit(child)
 	}
 	return out
 }
@@ -164,8 +166,7 @@ func rubyParams(fn *sitter.Node, src []byte) []Binding {
 		return nil
 	}
 	var out []Binding
-	for i := 0; i < int(params.NamedChildCount()); i++ {
-		p := params.NamedChild(i)
+	for p := range params.NamedChildren() {
 		name := ""
 		switch p.Type() {
 		case "identifier":

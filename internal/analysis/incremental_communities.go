@@ -335,7 +335,7 @@ func DetectCommunitiesLeidenIncremental(
 	edgeRev := g.EdgeIdentityRevisions()
 
 	fullRecompute := func(reason string) (*CommunityResult, *LeidenPartitionCache, IncrementalCommunityStats) {
-		result, part := detectCommunitiesLeidenRaw(g)
+		result, part := detectCommunitiesLeidenRaw(g, defaultLeidenOptions())
 		stats.Incremental = false
 		stats.FullRecomputeReason = reason
 		newCache := &LeidenPartitionCache{

@@ -24,14 +24,18 @@ type HTTPExtractor struct {
 	ClientAliases []string
 }
 
-var _ Extractor = (*HTTPExtractor)(nil)
+var (
+	_ Extractor           = (*HTTPExtractor)(nil)
+	_ TreeAwareExtractor  = (*HTTPExtractor)(nil)
+	_ StoreAwareExtractor = (*HTTPExtractor)(nil)
+)
 
 // SupportedLanguages returns the languages this extractor can analyse.
 func (h *HTTPExtractor) SupportedLanguages() []string {
 	return []string{
 		"go", "typescript", "javascript", "python",
 		"java", "kotlin", "dart", "swift",
-		"rust", "csharp", "ruby", "php", "elixir",
+		"rust", "csharp", "ruby", "php", "elixir", "scala",
 		// File-based routing: page files in these frameworks carry the route
 		// in their path, so the extractor must see them even though they are
 		// not otherwise HTTP-bearing languages.
@@ -269,27 +273,13 @@ var httpPatterns = []httpPattern{
 		languages:  []string{"typescript", "javascript"},
 	},
 
-	// ---- Python consumers ----
-	{
-		re:         regexp.MustCompile(`(?:requests|httpx)\.(get|post|put|delete|patch|head|options)\(\s*["']([^"']+)["']`),
-		role:       RoleConsumer,
-		methodGrp:  1,
-		pathGrp:    2,
-		framework:  "requests/httpx",
-		confidence: 0.9,
-		languages:  []string{"python"},
-	},
-
-	// ---- Java consumers (generic) ----
-	{
-		re:         regexp.MustCompile(`(?:HttpClient|RestTemplate|WebClient).*["']([^"']+)["']`),
-		role:       RoleConsumer,
-		method:     "GET",
-		pathGrp:    1,
-		framework:  "java-http",
-		confidence: 0.7,
-		languages:  []string{"java", "kotlin"},
-	},
+	// ---- Python / Java consumers ----
+	// Python (requests/httpx/aiohttp/urllib3) and JVM (OkHttp/RestTemplate/
+	// WebClient) HTTP-client consumers are detected by the import-gated
+	// detectClientLibConsumers pass (http_client_libs.go), which binds the call
+	// receiver to a resolved library import instead of matching a bare call-text
+	// substring — so a local variable named `requests` or a non-HTTP `obj.get`
+	// accessor no longer mints a spurious consumer contract.
 
 	// ---- Dart consumers ----
 	// Dio (the dominant HTTP client in modern Flutter apps). Matches
@@ -342,16 +332,10 @@ var httpPatterns = []httpPattern{
 	// Covered by the Actix regex above.
 
 	// ---- Rust consumers ----
-	// reqwest: `client.get("/users")`, `Client::new().post("/users")`.
-	{
-		re:         regexp.MustCompile(`\b\w+\.(get|post|put|delete|patch|head)\(\s*(?:&?format!\(\s*)?"([^"]+)"`),
-		role:       RoleConsumer,
-		methodGrp:  1,
-		pathGrp:    2,
-		framework:  "reqwest",
-		confidence: 0.7,
-		languages:  []string{"rust"},
-	},
+	// reqwest consumers (`client.get("/users")`) are detected by the
+	// import-gated detectClientLibConsumers pass (http_client_libs.go): the call
+	// receiver must bind to a `use reqwest::…` import, so an unregistered crate
+	// like surf / hyper never mints a consumer contract.
 
 	// ---- C# ASP.NET providers ----
 	// Attribute routing: `[HttpGet("/path")]`, `[HttpPost]` +
@@ -402,17 +386,10 @@ var httpPatterns = []httpPattern{
 	},
 
 	// ---- Ruby consumers ----
-	// Net::HTTP.get(URI("http://..."))  — low confidence, skip.
-	// Faraday: `conn.post('/users')` — generic consumer.
-	{
-		re:         regexp.MustCompile(`\b\w+\.(get|post|put|delete|patch|head)\(\s*['"]([^'"]+)['"]`),
-		role:       RoleConsumer,
-		methodGrp:  1,
-		pathGrp:    2,
-		framework:  "faraday",
-		confidence: 0.6,
-		languages:  []string{"ruby"},
-	},
+	// Faraday / HTTParty / Net::HTTP / RestClient consumers are detected by the
+	// import-gated detectClientLibConsumers pass (http_client_libs.go), which
+	// requires a `require 'faraday'` (etc.) and binds the receiver to it — so an
+	// arbitrary `obj.get('...')` accessor is no longer a consumer.
 
 	// ---- PHP Laravel providers ----
 	// `Route::get('/path', ...)`, `Route::post('/path', [Controller::class, 'method'])`.
@@ -437,16 +414,10 @@ var httpPatterns = []httpPattern{
 	},
 
 	// ---- PHP consumers ----
-	// Guzzle: `$client->get('/path')`, `$client->request('POST', '/path')`.
-	{
-		re:         regexp.MustCompile(`\$\w+->(get|post|put|delete|patch|head)\(\s*['"]([^'"]+)['"]`),
-		role:       RoleConsumer,
-		methodGrp:  1,
-		pathGrp:    2,
-		framework:  "guzzle",
-		confidence: 0.8,
-		languages:  []string{"php"},
-	},
+	// Guzzle consumers (`$client->get('/path')`, `$client->request('POST', …)`)
+	// are detected by the import-gated detectClientLibConsumers pass
+	// (http_client_libs.go): the variable must be constructed from a
+	// `use GuzzleHttp\…` import before its verb calls become consumers.
 
 	// ---- Elixir Phoenix providers ----
 	// `get "/users", UserController, :index` inside router.ex scope.
@@ -609,7 +580,7 @@ var httpJvmMarkers = [][]byte{
 func (h *HTTPExtractor) Extract(filePath string, src []byte, nodes []*graph.Node, edges []*graph.Edge) []Contract {
 	tree := ParseTreeForLang(detectLanguage(filePath), src)
 	defer tree.Release()
-	return h.extract(filePath, src, nodes, edges, tree)
+	return h.extract(filePath, src, nodes, edges, tree, nil, "")
 }
 
 // ExtractWithTree is the tree-aware variant: enrichment uses BodyFacts
@@ -623,7 +594,28 @@ func (h *HTTPExtractor) ExtractWithTree(
 	edges []*graph.Edge,
 	tree *parser.ParseTree,
 ) []Contract {
-	return h.extract(filePath, src, nodes, edges, tree)
+	return h.extract(filePath, src, nodes, edges, tree, nil, "")
+}
+
+// ExtractWithStore is the store-aware variant: in addition to the tree-aware
+// enrichment, Go route path arguments are resolved graph-wide through the
+// constant store, so a const-referenced or composite-literal path now mints a
+// route. Falls back to a lazily-parsed tree when none is supplied (mirrors
+// Extract). Implements StoreAwareExtractor.
+func (h *HTTPExtractor) ExtractWithStore(
+	filePath string,
+	src []byte,
+	nodes []*graph.Node,
+	edges []*graph.Edge,
+	tree *parser.ParseTree,
+	store EndpointConstStore,
+	repoPrefix string,
+) []Contract {
+	if tree == nil {
+		tree = ParseTreeForLang(detectLanguage(filePath), src)
+		defer tree.Release()
+	}
+	return h.extract(filePath, src, nodes, edges, tree, store, repoPrefix)
 }
 
 func (h *HTTPExtractor) extract(
@@ -632,6 +624,8 @@ func (h *HTTPExtractor) extract(
 	nodes []*graph.Node,
 	edges []*graph.Edge,
 	tree *parser.ParseTree,
+	store EndpointConstStore,
+	repoPrefix string,
 ) []Contract {
 	lang := detectLanguage(filePath)
 	if markers, ok := httpPrefilterMarkers[lang]; ok && !srcHasAnyMarker(src, markers) {
@@ -643,7 +637,8 @@ func (h *HTTPExtractor) extract(
 		// page.tsx, a SvelteKit +server.ts) and React Router modules carry
 		// none of those markers either — their route is path/JSX-derived —
 		// so keep them alive too.
-		if !srcMentionsAnyAlias(src, h.ClientAliases) && !isFileBasedRouteFile(filePath) && !hasReactRouterMarkers(src) {
+		if !srcMentionsAnyAlias(src, h.ClientAliases) && !isFileBasedRouteFile(filePath) &&
+			!hasReactRouterMarkers(src) && !srcMentionsClientLib(src, httpClientLibraries[lang]) {
 			return nil
 		}
 	}
@@ -683,7 +678,7 @@ func (h *HTTPExtractor) extract(
 	// eliminates the Fiber self-reflexive bug.
 	if lang == "go" && tree != nil && tree.Tree() != nil {
 		root := tree.Tree().RootNode()
-		matches := detectGoRoutesAST(root, src)
+		matches := detectGoRoutesAST(root, src, filePath, repoPrefix, store)
 		for _, rm := range matches {
 			c := buildGoRouteContract(rm, filePath, fileNodes, lines, lang, tree, text, src)
 			out = append(out, c)
@@ -713,6 +708,17 @@ func (h *HTTPExtractor) extract(
 				method = strings.ToUpper(text[m[pat.methodGrp*2]:m[pat.methodGrp*2+1]])
 			}
 			path = text[m[pat.pathGrp*2]:m[pat.pathGrp*2+1]]
+
+			// Consumer literals that point at a filesystem location, a
+			// config file, or a static asset are not HTTP API consumers —
+			// drop them before they mint a spurious consumer contract. Only
+			// rooted "/..." literals are gated; relative and
+			// template-interpolated client calls keep their existing
+			// behaviour so legitimate dynamic consumers are not lost.
+			if pat.role == RoleConsumer && strings.HasPrefix(path, "/") &&
+				(!IsLikelyHTTPRouteLiteral(path, "") || IsStaticAssetPath(path)) {
+				continue
+			}
 
 			// Go's net/http stdlib mux treats a trailing slash as a
 			// subtree match — `mux.HandleFunc("POST /v1/tools/", h)`
@@ -890,6 +896,12 @@ func (h *HTTPExtractor) extract(
 		out = append(out, h.detectClientAliasConsumers(filePath, text, lines, fileNodes, lang, tree)...)
 	}
 
+	// Import-gated HTTP client-library consumers for the languages whose client
+	// surface is bound to a resolved import rather than a call-text substring
+	// (python/rust/ruby/php/java/kotlin/scala). Runs after the regex / framework
+	// passes so the canonical contract IDs match the provider side.
+	out = append(out, h.detectClientLibConsumers(filePath, lang, src, lines, fileNodes, tree, store, repoPrefix)...)
+
 	// Preserve the developer-written path and stamp the per-reference route
 	// kind on every HTTP contract.
 	for i := range out {
@@ -969,6 +981,8 @@ func detectLanguage(filePath string) string {
 		return "ruby"
 	case strings.HasSuffix(filePath, ".php"):
 		return "php"
+	case strings.HasSuffix(filePath, ".scala"), strings.HasSuffix(filePath, ".sc"):
+		return "scala"
 	case strings.HasSuffix(filePath, ".ex"), strings.HasSuffix(filePath, ".exs"):
 		return "elixir"
 	case strings.HasSuffix(filePath, ".astro"):

@@ -35,6 +35,13 @@ func (s *Server) handleAnalyzeClusters(ctx context.Context, req mcp.CallToolRequ
 	limit := max(req.GetInt("limit", 50), 1)
 	pathPrefix := strings.TrimSpace(req.GetString("path_prefix", ""))
 	algorithm := strings.ToLower(strings.TrimSpace(req.GetString("algorithm", "leiden")))
+	// resolution (γ) tunes the Leiden modularity granularity. Absent or
+	// non-positive falls back to 1.0 (standard modularity). Higher γ →
+	// smaller, denser clusters; lower γ → fewer, larger ones.
+	resolution := req.GetFloat("resolution", 1.0)
+	if resolution <= 0 {
+		resolution = 1.0
+	}
 
 	var cr *analysis.CommunityResult
 	// incrStats is populated only on the Leiden path; it records
@@ -44,7 +51,16 @@ func (s *Server) handleAnalyzeClusters(ctx context.Context, req mcp.CallToolRequ
 	switch algorithm {
 	case "", "leiden":
 		algorithm = "leiden"
-		cr, incrStats = s.incrementalCommunities()
+		// The incremental partition cache is keyed to the default
+		// resolution. A non-default γ recomputes the partition fully so
+		// the cache (γ = 1.0) is never poisoned; γ = 1.0 keeps the fast
+		// cached path and stays byte-identical to the pre-resolution
+		// output.
+		if resolution == 1.0 {
+			cr, incrStats = s.incrementalCommunities()
+		} else {
+			cr = analysis.DetectCommunitiesLeidenWith(s.graph, analysis.LeidenOptions{Resolution: resolution})
+		}
 	case "louvain":
 		cr = analysis.DetectCommunitiesLouvain(s.graph)
 	case "spectral":
@@ -229,6 +245,7 @@ func (s *Server) handleAnalyzeClusters(ctx context.Context, req mcp.CallToolRequ
 		if incrStats.FullRecomputeReason != "" {
 			detection["full_recompute_reason"] = incrStats.FullRecomputeReason
 		}
+		detection["resolution"] = resolution
 		resp["detection"] = detection
 	}
 	return s.respondJSONOrTOON(ctx, req, resp)

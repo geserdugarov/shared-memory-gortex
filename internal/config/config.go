@@ -216,6 +216,16 @@ type SemanticConfig struct {
 	WatchDebounceMs   int                      `mapstructure:"watch_debounce_ms" yaml:"watch_debounce_ms,omitempty"`
 	RefuteUnconfirmed bool                     `mapstructure:"refute_unconfirmed" yaml:"refute_unconfirmed,omitempty"`
 	Providers         []SemanticProviderConfig `mapstructure:"providers" yaml:"providers,omitempty"`
+	// GoTypes enables the heavyweight go/packages type-check provider
+	// ("go-types"): a full `go list ./...` + go/types pass over the module
+	// (and its dependencies) on every index. The in-process tree-sitter Go
+	// resolver (go-ast-types) is the always-on floor and resolves the common
+	// receiver / cross-file call cases with no toolchain; the go/packages
+	// provider adds full cross-package / generic type precision but costs
+	// tens of seconds per Go module per warmup and, on an already-resolved
+	// graph, frequently confirms zero new edges. Tri-state, DEFAULT OFF —
+	// opt in for maximum Go type precision. Env override GORTEX_GO_TYPES=1/0.
+	GoTypes *bool `mapstructure:"go_types" yaml:"go_types,omitempty"`
 	// AdditionalWorkspaceFolders are extra directory roots passed to
 	// every LSP server's `initialize` request as workspace folders.
 	// This is how cross-package resolution works for a TypeScript (or
@@ -250,6 +260,17 @@ type SemanticConfig struct {
 	// anything that isn't worth embedding usually isn't worth
 	// full-text-indexing either. See DefaultSkipSearch.
 	SkipSearch []SkipEmbedRule `mapstructure:"skip_search" yaml:"skip_search,omitempty"`
+}
+
+// GoTypesEnabledOrDefault resolves the tri-state SemanticConfig.GoTypes.
+// The heavyweight go/packages type-check provider is OFF by default — the
+// always-on tree-sitter Go floor (go-ast-types) serves Go resolution — so
+// opt in explicitly for full cross-package type precision.
+func (s SemanticConfig) GoTypesEnabledOrDefault() bool {
+	if s.GoTypes == nil {
+		return false
+	}
+	return *s.GoTypes
 }
 
 // SkipEmbedRule says: when a node's Language matches Language AND its

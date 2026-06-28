@@ -32,7 +32,56 @@ import (
 // Result has the same shape as DetectCommunities so the call site
 // can swap them out without other changes.
 func DetectCommunitiesLeiden(g graph.Store) *CommunityResult {
-	result, _ := detectCommunitiesLeidenRaw(g)
+	result, _ := detectCommunitiesLeidenRaw(g, defaultLeidenOptions())
+	return result
+}
+
+// LeidenOptions tunes the Leiden community detector.
+type LeidenOptions struct {
+	// Resolution (γ) scales the expected-edges (null-model) penalty in
+	// the modularity-gain calculation. The standard modularity score is
+	//
+	//	Q = Σ_c ( e_in[c]/m − γ·(Σtot[c]/2m)² )
+	//
+	// so γ multiplies the null-model term only. γ = 1.0 is plain
+	// modularity (the historical default). Higher γ makes the penalty
+	// larger, so the optimizer favours smaller, denser communities;
+	// lower γ favours fewer, larger ones. Zero or negative values are
+	// treated as the 1.0 default.
+	Resolution float64
+
+	// Note: only the modularity objective is supported. A Constant
+	// Potts Model (CPM) objective — which replaces the degree-based
+	// null model with a per-pair γ penalty driven by community node
+	// counts — would need node-weight bookkeeping threaded through the
+	// refinement and aggregation phases (which currently track only
+	// degree sums and edge weights), so it is intentionally left as a
+	// follow-up rather than shipped partially.
+}
+
+// defaultLeidenOptions returns the options that reproduce the
+// historical Leiden behaviour exactly: γ = 1.0 (a no-op multiply on
+// the penalty term, so the partition is bit-identical to the
+// pre-resolution implementation).
+func defaultLeidenOptions() LeidenOptions {
+	return LeidenOptions{Resolution: 1.0}
+}
+
+// resolution returns the effective γ, normalising the zero value and
+// any non-positive input to the 1.0 default.
+func (o LeidenOptions) resolution() float64 {
+	if o.Resolution <= 0 {
+		return 1.0
+	}
+	return o.Resolution
+}
+
+// DetectCommunitiesLeidenWith runs the Leiden pipeline with explicit
+// options (resolution γ). Passing defaultLeidenOptions() — or an
+// options value whose Resolution is 1.0 — yields a partition that is
+// byte-identical to DetectCommunitiesLeiden.
+func DetectCommunitiesLeidenWith(g graph.Store, opts LeidenOptions) *CommunityResult {
+	result, _ := detectCommunitiesLeidenRaw(g, opts)
 	return result
 }
 
@@ -45,7 +94,8 @@ func DetectCommunitiesLeiden(g graph.Store) *CommunityResult {
 // ids and drops singletons, neither of which can drive a restricted
 // re-optimization. The returned partition is nil when the graph has
 // no clustering-relevant edges (the result is then empty too).
-func detectCommunitiesLeidenRaw(g graph.Store) (*CommunityResult, *leidenPartition) {
+func detectCommunitiesLeidenRaw(g graph.Store, opts LeidenOptions) (*CommunityResult, *leidenPartition) {
+	resolution := opts.resolution()
 	lg := buildLeidenGraph(g)
 	if lg == nil {
 		return &CommunityResult{NodeToComm: make(map[string]string)}, nil
@@ -78,11 +128,11 @@ func detectCommunitiesLeidenRaw(g graph.Store) (*CommunityResult, *leidenPartiti
 	const maxIters = 12
 	for iter := 0; iter < maxIters; iter++ {
 		// Phase 1: fast local moves.
-		currentComm = leidenFastLocalMoves(currentNodes, currentNbrs, currentDeg, currentTotal, currentComm)
+		currentComm = leidenFastLocalMoves(currentNodes, currentNbrs, currentDeg, currentTotal, currentComm, resolution)
 
 		// Phase 2: refinement. Each phase-1 community is internally
 		// re-clustered by running local moves on the induced sub-graph.
-		refined := leidenRefine(currentComm, currentNbrs, currentDeg)
+		refined := leidenRefine(currentComm, currentNbrs, currentDeg, resolution)
 
 		// If refinement didn't merge anything (every refined comm is
 		// a singleton w.r.t. current nodes), no further aggregation
@@ -135,6 +185,7 @@ func leidenFastLocalMoves(
 	degree map[string]float64,
 	totalWeight float64,
 	initial map[string]string,
+	resolution float64,
 ) map[string]string {
 	comm := make(map[string]string, len(nodeIDs))
 	commMembers := make(map[string]map[string]bool)
@@ -175,7 +226,11 @@ func leidenFastLocalMoves(
 		if loop, ok := neighbors[id][id]; ok {
 			kiIn -= loop
 		}
-		removeDelta := kiIn - (sigmaTot[currentComm]-ki)*ki/(2*totalWeight)
+		// γ (resolution) scales the expected-edges (null-model) penalty
+		// only; the actual-edges terms (kiIn, wc) are untouched. With
+		// resolution == 1.0 the multiply is the IEEE-754 identity, so
+		// the default partition is bit-identical to the unscaled form.
+		removeDelta := kiIn - resolution*((sigmaTot[currentComm]-ki)*ki/(2*totalWeight))
 
 		bestComm := currentComm
 		bestGain := 0.0
@@ -183,7 +238,7 @@ func leidenFastLocalMoves(
 			if c == currentComm {
 				continue
 			}
-			gain := wc - sigmaTot[c]*ki/(2*totalWeight) - removeDelta
+			gain := wc - resolution*(sigmaTot[c]*ki/(2*totalWeight)) - removeDelta
 			if gain > bestGain {
 				bestGain = gain
 				bestComm = c
@@ -237,6 +292,7 @@ func leidenRefine(
 	comm map[string]string,
 	neighbors map[string]map[string]float64,
 	degree map[string]float64,
+	resolution float64,
 ) map[string]string {
 	byComm := make(map[string][]string)
 	for id, cid := range comm {
@@ -289,7 +345,7 @@ func leidenRefine(
 		for _, id := range members {
 			init[id] = id
 		}
-		subComm := leidenFastLocalMoves(members, subNbrs, subDeg, subTotal, init)
+		subComm := leidenFastLocalMoves(members, subNbrs, subDeg, subTotal, init, resolution)
 		for _, id := range members {
 			refined[id] = subComm[id]
 		}

@@ -74,6 +74,19 @@ type AliasRef struct {
 	Line   int
 }
 
+// NarrowFact is one type refinement a guard condition imposes on a
+// variable. Within the scope the guard governs, Variable provably holds
+// type Type. Negated inverts the sense: `!($x instanceof Foo)` yields a
+// negated fact — true where the condition is FALSE, i.e. the tail of an
+// early-exit guard. The binder applies non-negated facts to the
+// then-branch and negated facts to the tail after an early-exit guard;
+// it never narrows the else branch.
+type NarrowFact struct {
+	Variable string // receiver name as written (sigil-included, e.g. "$x")
+	Type     string // narrowed type name as written ("" / unresolved is skipped)
+	Negated  bool
+}
+
 // LangSpec adapts the shared engine to one language's tree-sitter
 // grammar. The node-type sets drive the generic walk; the hooks decode
 // the handful of shapes that differ per grammar. Hooks may be nil when
@@ -174,6 +187,33 @@ type LangSpec struct {
 	// indexes (strip generics / pointers / qualifiers). nil uses the
 	// shared default.
 	NormalizeType func(t string) string
+
+	// Narrowings decodes a guard / if CONDITION node into zero or more
+	// type refinements (PHP `$x instanceof Foo` -> {"$x", "Foo", false};
+	// `!($x instanceof Foo)` -> {"$x", "Foo", true}). nil disables
+	// narrowing entirely: the binder then descends if-statements through
+	// the generic child walk exactly as it descends any other node, so a
+	// language that leaves Narrowings (and IfStmt) unset behaves
+	// byte-for-byte as before. Consulted only together with IfStmt.
+	Narrowings func(cond *sitter.Node, src []byte) []NarrowFact
+
+	// IfStmt decomposes an if-statement node into its condition and its
+	// then-body; ok=false for any other node. It is the grammar adapter
+	// that lets the shared binder find an if's parts without baking
+	// per-grammar field names into the binder. The remaining children of
+	// the if (else / else-if clauses) are walked generically without
+	// narrowing. Consulted only when Narrowings is set; nil (the default)
+	// leaves if-statements to the generic child walk.
+	IfStmt func(n *sitter.Node, src []byte) (cond, body *sitter.Node, ok bool)
+
+	// EarlyExit reports whether an if's then-body is a guard clause: a
+	// body whose control unconditionally leaves the surrounding flow
+	// (return / throw / continue / break). A negated narrowing under such
+	// a body refines the variable for the statements that FOLLOW the if in
+	// the same scope (the guard's tail). nil disables tail narrowing while
+	// still allowing then-branch narrowing. Consulted only when Narrowings
+	// and IfStmt are set.
+	EarlyExit func(body *sitter.Node, src []byte) bool
 }
 
 // inheritEdgeKinds returns the edge kinds methodOn climbs when looking

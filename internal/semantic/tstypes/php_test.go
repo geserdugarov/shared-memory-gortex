@@ -543,6 +543,138 @@ class App {
 	assertUntouched(t, g, run.ID, "fn", "php-types")
 }
 
+// An `instanceof` guard narrows a variable inside the then-branch:
+// `if ($x instanceof Foo) { $x->bar(); }` resolves $x->bar() to Foo::bar.
+// The edge is graded inferred — it is derived from a guard, not a direct
+// binding.
+func TestPHP_InstanceofThenBranchNarrows(t *testing.T) {
+	g, dir := buildFixture(t, map[string]string{
+		"app.php": `<?php
+class Foo {
+    public function bar(): void {}
+}
+
+function f($x): void {
+    if ($x instanceof Foo) {
+        $x->bar();
+    }
+}
+`,
+	})
+	p := NewProvider(PHPSpec(), zap.NewNop())
+	if _, err := p.Enrich(g, dir); err != nil {
+		t.Fatal(err)
+	}
+	caller := nodeByNameKind(t, g, "f", graph.KindFunction)
+	target := nodeByNameKind(t, g, "bar", graph.KindMethod)
+	e := callEdgeTo(g, caller.ID, target.ID)
+	if e == nil {
+		t.Fatalf("instanceof then-branch narrowing did not resolve $x->bar() to Foo::bar; edges: %v", g.GetOutEdges(caller.ID))
+	}
+	if e.Origin != graph.OriginASTResolved {
+		t.Errorf("narrowed edge origin = %q, want %q", e.Origin, graph.OriginASTResolved)
+	}
+	if e.Meta["semantic_source"] != "php-types" {
+		t.Errorf("narrowed edge semantic_source = %v, want php-types", e.Meta["semantic_source"])
+	}
+	if e.Meta["resolution_strategy"] != string(strategyInferred) {
+		t.Errorf("narrowed edge resolution_strategy = %v, want %q", e.Meta["resolution_strategy"], strategyInferred)
+	}
+	if e.Confidence != inferredConfidence {
+		t.Errorf("narrowed edge confidence = %v, want %v", e.Confidence, inferredConfidence)
+	}
+}
+
+// A negated `instanceof` guard with an early-exit body narrows the TAIL:
+// `if (!($x instanceof Foo)) { return; } $x->bar();` resolves the trailing
+// $x->bar() to Foo::bar, because control past the guard implies $x is Foo.
+func TestPHP_InstanceofGuardTailNarrows(t *testing.T) {
+	g, dir := buildFixture(t, map[string]string{
+		"app.php": `<?php
+class Foo {
+    public function bar(): void {}
+}
+
+function f($x): void {
+    if (!($x instanceof Foo)) {
+        return;
+    }
+    $x->bar();
+}
+`,
+	})
+	p := NewProvider(PHPSpec(), zap.NewNop())
+	if _, err := p.Enrich(g, dir); err != nil {
+		t.Fatal(err)
+	}
+	caller := nodeByNameKind(t, g, "f", graph.KindFunction)
+	target := nodeByNameKind(t, g, "bar", graph.KindMethod)
+	e := callEdgeTo(g, caller.ID, target.ID)
+	if e == nil {
+		t.Fatalf("guard-tail narrowing did not resolve $x->bar() to Foo::bar; edges: %v", g.GetOutEdges(caller.ID))
+	}
+	if e.Meta["resolution_strategy"] != string(strategyInferred) {
+		t.Errorf("guard-tail edge resolution_strategy = %v, want %q", e.Meta["resolution_strategy"], strategyInferred)
+	}
+	if e.Confidence != inferredConfidence {
+		t.Errorf("guard-tail edge confidence = %v, want %v", e.Confidence, inferredConfidence)
+	}
+}
+
+// The else branch is NOT narrowed: in
+// `if ($x instanceof Foo) {} else { $x->bar(); }` the call in the else
+// branch (where $x is provably NOT Foo) must not resolve to Foo::bar.
+func TestPHP_InstanceofElseBranchNotNarrowed(t *testing.T) {
+	g, dir := buildFixture(t, map[string]string{
+		"app.php": `<?php
+class Foo {
+    public function bar(): void {}
+}
+
+function f($x): void {
+    if ($x instanceof Foo) {
+    } else {
+        $x->bar();
+    }
+}
+`,
+	})
+	p := NewProvider(PHPSpec(), zap.NewNop())
+	if _, err := p.Enrich(g, dir); err != nil {
+		t.Fatal(err)
+	}
+	caller := nodeByNameKind(t, g, "f", graph.KindFunction)
+	assertUntouched(t, g, caller.ID, "bar", "php-types")
+}
+
+// A non-guard negated instanceof (the if does NOT early-exit) narrows
+// nothing in the tail: `if (!($x instanceof Foo)) { $x->bar(); }`
+// resolves in the then-branch only by the NEGATED sense, which v1 does
+// not narrow — so neither the then-branch nor the tail binds Foo. Guards
+// the conservativeness contract: only an early-exit body narrows the tail.
+func TestPHP_NegatedInstanceofWithoutEarlyExitDoesNotNarrowTail(t *testing.T) {
+	g, dir := buildFixture(t, map[string]string{
+		"app.php": `<?php
+class Foo {
+    public function bar(): void {}
+}
+
+function f($x): void {
+    if (!($x instanceof Foo)) {
+        $x->bar();
+    }
+    $x->bar();
+}
+`,
+	})
+	p := NewProvider(PHPSpec(), zap.NewNop())
+	if _, err := p.Enrich(g, dir); err != nil {
+		t.Fatal(err)
+	}
+	caller := nodeByNameKind(t, g, "f", graph.KindFunction)
+	assertUntouched(t, g, caller.ID, "bar", "php-types")
+}
+
 // EnrichFile resolves only the named file's calls, leaving others alone.
 func TestPHP_EnrichFileScopesToOneFile(t *testing.T) {
 	g, dir := buildFixture(t, map[string]string{

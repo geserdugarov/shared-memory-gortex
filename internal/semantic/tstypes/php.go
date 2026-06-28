@@ -46,7 +46,115 @@ func PHPSpec() *LangSpec {
 		NormalizeType:    normalizePHPType,
 		ChainedReceivers: true,
 		TraitAliases:     phpTraitAliases,
+		Narrowings:       phpNarrowings,
+		IfStmt:           phpIfStmt,
+		EarlyExit:        phpEarlyExit,
 	}
+}
+
+// phpIfStmt decomposes a PHP if_statement into its condition and
+// then-body. The grammar wraps the test in a parenthesized_expression
+// (the `condition` field) and gives the then-branch as the `body` field;
+// `else_clause` / `else_if_clause` alternatives are left for the binder
+// to walk generically (it never narrows them). ok=false for any non-if
+// node.
+func phpIfStmt(n *sitter.Node, _ []byte) (cond, body *sitter.Node, ok bool) {
+	if n.Type() != "if_statement" {
+		return nil, nil, false
+	}
+	return n.ChildByFieldName("condition"), n.ChildByFieldName("body"), true
+}
+
+// phpNarrowings decodes an if condition into type refinements. It
+// recognises `$x instanceof Foo` (a binary_expression whose `operator` is
+// instanceof, left a variable_name, right a class name) and its negation
+// `!($x instanceof Foo)` / `!$x instanceof Foo` (a unary_op_expression
+// whose `!` flips the sense). Only a simple `$var instanceof TypeName`
+// shape narrows — a property / array / call receiver, or an instanceof
+// against a dynamic class expression, is left unresolved. Scalar
+// predicates (`is_string`, `is_int`, …) are deliberately NOT wired: PHP
+// scalars carry no methods to resolve a call against, so narrowing to one
+// buys nothing and only risks shadowing a same-named class.
+func phpNarrowings(cond *sitter.Node, src []byte) []NarrowFact {
+	n := phpUnwrapParen(cond)
+	negated := false
+	// Peel logical-not layers, flipping the sense each time. Any other
+	// unary operator is not a guard we model.
+	for n != nil && n.Type() == "unary_op_expression" {
+		if phpOperator(n, src) != "!" {
+			return nil
+		}
+		negated = !negated
+		n = phpUnwrapParen(n.ChildByFieldName("argument"))
+	}
+	if n == nil || n.Type() != "binary_expression" || phpOperator(n, src) != "instanceof" {
+		return nil
+	}
+	left := n.ChildByFieldName("left")
+	right := n.ChildByFieldName("right")
+	if left == nil || right == nil || left.Type() != "variable_name" {
+		return nil
+	}
+	switch right.Type() {
+	case "name", "qualified_name":
+	default:
+		// `$x instanceof $klass` / `instanceof static` — no static type.
+		return nil
+	}
+	variable := strings.TrimSpace(left.Content(src))
+	typ := strings.TrimSpace(right.Content(src))
+	if variable == "" || typ == "" {
+		return nil
+	}
+	return []NarrowFact{{Variable: variable, Type: typ, Negated: negated}}
+}
+
+// phpOperator returns the text of a unary / binary expression's `operator`
+// field, "" when absent.
+func phpOperator(n *sitter.Node, src []byte) string {
+	op := n.ChildByFieldName("operator")
+	if op == nil {
+		return ""
+	}
+	return strings.TrimSpace(op.Content(src))
+}
+
+// phpEarlyExit reports whether a PHP if then-body is a guard clause whose
+// control unconditionally leaves the surrounding flow. A braced body
+// qualifies when its LAST statement is an early exit (any preceding
+// statements still run, then control leaves); a brace-less single
+// statement qualifies directly. Early exits are return / break / continue
+// / goto, and `throw` — which the current grammar parses as a
+// throw_expression wrapped in an expression_statement.
+func phpEarlyExit(body *sitter.Node, _ []byte) bool {
+	stmt := body
+	if body.Type() == "compound_statement" {
+		var last *sitter.Node
+		for c := range body.NamedChildren() {
+			last = c
+		}
+		if last == nil {
+			return false
+		}
+		stmt = last
+	}
+	return phpIsEarlyExitStmt(stmt)
+}
+
+// phpIsEarlyExitStmt reports whether a single statement unconditionally
+// leaves the surrounding control flow.
+func phpIsEarlyExitStmt(n *sitter.Node) bool {
+	switch n.Type() {
+	case "return_statement", "break_statement", "continue_statement", "goto_statement":
+		return true
+	case "expression_statement":
+		for c := range n.NamedChildren() {
+			if c.Type() == "throw_expression" {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // phpTraitAliases lists the trait-use alias adaptations of a PHP type:

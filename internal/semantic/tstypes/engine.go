@@ -560,7 +560,10 @@ func (a *applier) callReceiverType(idx *fileIndex, cf *callFact) (*graph.Node, b
 		recvType = a.callableReturnType(idx, cf.recvPendingCallee)
 	}
 	if recvType != "" {
-		return a.resolveTypeNode(idx, recvType), false
+		// cf.inferred is set only when recvType came from a guard
+		// narrowing; a direct annotation / constructor / propagation
+		// leaves it false, so the direct path is unchanged.
+		return a.resolveTypeNode(idx, recvType), cf.inferred
 	}
 	if cf.recvIdent != "" {
 		// Static / type-qualified call: only when the identifier is a

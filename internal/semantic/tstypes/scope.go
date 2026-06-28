@@ -44,6 +44,12 @@ type callFact struct {
 	// return type — applying the fluent self / trait rewrite — to type
 	// the outer call's receiver, and grades the outer edge as inferred.
 	recvChain *callFact
+	// inferred is set when recvType was bound by a guard narrowing
+	// (`if ($x instanceof Foo)`) rather than a direct annotation /
+	// constructor / propagation. The apply phase grades the resulting call
+	// edge at the inferred confidence band, honestly weaker than a direct
+	// resolution.
+	inferred bool
 }
 
 // superFact is one declared supertype relation, pending graph
@@ -84,6 +90,10 @@ type bindingState struct {
 	typ           string
 	pendingCallee string
 	poisoned      bool
+	// narrowed marks a binding produced by a guard narrowing rather than a
+	// direct annotation / inference. It rides onto the call fact so the
+	// apply phase grades a call through it at the inferred band.
+	narrowed bool
 }
 
 type scopeKind int
@@ -92,6 +102,11 @@ const (
 	scopeFile scopeKind = iota
 	scopeType
 	scopeFunc
+	// scopeBlock is a transparent nested scope used to shadow a binding
+	// inside an if's then-branch (type narrowing). It is neither a type
+	// nor a callable scope, so enclosingTypeName / nearestTypeScope walk
+	// straight through it to the real enclosing type.
+	scopeBlock
 )
 
 type scopeEnv struct {
@@ -308,7 +323,96 @@ func (b *binder) walk(n *sitter.Node, env *scopeEnv) {
 		}
 	}
 
+	// Type narrowing: an if-statement whose guard refines a variable's
+	// type. Gated on Narrowings + IfStmt so every language that leaves the
+	// hooks unset descends if-statements exactly as before (nil hook =
+	// no-op). An if-statement is not a type / func / local / call node, so
+	// none of the branches above claim it before we reach here.
+	if b.spec.Narrowings != nil && b.spec.IfStmt != nil {
+		if cond, body, ok := b.spec.IfStmt(n, b.src); ok {
+			b.walkIf(n, cond, body, env)
+			return
+		}
+	}
+
 	b.walkChildren(n, env)
+}
+
+// walkIf descends an if-statement, applying type narrowing. Reached only
+// when the spec wires Narrowings + IfStmt, so a language without those
+// hooks never enters here.
+//
+// Two refinements land:
+//   - then-branch: each non-negated fact (`$x instanceof Foo`) binds the
+//     variable to the narrowed type in a child scope that shadows the
+//     outer binding, so calls inside the then-body resolve on that type.
+//   - guard tail: when the then-body is an early exit
+//     (`if (!(...)) { return; }`), each negated fact binds the variable in
+//     the CURRENT scope, refining it for the statements that FOLLOW the if
+//     — control reaching them implies the guard did not fire, so the
+//     variable provably holds the narrowed type.
+//
+// The else / else-if branches are walked WITHOUT narrowing (a v1
+// conservativeness choice), and a non-guard negated fact narrows nothing.
+func (b *binder) walkIf(n, cond, body *sitter.Node, env *scopeEnv) {
+	var facts []NarrowFact
+	if cond != nil {
+		facts = b.spec.Narrowings(cond, b.src)
+		// The condition may itself hold calls / locals worth recording.
+		b.walk(cond, env)
+	}
+
+	// then-branch: non-negated facts narrow inside a shadowing child scope.
+	if body != nil {
+		thenEnv := env
+		for _, f := range facts {
+			if f.Negated {
+				continue
+			}
+			if thenEnv == env {
+				thenEnv = newScope(env, scopeBlock)
+			}
+			b.bindNarrow(thenEnv, f.Variable, f.Type)
+		}
+		b.walk(body, thenEnv)
+	}
+
+	// Remaining children (else / else-if clauses) are walked unrefined.
+	for c := range n.NamedChildren() {
+		if (cond != nil && c.Equal(cond)) || (body != nil && c.Equal(body)) {
+			continue
+		}
+		b.walk(c, env)
+	}
+
+	// Guard tail: a negated fact under an early-exit then-body refines the
+	// variable for the rest of THIS scope. Applied last so it never leaks
+	// into the branches walked above.
+	if body != nil && b.spec.EarlyExit != nil && b.spec.EarlyExit(body, b.src) {
+		for _, f := range facts {
+			if f.Negated {
+				b.bindNarrow(env, f.Variable, f.Type)
+			}
+		}
+	}
+}
+
+// bindNarrow shadows name with the narrowed type directly in env,
+// bypassing the single-assignment-lite poison rule: a narrowing is a
+// deliberate refinement of a variable whose outer binding (often an
+// untyped param) we intend to override within the guarded scope, not a
+// conflicting reassignment. The binding is flagged narrowed so the call
+// edge it grounds lands at the inferred confidence band. An empty or
+// unresolvable type is skipped — precision over recall.
+func (b *binder) bindNarrow(env *scopeEnv, name, typ string) {
+	if name == "" {
+		return
+	}
+	typ = b.spec.normalize(typ)
+	if typ == "" {
+		return
+	}
+	env.vars[name] = &bindingState{typ: typ, narrowed: true}
 }
 
 func (b *binder) walkChildren(n *sitter.Node, env *scopeEnv) {
@@ -380,7 +484,7 @@ func (b *binder) receiverFact(recv *sitter.Node, env *scopeEnv) (callFact, bool)
 				return callFact{}, false
 			}
 			if st.typ != "" {
-				return callFact{recvType: st.typ}, true
+				return callFact{recvType: st.typ, inferred: st.narrowed}, true
 			}
 			if st.pendingCallee != "" {
 				return callFact{recvPendingCallee: st.pendingCallee}, true

@@ -651,3 +651,62 @@ func TestCSharpEnumMembersConstsAndFlags(t *testing.T) {
 	assert.Equal(t, "App.Core", byName["C"].Meta["scope_ns"])
 	assert.Equal(t, "App.Core", byName["FetchAsync"].Meta["scope_ns"])
 }
+
+func TestCSharpTypeFlavor(t *testing.T) {
+	src := []byte(`namespace App;
+
+class Service {}
+struct Vec { public int X; }
+interface IStore {}
+enum Color { Red }
+record Rec(int X);
+record struct RVec(int X);
+`)
+	res, err := NewCSharpExtractor().Extract("flavor.cs", src)
+	require.NoError(t, err)
+
+	byName := map[string]*graph.Node{}
+	for _, n := range res.Nodes {
+		byName[n.Name] = n
+	}
+
+	require.NotNil(t, byName["Service"])
+	assert.Equal(t, "class", byName["Service"].Meta["type_flavor"])
+
+	require.NotNil(t, byName["Vec"])
+	assert.Equal(t, "struct", byName["Vec"].Meta["type_flavor"])
+	// Dual-write: the legacy value_type marker stays beside type_flavor.
+	assert.Equal(t, true, byName["Vec"].Meta["value_type"])
+
+	require.NotNil(t, byName["IStore"])
+	assert.Equal(t, graph.KindInterface, byName["IStore"].Kind)
+	assert.Equal(t, "interface", byName["IStore"].Meta["type_flavor"])
+
+	require.NotNil(t, byName["Color"])
+	assert.Equal(t, "enum", byName["Color"].Meta["type_flavor"])
+
+	require.NotNil(t, byName["Rec"])
+	assert.Equal(t, "record", byName["Rec"].Meta["type_flavor"])
+
+	require.NotNil(t, byName["RVec"])
+	assert.Equal(t, "record", byName["RVec"].Meta["type_flavor"])
+}
+
+func TestCSharpAnonymousTypeFlavor(t *testing.T) {
+	src := []byte(`namespace App;
+
+class Host {
+    void Wire() {
+        var p = new { Name = "x", Age = 5 };
+        System.Console.WriteLine(p.Name);
+    }
+}
+`)
+	res, err := NewCSharpExtractor().Extract("Host.cs", src)
+	require.NoError(t, err)
+
+	anon, _ := anonTypeAndExtends(t, res)
+	// Dual-write: the legacy anonymous marker stays beside type_flavor.
+	assert.Equal(t, true, anon.Meta["anonymous"])
+	assert.Equal(t, "anonymous_class", anon.Meta["type_flavor"])
+}

@@ -209,7 +209,7 @@ func (e *ObjCExtractor) Extract(filePath string, src []byte) (*parser.Extraction
 			ID: id, Kind: graph.KindType, Name: fm.component,
 			FilePath: filePath, StartLine: fm.line, EndLine: findBlockEnd(lines, fm.line),
 			Language: "objc",
-			Meta:     map[string]any{"fabric_component": fm.component, "fabric_native": "objc"},
+			Meta:     map[string]any{"fabric_component": fm.component, "fabric_native": "objc", "type_flavor": "component", "ui_component": "react"},
 		}
 		if len(fm.props) > 0 {
 			node.Meta["fabric_props"] = fm.props

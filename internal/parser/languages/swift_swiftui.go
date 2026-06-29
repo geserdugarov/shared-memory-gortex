@@ -50,6 +50,9 @@ func captureAppleUIRoles(result *parser.ExtractionResult, root *sitter.Node, fil
 			if swiftRole == "app_entry" {
 				nd.Meta["entry_point"] = true
 			}
+			if swiftRole == "component" {
+				nd.Meta["ui_component"] = "swiftui"
+			}
 		}
 		if uikitRole != "" {
 			nd.Meta["uikit_role"] = uikitRole

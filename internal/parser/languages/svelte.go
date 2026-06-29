@@ -40,7 +40,7 @@ func (e *SvelteExtractor) Extract(filePath string, src []byte) (*parser.Extracti
 	result.Nodes = append(result.Nodes, &graph.Node{
 		ID: componentID, Kind: graph.KindType, Name: componentName,
 		FilePath: filePath, StartLine: 1, EndLine: lineCount, Language: "svelte",
-		Meta: map[string]any{"component": true, "exported": true},
+		Meta: map[string]any{"component": true, "exported": true, "ui_component": "svelte", "type_flavor": "component"},
 	})
 	result.Edges = append(result.Edges, &graph.Edge{
 		From: fileNode.ID, To: componentID, Kind: graph.EdgeDefines, FilePath: filePath, Line: 1,

@@ -53,7 +53,7 @@ func (e *RazorExtractor) Extract(filePath string, src []byte) (*parser.Extractio
 	componentID := ""
 	if name := razorComponentName(filePath); name != "" {
 		componentID = filePath + "::" + name
-		compMeta := map[string]any{"component": true}
+		compMeta := map[string]any{"component": true, "ui_component": "razor", "type_flavor": "component"}
 		// The component's Blazor namespace is its directory path dotted
 		// (`App/Widgets/Counter.razor` → `App.Widgets`), so an `@using`
 		// import of that namespace can bind a `<Counter/>` reference.

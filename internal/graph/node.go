@@ -265,6 +265,14 @@ const (
 	KindContractBridge NodeKind = "contract_bridge"
 )
 
+// IsValidNodeKind reports whether s names a known node kind. Used by
+// the search layer to tell a real node-kind clause apart from a
+// flavor value that only looks like a kind (e.g. codegraph's
+// `kind:class`).
+func IsValidNodeKind(s string) bool {
+	return validNodeKinds[NodeKind(s)]
+}
+
 var validNodeKinds = map[NodeKind]bool{
 	KindFile: true, KindPackage: true, KindFunction: true,
 	KindMethod: true, KindType: true, KindInterface: true,
@@ -387,6 +395,16 @@ func (n *Node) Brief() map[string]any {
 	}
 	if v, ok := n.Meta["is_test_file"].(bool); ok && v {
 		b["is_test_file"] = true
+	}
+	// Structural flavor + UI-component framework — stamped by the
+	// language extractors. Surfacing them on the listing row lets an
+	// agent filter / triage by shape (struct vs class, react vs svelte)
+	// without a follow-up call.
+	if v, ok := n.Meta["type_flavor"].(string); ok && v != "" {
+		b["type_flavor"] = v
+	}
+	if v, ok := n.Meta["ui_component"].(string); ok && v != "" {
+		b["ui_component"] = v
 	}
 	// A prose-section node carries no signature -- surface a short
 	// snippet of its body text so a docs search result is

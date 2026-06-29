@@ -78,6 +78,8 @@ type toonNodeRow struct {
 	IsTest      bool   `toon:"is_test"`
 	TestRole    string `toon:"test_role"`
 	TestRunner  string `toon:"test_runner,omitempty"`
+	TypeFlavor  string `toon:"type_flavor,omitempty"`
+	UIComponent string `toon:"ui_component,omitempty"`
 }
 
 // toonEdgeRow is a TOON-optimized flat representation of a graph edge.
@@ -128,6 +130,8 @@ func nodesToTOONRows(nodes []*graph.Node) []toonNodeRow {
 		isTest, _ := n.Meta["is_test"].(bool)
 		testRole, _ := n.Meta["test_role"].(string)
 		testRunner, _ := n.Meta["test_runner"].(string)
+		typeFlavor, _ := n.Meta["type_flavor"].(string)
+		uiComponent, _ := n.Meta["ui_component"].(string)
 		encID, encName := graph.EnclosingFromID(n.ID, n.Kind)
 		rows = append(rows, toonNodeRow{
 			ID:          n.ID,
@@ -140,6 +144,8 @@ func nodesToTOONRows(nodes []*graph.Node) []toonNodeRow {
 			IsTest:      isTest,
 			TestRole:    testRole,
 			TestRunner:  testRunner,
+			TypeFlavor:  typeFlavor,
+			UIComponent: uiComponent,
 		})
 	}
 	return rows
@@ -822,7 +828,7 @@ func (s *Server) registerCoreTools() {
 	s.addTool(
 		mcp.NewTool("search_symbols",
 			mcp.WithDescription("Use instead of Grep to find symbols across the whole codebase. Supports natural language queries with camelCase-aware tokenization and BM25 ranking — 'validate token auth' finds validateToken, AuthMiddleware, parseJWT."),
-			mcp.WithString("query", mcp.Required(), mcp.Description("Search query — symbol name, concept, or keywords. Also accepts inline field-qualified clauses: `kind:function lang:go path:internal/ repo:gortex project:web validateToken` — recognised fields are kind, lang (aliases ts/js/py/rs/…), path, repo, project; everything else is free text. A field-qualified query that matches nothing retries on the free text alone (response carries `filters_relaxed: true`).")),
+			mcp.WithString("query", mcp.Required(), mcp.Description("Search query — symbol name, concept, or keywords. Also accepts inline field-qualified clauses: `kind:function lang:go path:internal/ repo:gortex project:web validateToken` — recognised fields are kind, flavor, lang (aliases ts/js/py/rs/…), path, repo, project; everything else is free text. A field-qualified query that matches nothing retries on the free text alone (response carries `filters_relaxed: true`).")),
 			mcp.WithNumber("limit", mcp.Description("Max results (default: 20)")),
 			mcp.WithString("cursor", mcp.Description("Opaque pagination cursor returned in `next_cursor` from a previous call. Pass it back to fetch the next page. Omit for the first page.")),
 			mcp.WithBoolean("paginate", mcp.Description("When true, the server caps each page at the project default budget and returns `next_cursor` for any tail. Implies the caller will follow `next_cursor` to walk the rest. Default false (full result inline; transport spills to disk if oversized).")),
@@ -836,6 +842,7 @@ func (s *Server) registerCoreTools() {
 			mcp.WithString("scope", mcp.Description("Name of a saved scope (see save_scope) — restricts results to that scope's repositories. Ignored when an explicit repo / project / ref is also given.")),
 			mcp.WithString("path", mcp.Description("Restrict results to one or more sub-paths (comma-separated) -- the monorepo-service slice (e.g. \"services/billing,libs/auth\"). Anchored, slash-segment-boundary prefixes relative to the repo root: \"services/billing\" matches services/billing/x.go, not other/services/billingX. Unions with any inline path: clause and a scope's saved paths.")),
 			mcp.WithString("kind", mcp.Description("Filter to one or more node kinds (comma-separated). Standard kinds: function, method, type, interface, variable, constant, field, file, package, import, contract. Coverage kinds: param, closure, enum_member, generic_param, module, table, column, config_key, flag, event, migration, fixture, todo, team, license, release, doc (Markdown prose section).")),
+			mcp.WithString("flavor", mcp.Description("Filter to one or more structural flavors (comma-separated, union). Values: class, struct, enum, interface, trait, protocol, object, record, type_alias, newtype, message, service, table, view, module, signature, type_def, instance, hook, play — matched against Meta[\"type_flavor\"] case-insensitively. The special value `component` spans both keys: it matches any UI component node (React / Vue / Svelte / SwiftUI / …). ANDs with kind:.")),
 			mcp.WithString("assist", mcp.Description("LLM assist mode: \"auto\" (default — engages on natural-language queries, skips identifier lookups), \"on\" (force engage), \"off\" (bypass), \"deep\" (on + a body-grounded verification pass that reads candidate code and HONESTLY drops irrelevant matches — slower, may return empty results when nothing genuinely matches). Requires an LLM provider configured via `llm.provider` (local / anthropic / openai / azure / ollama / claudecli / codex / copilot / cursor / opencode / gemini / bedrock / deepseek, or a registered custom provider); behaves as \"off\" when none is available.")),
 			mcp.WithBoolean("debug", mcp.Description("When true, attach a `rerank` block to the response carrying per-candidate scores and per-signal contributions from the 11-signal rerank pipeline (bm25, semantic, fan_in, hits, fan_out, churn, community, minhash, api_signature, type_signature, recency, feedback) plus the active per-signal weight map. Off by default; enable to inspect ranking decisions or tune `.gortex.yaml::search::weights`.")),
 			mcp.WithString("query_class", mcp.Description("Advisory hint that tunes the bm25-vs-semantic balance of the rerank: \"auto\" (default — detect from query shape), \"symbol\" (identifier / API lookup — BM25-heavy), \"concept\" (natural-language description — balanced), \"path\" (file-path query — most BM25-heavy), \"signature\" (type/function-signature fragment — BM25-leaning), \"keyword_soup\" (a degenerate boolean OR-list \u2014 suppresses LLM expansion and splits the soup into per-disjunct BM25 fetches; a `query_advice` nudge rides on the response). The class actually used is echoed back as `query_class` in the response.")),
@@ -986,6 +993,7 @@ func (s *Server) registerCoreTools() {
 			mcp.WithString("group_by", mcp.Description("Set to \"file\" to bucket the usages by the file each reference originates in -- each group carries the per-file use count and the enclosing symbol of every reference. Omit for the default flat result.")),
 			mcp.WithString("context", mcp.Description("Filter usages by their reference context — the role the symbol plays at each site: parameter_type, return_type, field, value, type, attribute, generic_arg, or call. Every returned usage also carries its classified context. Omit for all usages.")),
 			mcp.WithString("return_usage", mcp.Description("Filter call-site usages by how they consume the callee's return value: discarded, assigned, partially_ignored, returned, goroutine, deferred, argument, or condition. Every returned call usage also carries its classification when the extractor recorded one. Use before changing a function's return signature to see who actually uses the return. Omit for all usages.")),
+			mcp.WithString("flavor", mcp.Description("Filter usages by the structural flavor of where they originate (comma-separated, union). A type flavor (class, struct, enum, interface, trait, …) keeps usages whose FROM site sits inside an enclosing type of that flavor — \"usages from inside a struct\". The special value `component` keeps usages from inside a UI component (React / Vue / SwiftUI / …). Each returned usage carries the resolved from_type_flavor / from_ui_component.")),
 		),
 		s.handleFindUsages,
 	)
@@ -1444,6 +1452,24 @@ func (s *Server) handleSearchSymbols(ctx context.Context, req mcp.CallToolReques
 	if kindArg == "" {
 		kindArg = fq.Kind
 	}
+	flavorArg := strings.TrimSpace(req.GetString("flavor", ""))
+	if flavorArg == "" {
+		flavorArg = fq.Flavor
+	}
+	// codegraph-compat shim: a kind: value that is actually a structural
+	// flavor (class/struct/enum/component) routes to the flavor filter so
+	// `kind:class` doesn't silently return an empty result set.
+	if kindArg != "" {
+		var movedFlavors string
+		kindArg, movedFlavors = reclassifyKindFlavor(kindArg)
+		if movedFlavors != "" {
+			if flavorArg == "" {
+				flavorArg = movedFlavors
+			} else {
+				flavorArg += "," + movedFlavors
+			}
+		}
+	}
 	pathFilter := s.resolvePathFilter(req, fq)
 
 	// applyAllPostFilters runs the full post-search filter sequence
@@ -1460,6 +1486,10 @@ func (s *Server) handleSearchSymbols(ctx context.Context, req mcp.CallToolReques
 		}
 		// lang: / path: / repo: clauses from the field-qualified syntax.
 		cands = applyFieldFilters(cands, fq)
+		// flavor: clause / flavor param / reclassified kind: value.
+		if flavorArg != "" {
+			cands = applyFlavorFilter(cands, flavorArg)
+		}
 		// Sub-path scoping: anchored, slash-segment prefix narrowing
 		// below the repository grain. Distinct from the loose `path:`
 		// substring match in applyFieldFilters -- this is a
@@ -1477,7 +1507,7 @@ func (s *Server) handleSearchSymbols(ctx context.Context, req mcp.CallToolReques
 	// caller's repo / project scope), so an over-narrow or typo'd
 	// clause degrades to a useful result set instead of an empty one.
 	filtersRelaxed := false
-	if len(nodes) == 0 && q != "" && (kindArg != "" || fq.hasFieldFilters()) {
+	if len(nodes) == 0 && q != "" && (kindArg != "" || flavorArg != "" || fq.hasFieldFilters()) {
 		relaxed := filterNodes(s.engineFor(ctx).SearchSymbolsScoped(q, fetchLimit, scope), allowed)
 		if len(relaxed) > 0 {
 			nodes = relaxed
@@ -2262,6 +2292,11 @@ func (s *Server) handleFindUsages(ctx context.Context, req mcp.CallToolRequest) 
 	// call usage and optionally filter to one consumption shape —
 	// `find_usages return_usage:"discarded"`.
 	annotateAndFilterReturnUsage(sg, strings.ToLower(strings.TrimSpace(req.GetString("return_usage", ""))))
+	// flavor: keeps only usages whose FROM site resolves to a matching
+	// structural flavor (the enclosing owner type for a type flavor; the
+	// FROM node's own ui_component for `component`). Orphan nodes left
+	// with no incident edge are pruned.
+	s.filterUsagesByFlavor(sg, id, strings.TrimSpace(req.GetString("flavor", "")))
 	if len(sg.Edges) == 0 {
 		sg.Caveat = graph.CaveatForZeroEdge(s.graph, id)
 	}
@@ -2273,9 +2308,47 @@ func (s *Server) handleFindUsages(ctx context.Context, req mcp.CallToolRequest) 
 		return s.respondJSONOrTOON(ctx, req, groupUsagesByFile(sg))
 	}
 	if s.isGCX(ctx, req) {
-		return s.gcxResponseWithBudget(req)(encodeFindUsages(sg))
+		return s.gcxResponseWithBudget(req)(encodeFindUsages(sg, s.graph))
+	}
+	// Plain JSON gets curated usage rows that promote the resolved
+	// from_type_flavor / from_ui_component to top-level node fields, so
+	// they survive the meta-stripping degrade step. TOON / compact /
+	// diagram formats go through the shared subgraph renderer.
+	format := req.GetString("format", "")
+	if !s.isTOON(ctx, req) && !isCompact(req) && format != "mermaid" && format != "dot" {
+		sg.Nodes = s.withAbsPaths(sg.Nodes)
+		return s.respondJSONOrTOON(ctx, req, newUsageResponse(sg, s.graph))
 	}
 	return s.returnSubGraph(ctx, req, sg)
+}
+
+// usageNode wraps a find_usages node with the resolved from_* fields
+// promoted to top-level JSON (not nested under meta, so they survive
+// the meta-stripping degrade step). It is an mcp-package projection —
+// it never adds a field to the graph wire contract.
+type usageNode struct {
+	*graph.Node
+	FromTypeFlavor  string `json:"from_type_flavor,omitempty"`
+	FromUIComponent string `json:"from_ui_component,omitempty"`
+}
+
+// usageResponse is the curated find_usages JSON payload. It embeds the
+// SubGraph (so caveat / totals / edges marshal unchanged) and shadows
+// its Nodes with the from_*-enriched projection.
+type usageResponse struct {
+	*query.SubGraph
+	Nodes []usageNode `json:"nodes"`
+}
+
+// newUsageResponse resolves the from_* fields for each node (pure read
+// — never mutates the graph) and wraps the SubGraph for JSON output.
+func newUsageResponse(sg *query.SubGraph, g graph.Store) *usageResponse {
+	wrapped := make([]usageNode, 0, len(sg.Nodes))
+	for _, n := range sg.Nodes {
+		tf, uc := usageFromFlavor(g, n.ID, n)
+		wrapped = append(wrapped, usageNode{Node: n, FromTypeFlavor: tf, FromUIComponent: uc})
+	}
+	return &usageResponse{SubGraph: sg, Nodes: wrapped}
 }
 
 // annotateAndFilterUsageContext stamps each usage edge with its
@@ -2332,6 +2405,73 @@ func annotateAndFilterReturnUsage(sg *query.SubGraph, usageFilter string) {
 		}
 	}
 	sg.Edges = kept
+}
+
+// usageFromFlavor resolves the structural flavor and UI-component
+// framework attributable to a usage edge's FROM site, for the
+// find_usages flavor filter and the from_* surfacing. The component
+// marker is read off the FROM node itself (React function components /
+// Composables are KindFunction); the type flavor is read off the FROM
+// node's enclosing owner type, because callers are functions / methods
+// that never carry type_flavor themselves. Nil-safe: a FROM node absent
+// from both the supplied lookup and the graph yields empty strings.
+func usageFromFlavor(g graph.Store, fromID string, fromNode *graph.Node) (typeFlavor, uiComponent string) {
+	if fromNode == nil && g != nil {
+		fromNode = g.GetNode(fromID)
+	}
+	if fromNode == nil {
+		return "", ""
+	}
+	if fromNode.Meta != nil {
+		if uc, _ := fromNode.Meta["ui_component"].(string); uc != "" {
+			uiComponent = uc
+		}
+	}
+	if ownerID, _ := graph.EnclosingFromID(fromID, fromNode.Kind); ownerID != "" && g != nil {
+		if owner := g.GetNode(ownerID); owner != nil && owner.Meta != nil {
+			if tf, _ := owner.Meta["type_flavor"].(string); tf != "" {
+				typeFlavor = tf
+			}
+		}
+	}
+	return typeFlavor, uiComponent
+}
+
+// filterUsagesByFlavor drops usage edges whose FROM site does not
+// resolve to a matching structural flavor, then prunes nodes left with
+// no incident edge (the queried target is always kept). An empty flavor
+// argument is a no-op.
+func (s *Server) filterUsagesByFlavor(sg *query.SubGraph, targetID, flavorArg string) {
+	flavors := splitFlavors(flavorArg)
+	if sg == nil || len(flavors) == 0 {
+		return
+	}
+	nodeByID := make(map[string]*graph.Node, len(sg.Nodes))
+	for _, n := range sg.Nodes {
+		nodeByID[n.ID] = n
+	}
+	kept := sg.Edges[:0]
+	for _, e := range sg.Edges {
+		tf, uc := usageFromFlavor(s.graph, e.From, nodeByID[e.From])
+		if flavorMatchesResolved(tf, uc, flavors) {
+			kept = append(kept, e)
+		}
+	}
+	sg.Edges = kept
+	// Prune orphan nodes: keep the queried target plus every node still
+	// incident to a surviving edge.
+	referenced := map[string]struct{}{targetID: {}}
+	for _, e := range sg.Edges {
+		referenced[e.From] = struct{}{}
+		referenced[e.To] = struct{}{}
+	}
+	keptNodes := sg.Nodes[:0]
+	for _, n := range sg.Nodes {
+		if _, ok := referenced[n.ID]; ok {
+			keptNodes = append(keptNodes, n)
+		}
+	}
+	sg.Nodes = keptNodes
 }
 
 // usageFileGroup is one file's worth of references from a

@@ -47,7 +47,7 @@ func emitFabricComponentNodes(src []byte, filePath, language, fileID string, res
 		ID: id, Kind: graph.KindType, Name: component,
 		FilePath: filePath, StartLine: line, EndLine: line,
 		Language: language,
-		Meta:     map[string]any{"fabric_component": component},
+		Meta:     map[string]any{"fabric_component": component, "type_flavor": "component", "ui_component": "react"},
 	}
 	if len(events) > 0 {
 		node.Meta["fabric_events"] = events

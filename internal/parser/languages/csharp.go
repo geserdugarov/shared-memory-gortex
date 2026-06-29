@@ -441,6 +441,19 @@ func (e *CSharpExtractor) emitContainer(m parser.QueryResult, kind string, nodeK
 	if kind == "struct" {
 		meta["value_type"] = true
 	}
+	// Structural flavor, keyed off the capture that funnelled in here.
+	switch kind {
+	case "iface":
+		meta["type_flavor"] = "interface"
+	case "struct":
+		meta["type_flavor"] = "struct"
+	case "enum":
+		meta["type_flavor"] = "enum"
+	case "record":
+		meta["type_flavor"] = "record"
+	default:
+		meta["type_flavor"] = "class"
+	}
 	// Namespace scope so a type in `namespace App.Core` is attributable
 	// without re-deriving its enclosing namespace from source.
 	if ns := csharpEnclosingNamespace(def.Node, src); ns != "" {
@@ -580,7 +593,7 @@ func (e *CSharpExtractor) emitAnonymousType(m parser.QueryResult, filePath, file
 		ID: id, Kind: graph.KindType, Name: name,
 		FilePath: filePath, StartLine: line, EndLine: def.EndLine + 1,
 		Language: "csharp",
-		Meta:     map[string]any{"anonymous": true},
+		Meta:     map[string]any{"anonymous": true, "type_flavor": "anonymous_class"},
 	})
 	result.Edges = append(result.Edges,
 		&graph.Edge{From: fileID, To: id, Kind: graph.EdgeDefines, FilePath: filePath, Line: line},

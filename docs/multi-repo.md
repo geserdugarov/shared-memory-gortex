@@ -137,7 +137,6 @@ Other query tools (`get_symbol`, `get_file_summary`, `smart_context`, etc.) keep
 - **Defaults ON** (enabled out of the box — this is the new behavior after upgrade)
 - **Narrow-only invariant:** the intent defaults only ever *narrow* within the session workspace (the hard isolation boundary); they never widen past it, and an explicit `repo` / `project` / `workspace` / `scope` arg always overrides the default
 - Opt out: set `scope.intent_defaults: false` in `.gortex.yaml`, or set env var `GORTEX_SCOPE_INTENT_DEFAULTS=0`
-- Design rationale: see [the intent-based scoping proposal](proposals/scope-intent-defaults.md)
 
 **⚠ Upgrade note (behavior change):** When upgrading to this version:
 
